@@ -29,6 +29,23 @@ Server ghép cặp theo **token**: lệnh từ Claude Code của ai điều khi�
 
 ### 1. Cài extension vào Chrome
 
+**Cách A — từ file đóng gói (khuyên dùng cho team):** admin build một lần:
+
+```bash
+npm install && npm run build   # tạo dist/extension.zip + dist/extension.crx
+```
+
+rồi phân phối cho team (gửi file, hoặc để server VPS phục vụ tại `https://<domain>/extension.zip` — xem phần VPS). Thành viên:
+
+1. Tải `extension.zip` về và **giải nén** ra một thư mục cố định (đừng xóa sau khi cài)
+2. Mở `chrome://extensions` → bật **Developer mode** → **Load unpacked** → chọn thư mục vừa giải nén
+
+File `.crx` (đã ký, CRX3): trên **Linux** kéo thả thẳng vào `chrome://extensions` là cài được. Trên **Windows/macOS** Chrome chặn `.crx` ngoài Web Store — extension sẽ bị vô hiệu hóa sau khi cài — trừ khi máy được quản lý bằng enterprise policy (`ExtensionInstallAllowlist` với extension ID in ra lúc build, `ExtensionInstallForcelist` nếu muốn tự cài). Vì vậy với team thường, dùng file zip + Load unpacked là thực tế nhất; muốn hết hẳn cảnh Developer mode thì publish lên Chrome Web Store dạng **unlisted** (chỉ ai có link mới thấy).
+
+Lưu ý cho admin: `key.pem` sinh ra ở lần build đầu (đã gitignore) quyết định **extension ID** — giữ và backup file này để mọi bản build sau giữ nguyên ID.
+
+**Cách B — trực tiếp từ source:**
+
 1. Mở `chrome://extensions`
 2. Bật **Developer mode** (góc phải trên)
 3. Bấm **Load unpacked** → chọn thư mục `extension/` của repo này
@@ -111,6 +128,8 @@ curl https://chrome.example.com/health   # {"ok":true,...}
 ```
 
 Yêu cầu: domain đã trỏ về IP VPS, mở port 80/443. Không muốn Docker thì dùng `deploy/chrome-bridge.service` (systemd) + Caddy/nginx làm TLS proxy — **bắt buộc có HTTPS/WSS**, đừng expose port 8787 trần ra internet.
+
+Sau khi build extension (`npm run build`), server VPS còn phục vụ file cài đặt tại `https://chrome.example.com/extension.zip` và `/extension.crx` (compose đã mount sẵn `dist/`) — thành viên mới chỉ cần một đường link.
 
 ### Trên máy mỗi thành viên — cách nhanh: `/ccchrome connect`
 

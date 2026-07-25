@@ -62,6 +62,7 @@ const serverProc = spawn("node", [join(root, "server", "index.js"), "--http"], {
     CC_CHROME_TOKENS: `${TOKEN_A}=alice,${TOKEN_B}=bob`,
     CC_CHROME_PAIR_SECRET: PAIR_SECRET,
     CC_CHROME_STATE_FILE: stateFile,
+    CC_CHROME_DIST_DIR: join(root, "dist"),
   },
   stdio: ["ignore", "inherit", "inherit"],
 });
@@ -250,6 +251,20 @@ res = await fetch(`http://127.0.0.1:${MCP_PORT}/pair`, {
   headers: { authorization: `Bearer ${TOKEN_A}` },
 });
 check("static token revoke refused", res.status === 400, `status=${res.status}`);
+
+// --- extension package downloads (requires `npm run build` to have run) -----
+
+res = await fetch(`http://127.0.0.1:${MCP_PORT}/extension.zip`);
+if (res.status === 404) {
+  console.log("SKIP  extension download checks (dist/ not built; run 'npm run build')");
+} else {
+  const zipBytes = Buffer.from(await res.arrayBuffer());
+  check("download extension.zip", res.status === 200 && zipBytes.subarray(0, 2).toString() === "PK", `status=${res.status} len=${zipBytes.length}`);
+  check("zip content-type", res.headers.get("content-type") === "application/zip", res.headers.get("content-type"));
+  res = await fetch(`http://127.0.0.1:${MCP_PORT}/extension.crx`);
+  const crxBytes = Buffer.from(await res.arrayBuffer());
+  check("download extension.crx", res.status === 200 && crxBytes.subarray(0, 4).toString() === "Cr24", `status=${res.status} len=${crxBytes.length}`);
+}
 
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 

@@ -1,0 +1,16 @@
+{
+  "name": "cc-chrome-bridge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-extension.mjs",
+    "test:build": "node test/build.test.mjs",
+    "test:stdio": "node test/e2e.mjs",
+    "test:http": "node test/e2e-http.mjs",
+    "test": "node test/build.test.mjs && node test/e2e.mjs && node test/e2e-http.mjs"
+  },
+  "devDependencies": {
+    "adm-zip": "^0.5.16",
+    "crx": "^5.0.1"
+  }
+}

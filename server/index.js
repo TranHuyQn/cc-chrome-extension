@@ -21,6 +21,8 @@ import { WebSocketServer } from "ws";
 import { createServer } from "node:http";
 import { randomUUID, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
 const MODE = process.argv.includes("--http") || process.env.CC_CHROME_MODE === "http" ? "http" : "stdio";
@@ -628,6 +630,24 @@ async function mainHttp() {
       return json(res, 200, { ok: true, version: VERSION, extensionsConnected: [...registry.connections.values()].filter((c) => c.connected).length });
     }
 
+    // --- extension downloads (built by `npm run build` into dist/) ----------
+    // Public like the Web Store would be: the package contains no secrets.
+
+    if (req.method === "GET" && (url.pathname === "/extension.zip" || url.pathname === "/extension.crx")) {
+      const distDir = process.env.CC_CHROME_DIST_DIR || join(dirname(fileURLToPath(import.meta.url)), "..", "dist");
+      const file = join(distDir, url.pathname.slice(1));
+      if (!existsSync(file)) {
+        return json(res, 404, { error: "extension package not built. Run 'npm run build' in the repo and redeploy (dist/ must be available to the server)." });
+      }
+      const body = readFileSync(file);
+      res.writeHead(200, {
+        "content-type": url.pathname.endsWith(".crx") ? "application/x-chrome-extension" : "application/zip",
+        "content-length": body.length,
+        "content-disposition": `attachment; filename="claude-code-chrome-bridge${url.pathname.slice(url.pathname.lastIndexOf("."))}"`,
+      });
+      return res.end(body);
+    }
+
     // --- self-service pairing (used by the /ccchrome slash command) ---------
 
     if (url.pathname === "/pair" && req.method === "POST") {
@@ -756,6 +776,7 @@ async function mainHttp() {
     log(`  Extension:    wss://<domain>/ws?token=<token>  (set in the extension popup)`);
     log(`  Health:       GET /health`);
     log(`  Pairing:      POST /pair, GET /pair/status, DELETE /pair (for /ccchrome connect)`);
+    log(`  Downloads:    GET /extension.zip, GET /extension.crx (if dist/ is built)`);
   });
 }
 
