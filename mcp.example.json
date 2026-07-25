@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "chrome": {
+      "command": "node",
+      "args": ["/absolute/path/to/cc-chrome-extension/server/index.js"],
+      "env": {
+        "CC_CHROME_PORT": "9876"
+      }
+    }
+  }
+}

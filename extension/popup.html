@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      width: 300px;
+      padding: 14px;
+      margin: 0;
+      background: #1a1a1a;
+      color: #eee;
+    }
+    h1 { font-size: 14px; margin: 0 0 10px; }
+    .row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #b3261e; }
+    .dot.connected { background: #188038; }
+    .dot.connecting { background: #e8a100; }
+    #state { font-size: 13px; }
+    #error { font-size: 11px; color: #f28b82; margin-bottom: 10px; word-break: break-word; }
+    label { font-size: 11px; color: #aaa; display: block; margin-bottom: 4px; }
+    input {
+      width: 100%; box-sizing: border-box; padding: 6px;
+      background: #2a2a2a; color: #eee; border: 1px solid #444; border-radius: 4px;
+      font-size: 12px;
+    }
+    button {
+      margin-top: 8px; padding: 6px 12px; border: none; border-radius: 4px;
+      background: #d97757; color: #fff; font-size: 12px; cursor: pointer;
+    }
+    button:hover { background: #c05f3f; }
+    .hint { font-size: 10px; color: #888; margin-top: 10px; line-height: 1.5; }
+    code { background: #2a2a2a; padding: 1px 4px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>Claude Code Chrome Bridge</h1>
+  <div class="row">
+    <div class="dot" id="dot"></div>
+    <span id="state">Đang kiểm tra…</span>
+  </div>
+  <div id="error"></div>
+  <label for="wsUrl">Địa chỉ MCP server (WebSocket)</label>
+  <input id="wsUrl" placeholder="ws://127.0.0.1:9876" />
+  <button id="save">Lưu &amp; kết nối lại</button>
+  <div class="hint">
+    Chạy MCP server trên máy: <code>npx .</code> trong thư mục <code>server/</code>,
+    hoặc thêm vào Claude Code bằng <code>claude mcp add</code> (xem README).
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
