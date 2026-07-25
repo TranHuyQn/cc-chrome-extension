@@ -19,46 +19,111 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { WebSocketServer } from "ws";
 import { createServer } from "node:http";
-import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { randomUUID, randomBytes, timingSafeEqual } from "node:crypto";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { z } from "zod";
 
 const MODE = process.argv.includes("--http") || process.env.CC_CHROME_MODE === "http" ? "http" : "stdio";
 const PORT = Number(process.env.CC_CHROME_PORT || (MODE === "http" ? 8787 : 9876));
 const HOST = process.env.CC_CHROME_HOST || (MODE === "http" ? "0.0.0.0" : "127.0.0.1");
 const REQUEST_TIMEOUT_MS = Number(process.env.CC_CHROME_TIMEOUT_MS || 45000);
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 
 const log = (...args) => console.error("[claude-code-chrome-mcp]", ...args);
 
 // ---------------------------------------------------------------------------
 // Tokens (http mode only)
 // ---------------------------------------------------------------------------
-// CC_CHROME_TOKENS:      "token1=alice,token2=bob"  (name optional: "token1,token2")
-// CC_CHROME_TOKENS_FILE: path to a JSON file { "token1": "alice", ... }
+// Static tokens (configured by the admin):
+//   CC_CHROME_TOKENS:      "token1=alice,token2=bob"  (name optional: "token1,token2")
+//   CC_CHROME_TOKENS_FILE: path to a JSON file { "token1": "alice", ... }
+// Self-service pairing (used by the /ccchrome slash command):
+//   CC_CHROME_PAIR_SECRET: team secret; enables POST /pair which generates a
+//                          token on demand and persists it to the state file.
+//   CC_CHROME_STATE_FILE:  where dynamic tokens are persisted
+//                          (default ./ccchrome-tokens.json)
 
-function loadTokens() {
-  const tokens = new Map();
-  if (process.env.CC_CHROME_TOKENS_FILE) {
-    const parsed = JSON.parse(readFileSync(process.env.CC_CHROME_TOKENS_FILE, "utf8"));
-    for (const [token, name] of Object.entries(parsed)) tokens.set(token, String(name));
-  }
-  if (process.env.CC_CHROME_TOKENS) {
-    for (const entry of process.env.CC_CHROME_TOKENS.split(",")) {
-      const trimmed = entry.trim();
-      if (!trimmed) continue;
-      const eq = trimmed.indexOf("=");
-      if (eq > 0) tokens.set(trimmed.slice(0, eq), trimmed.slice(eq + 1));
-      else tokens.set(trimmed, trimmed.slice(0, 6));
+class TokenStore {
+  constructor() {
+    this.static = new Map();
+    this.dynamic = new Map();
+    this.pairSecret = process.env.CC_CHROME_PAIR_SECRET || null;
+    this.stateFile = process.env.CC_CHROME_STATE_FILE || "./ccchrome-tokens.json";
+
+    if (process.env.CC_CHROME_TOKENS_FILE) {
+      const parsed = JSON.parse(readFileSync(process.env.CC_CHROME_TOKENS_FILE, "utf8"));
+      for (const [token, name] of Object.entries(parsed)) this.static.set(token, String(name));
     }
-  }
-  for (const token of tokens.keys()) {
-    if (token.length < 8) {
-      log(`FATAL: token '${token.slice(0, 2)}...' is shorter than 8 chars. Generate strong tokens, e.g.: openssl rand -hex 16`);
+    if (process.env.CC_CHROME_TOKENS) {
+      for (const entry of process.env.CC_CHROME_TOKENS.split(",")) {
+        const trimmed = entry.trim();
+        if (!trimmed) continue;
+        const eq = trimmed.indexOf("=");
+        if (eq > 0) this.static.set(trimmed.slice(0, eq), trimmed.slice(eq + 1));
+        else this.static.set(trimmed, trimmed.slice(0, 6));
+      }
+    }
+    for (const token of this.static.keys()) {
+      if (token.length < 8) {
+        log(`FATAL: token '${token.slice(0, 2)}...' is shorter than 8 chars. Generate strong tokens, e.g.: openssl rand -hex 16`);
+        process.exit(1);
+      }
+    }
+    if (this.pairSecret && this.pairSecret.length < 12) {
+      log("FATAL: CC_CHROME_PAIR_SECRET must be at least 12 chars. Generate one with: openssl rand -hex 16");
       process.exit(1);
     }
+    if (this.pairSecret && existsSync(this.stateFile)) {
+      try {
+        const parsed = JSON.parse(readFileSync(this.stateFile, "utf8"));
+        for (const [token, name] of Object.entries(parsed)) this.dynamic.set(token, String(name));
+        if (this.dynamic.size) log(`Restored ${this.dynamic.size} paired token(s) from ${this.stateFile}`);
+      } catch (err) {
+        log(`WARNING: could not read state file ${this.stateFile}: ${err.message}`);
+      }
+    }
   }
-  return tokens;
+
+  get size() {
+    return this.static.size + this.dynamic.size;
+  }
+
+  has(token) {
+    return this.static.has(token) || this.dynamic.has(token);
+  }
+
+  get(token) {
+    return this.static.get(token) ?? this.dynamic.get(token);
+  }
+
+  names() {
+    return [...this.static.values(), ...this.dynamic.values()];
+  }
+
+  persist() {
+    try {
+      writeFileSync(this.stateFile, JSON.stringify(Object.fromEntries(this.dynamic), null, 2));
+    } catch (err) {
+      log(`WARNING: could not persist tokens to ${this.stateFile}: ${err.message}`);
+    }
+  }
+
+  pair(name) {
+    const token = randomBytes(16).toString("hex");
+    this.dynamic.set(token, name);
+    this.persist();
+    log(`Paired new token for '${name}' (${this.dynamic.size} dynamic token(s) total)`);
+    return token;
+  }
+
+  revoke(token) {
+    if (this.static.has(token)) {
+      throw new Error("This token is configured statically (CC_CHROME_TOKENS); remove it from the server config instead.");
+    }
+    const existed = this.dynamic.delete(token);
+    if (existed) this.persist();
+    return existed;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -502,21 +567,46 @@ async function mainStdio() {
 // ---------------------------------------------------------------------------
 
 async function mainHttp() {
-  const tokens = loadTokens();
-  if (tokens.size === 0) {
-    log("FATAL: http mode requires auth tokens. Set CC_CHROME_TOKENS=\"<token>=<name>,...\" or CC_CHROME_TOKENS_FILE=/path/tokens.json");
-    log("Generate a strong token with: openssl rand -hex 16");
+  const tokens = new TokenStore();
+  if (tokens.size === 0 && !tokens.pairSecret) {
+    log("FATAL: http mode requires auth. Set CC_CHROME_TOKENS=\"<token>=<name>,...\" (static tokens),");
+    log("and/or CC_CHROME_PAIR_SECRET=<secret> to enable self-service pairing via POST /pair (/ccchrome connect).");
+    log("Generate strong values with: openssl rand -hex 16");
     process.exit(1);
   }
-  log(`Loaded ${tokens.size} token(s): ${[...tokens.values()].join(", ")}`);
+  if (tokens.size) log(`Loaded ${tokens.size} token(s): ${tokens.names().join(", ")}`);
+  log(tokens.pairSecret
+    ? `Self-service pairing ENABLED (POST /pair). Dynamic tokens persist in ${tokens.stateFile}`
+    : "Self-service pairing disabled (set CC_CHROME_PAIR_SECRET to enable /ccchrome connect)");
 
   const sessions = new Map(); // mcp-session-id -> { transport, token }
 
-  const authToken = (req, url) => {
+  const bearerOf = (req) => {
     const header = req.headers.authorization || "";
-    const bearer = header.startsWith("Bearer ") ? header.slice(7).trim() : null;
-    const token = bearer || url.searchParams.get("token");
+    return header.startsWith("Bearer ") ? header.slice(7).trim() : null;
+  };
+
+  const authToken = (req, url) => {
+    const token = bearerOf(req) || url.searchParams.get("token");
     return token && tokens.has(token) ? token : null;
+  };
+
+  const isPairSecret = (value) => {
+    if (!tokens.pairSecret || !value) return false;
+    const a = Buffer.from(value);
+    const b = Buffer.from(tokens.pairSecret);
+    return a.length === b.length && timingSafeEqual(a, b);
+  };
+
+  // Public URLs as seen by clients (honors reverse-proxy headers).
+  const publicUrls = (req, token) => {
+    const proto = (req.headers["x-forwarded-proto"] || "http").split(",")[0].trim();
+    const host = req.headers["x-forwarded-host"] || req.headers.host || `localhost:${PORT}`;
+    const wsProto = proto === "https" ? "wss" : "ws";
+    return {
+      mcpUrl: `${proto}://${host}/mcp`,
+      wsUrl: `${wsProto}://${host}/ws?token=${token}`,
+    };
   };
 
   const json = (res, code, body) => {
@@ -537,6 +627,47 @@ async function mainHttp() {
     if (url.pathname === "/health") {
       return json(res, 200, { ok: true, version: VERSION, extensionsConnected: [...registry.connections.values()].filter((c) => c.connected).length });
     }
+
+    // --- self-service pairing (used by the /ccchrome slash command) ---------
+
+    if (url.pathname === "/pair" && req.method === "POST") {
+      if (!tokens.pairSecret) return json(res, 404, { error: "pairing disabled on this server (CC_CHROME_PAIR_SECRET not set)" });
+      if (!isPairSecret(bearerOf(req))) return json(res, 401, { error: "bad pairing secret. Send 'Authorization: Bearer <CC_CHROME_PAIR_SECRET>'." });
+      let body = {};
+      try {
+        body = (await readBody(req)) || {};
+      } catch {
+        return json(res, 400, { error: "invalid JSON body" });
+      }
+      const name = String(body.name || "").trim().slice(0, 40) || `user-${randomBytes(2).toString("hex")}`;
+      const token = tokens.pair(name);
+      return json(res, 200, { token, name, ...publicUrls(req, token) });
+    }
+
+    if (url.pathname === "/pair/status" && req.method === "GET") {
+      const token = authToken(req, url);
+      if (!token) return json(res, 401, { error: "unauthorized" });
+      return json(res, 200, {
+        name: tokens.get(token),
+        extensionConnected: !!registry.get(token),
+        ...publicUrls(req, token),
+      });
+    }
+
+    if (url.pathname === "/pair" && req.method === "DELETE") {
+      const token = authToken(req, url);
+      if (!token) return json(res, 401, { error: "unauthorized" });
+      try {
+        const conn = registry.get(token);
+        if (conn) try { conn.socket.close(4001, "token revoked"); } catch {}
+        tokens.revoke(token);
+        return json(res, 200, { revoked: true });
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+
+    // --- MCP endpoint --------------------------------------------------------
 
     if (url.pathname !== "/mcp") {
       return json(res, 404, { error: "not found" });
@@ -624,6 +755,7 @@ async function mainHttp() {
     log(`  Claude Code:  claude mcp add --transport http chrome https://<domain>/mcp --header "Authorization: Bearer <token>"`);
     log(`  Extension:    wss://<domain>/ws?token=<token>  (set in the extension popup)`);
     log(`  Health:       GET /health`);
+    log(`  Pairing:      POST /pair, GET /pair/status, DELETE /pair (for /ccchrome connect)`);
   });
 }
 

@@ -123,25 +123,33 @@ chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
 connect();
 
+function forceReconnect() {
+  if (ws) try { ws.close(); } catch {}
+  ws = null;
+  reconnectDelay = RECONNECT_MIN_MS;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  connect();
+}
+
+// Reconnect whenever the configured URL changes, no matter who changed it
+// (popup, sync, or an automation writing chrome.storage directly). Messages
+// sent from the service worker to itself are NOT delivered, so this listener
+// is the reliable trigger.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.wsUrl) forceReconnect();
+});
+
 // Popup communication.
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "getStatus") {
     sendResponse(status);
   } else if (msg?.type === "reconnect") {
-    if (ws) try { ws.close(); } catch {}
-    ws = null;
-    reconnectDelay = RECONNECT_MIN_MS;
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-    connect();
+    forceReconnect();
     sendResponse({ ok: true });
   } else if (msg?.type === "setWsUrl") {
-    chrome.storage.local.set({ wsUrl: msg.wsUrl }).then(() => {
-      if (ws) try { ws.close(); } catch {}
-      ws = null;
-      connect();
-      sendResponse({ ok: true });
-    });
+    // storage.onChanged above triggers the actual reconnect.
+    chrome.storage.local.set({ wsUrl: msg.wsUrl }).then(() => sendResponse({ ok: true }));
     return true;
   }
 });

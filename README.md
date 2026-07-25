@@ -112,7 +112,29 @@ curl https://chrome.example.com/health   # {"ok":true,...}
 
 Yêu cầu: domain đã trỏ về IP VPS, mở port 80/443. Không muốn Docker thì dùng `deploy/chrome-bridge.service` (systemd) + Caddy/nginx làm TLS proxy — **bắt buộc có HTTPS/WSS**, đừng expose port 8787 trần ra internet.
 
-### Trên máy mỗi thành viên
+### Trên máy mỗi thành viên — cách nhanh: `/ccchrome connect`
+
+Cài slash command một lần:
+
+```bash
+bash scripts/install-command.sh   # copy .claude/commands/ccchrome.md vào ~/.claude/commands/
+```
+
+Rồi trong Claude Code:
+
+```
+/ccchrome connect https://chrome.example.com
+```
+
+Lệnh sẽ hỏi pairing secret (admin cấp — chính là `CC_CHROME_PAIR_SECRET` trên server), sau đó **tự động**: sinh token riêng qua `POST /pair`, chạy `claude mcp add` với token đó, in URL `wss://.../ws?token=...` để dán vào popup extension, và chờ đến khi extension kết nối thành công. Các subcommand khác:
+
+- `/ccchrome status` — kiểm tra server + extension đã nối chưa
+- `/ccchrome disconnect` — thu hồi token trên server và gỡ cấu hình MCP
+- `/ccchrome local` — cấu hình chạy local không cần VPS
+
+Lưu ý: cần bật pairing trên server bằng `CC_CHROME_PAIR_SECRET` (xem `.env` ở trên). Token sinh động được lưu bền vững trong `CC_CHROME_STATE_FILE` nên restart server không mất.
+
+### Trên máy mỗi thành viên — cách thủ công
 
 1. Cài extension như hướng dẫn ở trên (Load unpacked)
 2. Bấm icon extension → đổi URL thành `wss://chrome.example.com/ws?token=<token-của-mình>` → **Lưu & kết nối lại** (badge chuyển `on` xanh)
@@ -128,8 +150,9 @@ Một người mở nhiều phiên Claude Code cùng lúc vẫn ổn — tất c
 
 ### Quản lý token
 
-- Thêm/xóa thành viên: sửa `CC_CHROME_TOKENS` trong `.env` rồi `docker compose up -d` (restart server).
-- Token dài tối thiểu 8 ký tự (server từ chối token yếu); nên dùng `openssl rand -hex 16`.
+- **Tự phục vụ**: đặt `CC_CHROME_PAIR_SECRET` trên server → thành viên tự lấy token bằng `/ccchrome connect`; thu hồi bằng `/ccchrome disconnect` (hoặc `DELETE /pair`).
+- **Thủ công**: sửa `CC_CHROME_TOKENS` trong `.env` rồi `docker compose up -d` (restart server).
+- Token dài tối thiểu 8 ký tự, pairing secret tối thiểu 12 (server từ chối giá trị yếu); nên dùng `openssl rand -hex 16`.
 - Có thể dùng file thay cho biến môi trường: `CC_CHROME_TOKENS_FILE=/path/tokens.json` với nội dung `{"<token>": "<tên>"}`.
 
 ## Cấu hình
@@ -139,8 +162,10 @@ Một người mở nhiều phiên Claude Code cùng lúc vẫn ổn — tất c
 | `CC_CHROME_MODE` | `stdio` | `http` để chạy chế độ VPS (hoặc thêm cờ `--http`). |
 | `CC_CHROME_PORT` | `9876` (stdio) / `8787` (http) | Port WebSocket (stdio) hoặc port HTTP server (http mode). |
 | `CC_CHROME_HOST` | `127.0.0.1` (stdio) / `0.0.0.0` (http) | Địa chỉ bind. |
-| `CC_CHROME_TOKENS` | — | Bắt buộc ở http mode: `token1=tên1,token2=tên2`. |
+| `CC_CHROME_TOKENS` | — | Token tĩnh ở http mode: `token1=tên1,token2=tên2`. |
 | `CC_CHROME_TOKENS_FILE` | — | Thay thế: file JSON `{"token": "tên"}`. |
+| `CC_CHROME_PAIR_SECRET` | — | Bật pairing tự phục vụ (`POST /pair`, dùng bởi `/ccchrome connect`). Http mode cần ít nhất token tĩnh hoặc pair secret. |
+| `CC_CHROME_STATE_FILE` | `./ccchrome-tokens.json` | Nơi lưu bền vững token sinh động. |
 | `CC_CHROME_TIMEOUT_MS` | `45000` | Timeout mỗi lệnh gửi tới extension. |
 
 Đổi port ở phía extension: bấm icon extension → sửa "Địa chỉ MCP server" → **Lưu & kết nối lại**.

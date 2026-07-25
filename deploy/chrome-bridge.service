@@ -12,8 +12,12 @@ WorkingDirectory=/opt/cc-chrome-extension/server
 Environment=CC_CHROME_MODE=http
 Environment=CC_CHROME_PORT=8787
 Environment=CC_CHROME_HOST=127.0.0.1
-# Sinh token: openssl rand -hex 16
-Environment=CC_CHROME_TOKENS=DOI_TOKEN_NAY=alice,DOI_TOKEN_KIA=bob
+# Sinh secret/token: openssl rand -hex 16
+# Bật pairing tự phục vụ cho /ccchrome connect:
+Environment=CC_CHROME_PAIR_SECRET=DOI_SECRET_NAY_openssl_rand_hex_16
+Environment=CC_CHROME_STATE_FILE=/opt/cc-chrome-extension/server/ccchrome-tokens.json
+# Tùy chọn, token tĩnh cấp thủ công:
+#Environment=CC_CHROME_TOKENS=DOI_TOKEN_NAY=alice,DOI_TOKEN_KIA=bob
 ExecStart=/usr/bin/node index.js --http
 Restart=always
 RestartSec=3

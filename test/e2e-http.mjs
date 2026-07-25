@@ -51,12 +51,17 @@ await new Promise((r) => pageServer.listen(HTTP_PORT, "127.0.0.1", r));
 
 // --- start bridge server in http mode --------------------------------------
 
+const PAIR_SECRET = "team-pair-secret-0123456789";
+const stateFile = join(mkdtempSync(join(tmpdir(), "cc-bridge-state-")), "tokens.json");
+
 const serverProc = spawn("node", [join(root, "server", "index.js"), "--http"], {
   env: {
     ...process.env,
     CC_CHROME_PORT: String(MCP_PORT),
     CC_CHROME_HOST: "127.0.0.1",
     CC_CHROME_TOKENS: `${TOKEN_A}=alice,${TOKEN_B}=bob`,
+    CC_CHROME_PAIR_SECRET: PAIR_SECRET,
+    CC_CHROME_STATE_FILE: stateFile,
   },
   stdio: ["ignore", "inherit", "inherit"],
 });
@@ -172,6 +177,79 @@ check("bob navigate fails cleanly", r.isError && toolText(r).includes("not conne
 const clientA2 = await mcpConnect(TOKEN_A);
 r = await clientA2.callTool({ name: "get_page_text", arguments: {} });
 check("second session, same token, same browser", toolText(r).includes("Hi TeamMate"), toolText(r).slice(0, 200));
+
+// --- self-service pairing (the /ccchrome connect flow) ----------------------
+
+res = await fetch(`http://127.0.0.1:${MCP_PORT}/pair`, {
+  method: "POST",
+  headers: { authorization: "Bearer wrong-secret-000000", "content-type": "application/json" },
+  body: JSON.stringify({ name: "mallory" }),
+});
+check("pair rejects bad secret", res.status === 401, `status=${res.status}`);
+
+res = await fetch(`http://127.0.0.1:${MCP_PORT}/pair`, {
+  method: "POST",
+  headers: { authorization: `Bearer ${PAIR_SECRET}`, "content-type": "application/json" },
+  body: JSON.stringify({ name: "carol" }),
+});
+const paired = await res.json();
+check("pair issues token", res.status === 200 && paired.token?.length === 32 && paired.name === "carol", JSON.stringify(paired));
+check("pair returns urls", paired.mcpUrl?.endsWith("/mcp") && paired.wsUrl?.includes(`token=${paired.token}`), JSON.stringify(paired));
+
+res = await fetch(`http://127.0.0.1:${MCP_PORT}/pair/status`, {
+  headers: { authorization: `Bearer ${paired.token}` },
+});
+let pairStatus = await res.json();
+check("pair/status before extension", res.status === 200 && pairStatus.extensionConnected === false, JSON.stringify(pairStatus));
+
+// Paired token works for MCP immediately.
+const clientC = await mcpConnect(paired.token);
+r = await clientC.callTool({ name: "chrome_status", arguments: {} });
+check("paired token isolated (no browser yet)", toolText(r).includes('"connected": false'), toolText(r).slice(0, 200));
+
+// Re-point the extension at the paired token (simulates carol's browser).
+await sw.evaluate(async (wsUrl) => {
+  await chrome.storage.local.set({ wsUrl });
+}, `ws://127.0.0.1:${MCP_PORT}/ws?token=${paired.token}`);
+await sw.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: "reconnect" }, resolve)));
+
+let pairedConnected = false;
+for (let i = 0; i < 40; i++) {
+  const s = await (await fetch(`http://127.0.0.1:${MCP_PORT}/pair/status`, {
+    headers: { authorization: `Bearer ${paired.token}` },
+  })).json();
+  if (s.extensionConnected) { pairedConnected = true; break; }
+  await sleep(500);
+}
+check("extension connects with paired token", pairedConnected);
+
+r = await clientC.callTool({ name: "get_page_text", arguments: {} });
+check("browser control via paired token", toolText(r).includes("Hi TeamMate"), toolText(r).slice(0, 200));
+
+// Revoke: token stops working everywhere.
+res = await fetch(`http://127.0.0.1:${MCP_PORT}/pair`, {
+  method: "DELETE",
+  headers: { authorization: `Bearer ${paired.token}` },
+});
+check("pair revoke", res.status === 200, `status=${res.status}`);
+res = await fetch(`http://127.0.0.1:${MCP_PORT}/pair/status`, {
+  headers: { authorization: `Bearer ${paired.token}` },
+});
+check("revoked token rejected", res.status === 401, `status=${res.status}`);
+let revokedErr = null;
+try {
+  await mcpConnect(paired.token);
+} catch (err) {
+  revokedErr = err;
+}
+check("revoked token cannot start MCP session", revokedErr !== null, String(revokedErr));
+
+// Static tokens cannot be revoked via the API.
+res = await fetch(`http://127.0.0.1:${MCP_PORT}/pair`, {
+  method: "DELETE",
+  headers: { authorization: `Bearer ${TOKEN_A}` },
+});
+check("static token revoke refused", res.status === 400, `status=${res.status}`);
 
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 
