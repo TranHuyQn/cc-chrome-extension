@@ -16,6 +16,15 @@ Claude Code ──(MCP / stdio)──► MCP server (Node.js) ──(WebSocket, 
 
 Mọi kết nối chỉ nằm trong `127.0.0.1` — không có dữ liệu nào gửi ra ngoài, không cần tài khoản Anthropic trong browser.
 
+Ngoài chế độ local, server còn có chế độ `--http` để chạy tập trung trên VPS cho cả team (xem [Triển khai lên VPS](#triển-khai-lên-vps-cho-cả-team)):
+
+```
+Claude Code (mỗi người) ──(MCP / Streamable HTTP + Bearer token)──► MCP server trên VPS
+Chrome Extension (mỗi người) ──(wss://vps/ws?token=...)────────────────────┘
+```
+
+Server ghép cặp theo **token**: lệnh từ Claude Code của ai điều khiển đúng Chrome của người đó. Chrome vẫn chạy trên máy từng người — VPS chỉ host phần trung gian.
+
 ## Cài đặt
 
 ### 1. Cài extension vào Chrome
@@ -80,11 +89,58 @@ Kiểm tra kết nối trong Claude Code: gõ `/mcp` → chọn `chrome` → xem
 | Tab/cửa sổ | `list_tabs`, `new_tab`, `close_tab`, `switch_tab`, `resize_window` | Quản lý tab và cửa sổ |
 | Khác | `chrome_status` | Kiểm tra extension đã kết nối chưa |
 
+## Triển khai lên VPS cho cả team
+
+Chế độ `--http` cho phép cả team dùng chung **một** server: mỗi thành viên được cấp một token, Claude Code và extension của họ cùng dùng token đó để server ghép cặp đúng người — không ai điều khiển được browser của người khác.
+
+### Trên VPS (Docker + Caddy, tự động HTTPS)
+
+```bash
+git clone <repo> && cd cc-chrome-extension/deploy
+
+# Sinh token cho từng thành viên
+openssl rand -hex 16   # chạy mỗi lần cho một người
+
+cat > .env <<'EOF'
+DOMAIN=chrome.example.com
+CC_CHROME_TOKENS=a1b2c3...=alice,d4e5f6...=bob
+EOF
+
+docker compose up -d --build
+curl https://chrome.example.com/health   # {"ok":true,...}
+```
+
+Yêu cầu: domain đã trỏ về IP VPS, mở port 80/443. Không muốn Docker thì dùng `deploy/chrome-bridge.service` (systemd) + Caddy/nginx làm TLS proxy — **bắt buộc có HTTPS/WSS**, đừng expose port 8787 trần ra internet.
+
+### Trên máy mỗi thành viên
+
+1. Cài extension như hướng dẫn ở trên (Load unpacked)
+2. Bấm icon extension → đổi URL thành `wss://chrome.example.com/ws?token=<token-của-mình>` → **Lưu & kết nối lại** (badge chuyển `on` xanh)
+3. Đăng ký với Claude Code:
+
+```bash
+claude mcp add --scope user --transport http chrome \
+  https://chrome.example.com/mcp \
+  --header "Authorization: Bearer <token-của-mình>"
+```
+
+Một người mở nhiều phiên Claude Code cùng lúc vẫn ổn — tất cả phiên cùng token dùng chung browser của người đó.
+
+### Quản lý token
+
+- Thêm/xóa thành viên: sửa `CC_CHROME_TOKENS` trong `.env` rồi `docker compose up -d` (restart server).
+- Token dài tối thiểu 8 ký tự (server từ chối token yếu); nên dùng `openssl rand -hex 16`.
+- Có thể dùng file thay cho biến môi trường: `CC_CHROME_TOKENS_FILE=/path/tokens.json` với nội dung `{"<token>": "<tên>"}`.
+
 ## Cấu hình
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
-| `CC_CHROME_PORT` | `9876` | Port WebSocket của server. Đổi thì cũng phải đổi URL trong popup của extension. |
+| `CC_CHROME_MODE` | `stdio` | `http` để chạy chế độ VPS (hoặc thêm cờ `--http`). |
+| `CC_CHROME_PORT` | `9876` (stdio) / `8787` (http) | Port WebSocket (stdio) hoặc port HTTP server (http mode). |
+| `CC_CHROME_HOST` | `127.0.0.1` (stdio) / `0.0.0.0` (http) | Địa chỉ bind. |
+| `CC_CHROME_TOKENS` | — | Bắt buộc ở http mode: `token1=tên1,token2=tên2`. |
+| `CC_CHROME_TOKENS_FILE` | — | Thay thế: file JSON `{"token": "tên"}`. |
 | `CC_CHROME_TIMEOUT_MS` | `45000` | Timeout mỗi lệnh gửi tới extension. |
 
 Đổi port ở phía extension: bấm icon extension → sửa "Địa chỉ MCP server" → **Lưu & kết nối lại**.

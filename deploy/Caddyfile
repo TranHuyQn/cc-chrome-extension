@@ -1,0 +1,5 @@
+{$DOMAIN} {
+	# Caddy tự lấy và gia hạn chứng chỉ Let's Encrypt cho {$DOMAIN}.
+	# WebSocket (/ws) được proxy tự động, không cần cấu hình thêm.
+	reverse_proxy chrome-bridge:8787
+}
