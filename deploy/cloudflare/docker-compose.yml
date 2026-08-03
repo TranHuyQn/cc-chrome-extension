@@ -1,12 +1,14 @@
 # Deploy sau Cloudflare Tunnel (home server, không mở port ra internet).
 #
 # Khác với deploy/docker-compose.yml: KHÔNG có Caddy. Cloudflare đã lo TLS ở
-# biên, cloudflared chạy sẵn trên host và nối tới container qua loopback.
+# biên. Và cloudflared ở đây chạy TRONG Docker, nên bridge không publish cổng
+# nào ra host cả — cloudflared gọi thẳng vào container qua tên service.
 #
-#   Claude Code / Chrome  ──HTTPS/WSS──►  Cloudflare  ──tunnel──►  cloudflared
-#                                                                       │
-#                                                        http://localhost:8787
-#                                                                       ▼
+#   Claude Code / Chrome ──HTTPS/WSS──► Cloudflare ──tunnel──► container cloudflared
+#                                                                      │
+#                                                     http://chrome-bridge:8787
+#                                                     (cùng docker network)
+#                                                                      ▼
 #                                                              container này
 #
 # Hướng dẫn đầy đủ: docs/deploy-cloudflare-tunnel.md
@@ -25,6 +27,9 @@ services:
       context: ../..
       dockerfile: deploy/Dockerfile
     image: cc-chrome-bridge:2.0.0
+    # Tên cố định để ingress của cloudflared trỏ tới được, và để `docker logs
+    # chrome-bridge` gõ ngắn.
+    container_name: chrome-bridge
     restart: unless-stopped
     environment:
       # Token tĩnh do admin cấp tay: "token1=alice,token2=bob"
@@ -42,20 +47,32 @@ services:
       CC_CHROME_SESSION_TTL_MS: ${CC_CHROME_SESSION_TTL_MS:-28800000}
     volumes:
       - bridge_data:/data
-      # Chạy `npm run build` ở gốc repo trước khi deploy, để team tải extension
-      # tại https://<domain>/extension.zip. Thiếu thì endpoint đó trả 404.
+      # Gói extension để team tải tại https://<domain>/extension.zip.
+      # Sinh bằng `npm run build` — chạy trên máy dev rồi copy sang cũng được,
+      # server không cần cài node. Thiếu thì endpoint đó trả 404.
       - ../../dist:/app/dist:ro
-    ports:
-      # CHỈ loopback. cloudflared chạy trên host nối vào đây.
-      # Đừng đổi thành "8787:8787" — thế là mở cổng ra toàn mạng LAN, và ai
-      # trong LAN cũng bỏ qua được Cloudflare.
-      - "127.0.0.1:8787:8787"
+    networks:
+      # Mạng của stack chứa cloudflared. Không publish cổng nào ra host: chỉ
+      # cloudflared trong cùng mạng này gọi được vào bridge, máy khác trong LAN
+      # thì không. Đổi tên mạng ở khối `networks:` cuối file nếu stack của bạn
+      # đặt tên khác.
+      tunnel:
+        aliases:
+          - chrome-bridge
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
+
+networks:
+  tunnel:
+    external: true
+    # Mạng này do stack khác tạo ra và phải đang tồn tại. Kiểm bằng:
+    #   docker network ls
+    #   docker inspect <tên-container-cloudflared> --format '{{range $k,$_ := .NetworkSettings.Networks}}{{$k}}{{end}}'
+    name: ${CC_CHROME_TUNNEL_NETWORK:-ccrc_default}
 
 volumes:
   bridge_data:

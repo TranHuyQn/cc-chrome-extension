@@ -1,6 +1,6 @@
 # Deploy lên home server qua Cloudflare Tunnel
 
-Hướng dẫn cho: **home server Linux có Docker**, **tunnel `cloudflared` đã chạy sẵn** (chỉ thêm hostname mới), team **2–5 người**.
+Hướng dẫn cho: **home server Linux có Docker**, **tunnel `cloudflared` đã chạy sẵn trong một container** (chỉ thêm hostname mới), team **2–5 người**.
 
 Đích đến: mỗi thành viên gõ lệnh trong Claude Code và Chrome trên máy họ làm theo.
 
@@ -10,13 +10,18 @@ Hướng dẫn cho: **home server Linux có Docker**, **tunnel `cloudflared` đ�
 
 ```
 Claude Code (máy mỗi người) ──HTTPS──┐
-                                     ├─► Cloudflare ──tunnel──► cloudflared ──► container bridge
-Chrome Extension (máy mỗi người) ─WSS─┘      (biên)              (home server)    127.0.0.1:8787
+                                     ├─► Cloudflare ──tunnel──► container cloudflared
+Chrome Extension (máy mỗi người) ─WSS─┘      (biên)                      │
+                                                        http://chrome-bridge:8787
+                                                            (cùng docker network)
+                                                                         ▼
+                                                                 container bridge
 ```
 
-Ba điều quan trọng về hình này:
+Bốn điều quan trọng về hình này:
 
 - **Home server không mở port nào ra internet.** cloudflared chủ động nối ra Cloudflare, không có chiều ngược lại. Đây là lý do chính để dùng tunnel thay vì port forwarding.
+- **Bridge cũng không publish cổng nào ra host.** cloudflared nằm trong container, nên cách nối gọn nhất là cho bridge vào **chung docker network** rồi gọi nhau bằng tên service. Kết quả: kể cả máy khác trong LAN cũng không chạm được vào bridge — chỉ Cloudflare vào được.
 - **Không cần Caddy.** Cloudflare đã lo TLS ở biên. Vì vậy setup này dùng `deploy/cloudflare/docker-compose.yml` chứ **không** dùng `deploy/docker-compose.yml` (file kia bundle sẵn Caddy, dành cho VPS có IP công khai).
 - **Chrome vẫn chạy trên máy từng người.** Server chỉ là trạm trung chuyển ghép token với browser. Không có browser nào chạy trên home server.
 
@@ -27,9 +32,18 @@ Ba điều quan trọng về hình này:
 Kiểm nhanh trên home server:
 
 ```bash
-docker --version && docker compose version   # cần có cả hai
-cloudflared tunnel list                      # tunnel của bạn phải hiện ra ở đây
+docker --version && docker compose version    # cần có cả hai
+docker ps --format '{{.Names}} :: {{.Image}}' | grep -i cloudflared
 ```
+
+Ghi lại **tên container cloudflared** và **network** của nó — hai giá trị này sẽ dùng ở A2 và A4:
+
+```bash
+docker inspect <tên-container-cloudflared> \
+  --format '{{range $k,$_ := .NetworkSettings.Networks}}{{$k}}{{end}}'
+```
+
+Server **không cần cài node/npm**: `npm ci` chạy bên trong Docker build, còn gói extension thì build ở máy dev rồi copy sang (bước A1).
 
 Và một điều **phải quyết trước**:
 
@@ -40,13 +54,13 @@ Và một điều **phải quyết trước**:
 
 ## 3. Giai đoạn A — dựng server
 
-### A1. Lấy code và build gói extension
+### A1. Build gói extension — làm trên **máy dev**, không phải server
+
+Server không có node, và cũng không nên có: `key.pem` (quyết định Extension ID) nên ở lại máy bạn.
+
+Trên máy dev, trong repo:
 
 ```bash
-git clone <repo-url> cc-chrome-extension
-cd cc-chrome-extension
-git checkout feat/security-hardening-2.0.0     # hoặc main sau khi đã merge
-
 npm install
 npm run build
 ```
@@ -68,24 +82,50 @@ ls -la dist/
 
 Nếu trong `dist/` còn file của phiên bản cũ (`...-v1.1.0.zip`), xoá đi cho khỏi ai lấy nhầm — build lại lúc nào cũng được.
 
-### A2. Cấu hình
+### A2. Đưa code sang server và cấu hình
+
+Dọn chỗ trước nếu đĩa chật (ổ eMMC của SBC thường vậy):
 
 ```bash
-cd deploy/cloudflare
+ssh root@<home-server> 'df -h / ; docker system df'
+ssh root@<home-server> 'docker system prune -a --volumes=false'
+```
+
+Copy repo sang (bỏ những thứ không cần, giữ `dist/` vì nó bị gitignore):
+
+```bash
+rsync -av --exclude node_modules --exclude .git --exclude .superpowers \
+  ./ root@<home-server>:/opt/cc-chrome-extension/
+```
+
+Rồi trên server:
+
+```bash
+cd /opt/cc-chrome-extension/deploy/cloudflare
 cp .env.example .env
 openssl rand -hex 16          # sinh pairing secret
 ```
 
-Sửa `.env`, dán giá trị vừa sinh vào `CC_CHROME_PAIR_SECRET`. Với team 2–5 người, để `CC_CHROME_MAX_TOKENS=20` là thoải mái.
+Sửa `.env`:
 
-`.env` chứa secret — nó đã nằm trong `.gitignore`, đừng commit và đừng gửi qua chat nhóm.
+- `CC_CHROME_PAIR_SECRET` — dán giá trị vừa sinh
+- `CC_CHROME_TUNNEL_NETWORK` — **tên network của container cloudflared** ghi ở mục 2
+- `CC_CHROME_MAX_TOKENS=20` là thoải mái cho 2–5 người
+
+`.env` chứa secret — đã nằm trong `.gitignore`, đừng commit và đừng gửi qua chat nhóm.
 
 ### A3. Chạy container
 
 ```bash
 docker compose up -d --build
 docker compose ps             # trạng thái phải là healthy sau ~15 giây
-curl -sS http://127.0.0.1:8787/health
+```
+
+Bridge **không publish cổng ra host**, nên kiểm sức khoẻ từ bên trong container:
+
+```bash
+docker compose exec chrome-bridge \
+  node -e "fetch('http://127.0.0.1:8787/health').then(r=>r.text()).then(console.log)"
 ```
 
 Kỳ vọng:
@@ -95,6 +135,14 @@ Kỳ vọng:
 ```
 
 `version` phải là `2.0.0`. Nếu ra số khác thì image cũ còn cache — `docker compose build --no-cache` rồi chạy lại.
+
+Xác nhận bridge và cloudflared **thật sự nhìn thấy nhau**:
+
+```bash
+docker inspect chrome-bridge \
+  --format '{{range $k,$_ := .NetworkSettings.Networks}}{{$k}} {{end}}'
+# phải in ra đúng tên network của cloudflared
+```
 
 Xem log khởi động:
 
@@ -106,30 +154,36 @@ Phải thấy `Self-service pairing ENABLED`. **Không** được thấy dòng c
 
 ### A4. Thêm hostname vào tunnel đã có
 
-Mở config của cloudflared (thường là `/etc/cloudflared/config.yml` hoặc `~/.cloudflared/config.yml`), thêm một ingress rule **phía trên** rule `service: http_status:404` cuối cùng:
+Nếu tunnel của bạn chạy bằng `--token` (kiểu container `cloudflare/cloudflared` khởi động với token dài), thì ingress được quản **từ Zero Trust dashboard**, không phải file trên máy. Trong log cloudflared bạn sẽ thấy dòng `Updated to new configuration config={"ingress":[...]}` — đó là dấu hiệu.
 
-```yaml
-ingress:
-  # ... các rule sẵn có của bạn ...
+Trên [Cloudflare Zero Trust](https://one.dash.cloudflare.com) → **Networks → Tunnels** → chọn tunnel → tab **Published application routes** → **Add a published application route**:
 
-  - hostname: chrome.example.com
-    service: http://localhost:8787
+| Trường | Giá trị |
+|---|---|
+| Subdomain | `cccx` |
+| Domain | `beelyai.com` |
+| Type | `HTTP` |
+| URL | `chrome-bridge:8787` |
 
-  - service: http_status:404      # rule catch-all, luôn phải nằm cuối
-```
-
-Tạo DNS record rồi khởi động lại:
+Lưu xong Cloudflare tự tạo DNS record và đẩy cấu hình mới xuống cloudflared trong vài giây — **không cần restart container nào**. Xác nhận:
 
 ```bash
-cloudflared tunnel route dns <tên-hoặc-id-tunnel> chrome.example.com
-sudo systemctl restart cloudflared
-sudo systemctl status cloudflared --no-pager
+docker logs --tail 5 <tên-container-cloudflared> | grep 'Updated to new configuration'
 ```
+
+Dòng mới phải chứa `"hostname":"cccx.beelyai.com"` và `"service":"http://chrome-bridge:8787"`.
+
+> Nếu tunnel của bạn dùng file `config.yml` thay vì token, thì thêm ingress rule **phía trên** rule catch-all `service: http_status:404`, rồi `docker restart <container>`:
+> ```yaml
+>   - hostname: cccx.beelyai.com
+>     service: http://chrome-bridge:8787
+>   - service: http_status:404      # luôn nằm cuối
+> ```
 
 Kiểm từ **một máy khác** (không phải home server):
 
 ```bash
-curl -sS https://chrome.example.com/health
+curl -sS https://cccx.beelyai.com/health
 ```
 
 Phải ra đúng JSON như ở A3. Nếu ra lỗi 502/1033 thì cloudflared chưa nối được tới container — xem bảng ở mục 9.
@@ -147,7 +201,7 @@ Phải ra đúng JSON như ở A3. Nếu ra lỗi 502/1033 thì cloudflared chư
 Cấp cho mình một token để thử:
 
 ```bash
-curl -sS -X POST https://chrome.example.com/pair \
+curl -sS -X POST https://cccx.beelyai.com/pair \
   -H "Authorization: Bearer <CC_CHROME_PAIR_SECRET>" \
   -H 'content-type: application/json' \
   -d '{"name":"probe"}'
@@ -156,7 +210,7 @@ curl -sS -X POST https://chrome.example.com/pair \
 Rồi chạy (từ máy có repo, cần Node ≥ 18, không cần cài gì thêm):
 
 ```bash
-node deploy/cloudflare/probe-tunnel.mjs https://chrome.example.com <token-vừa-nhận>
+node deploy/cloudflare/probe-tunnel.mjs https://cccx.beelyai.com <token-vừa-nhận>
 ```
 
 Ba kết quả có thể:
@@ -174,7 +228,7 @@ Bridge chặn dò `/pair` theo IP. Sau Cloudflare, IP thật nằm trong `X-Forw
 Từ một máy **không phải** home server:
 
 ```bash
-curl -sS -X POST https://chrome.example.com/pair \
+curl -sS -X POST https://cccx.beelyai.com/pair \
   -H "Authorization: Bearer co-tinh-sai" \
   -H 'content-type: application/json' -d '{}'
 ```
@@ -194,7 +248,7 @@ docker compose logs --tail 5 chrome-bridge | grep "Failed pairing attempt"
 ### B3. Tải được gói extension qua domain
 
 ```bash
-curl -sSI https://chrome.example.com/extension.zip | head -5
+curl -sSI https://cccx.beelyai.com/extension.zip | head -5
 ```
 
 Kỳ vọng `HTTP/2 200` và `content-type: application/zip`. Nếu ra 404 thì `dist/` chưa được build hoặc chưa mount — quay lại A1.
@@ -218,14 +272,14 @@ bash scripts/install-command.sh
 Mở một phiên Claude Code mới, gõ:
 
 ```
-/ccchrome connect https://chrome.example.com
+/ccchrome connect https://cccx.beelyai.com
 ```
 
-Lệnh sẽ hỏi pairing secret, tự sinh token riêng cho bạn, tự chạy `claude mcp add`, rồi in ra URL dạng `wss://chrome.example.com/ws?token=...`.
+Lệnh sẽ hỏi pairing secret, tự sinh token riêng cho bạn, tự chạy `claude mcp add`, rồi in ra URL dạng `wss://cccx.beelyai.com/ws?token=...`.
 
 ### C3. Cài extension và dán URL
 
-1. Tải `https://chrome.example.com/extension.zip`, **giải nén ra một thư mục cố định** (đừng xoá sau khi cài)
+1. Tải `https://cccx.beelyai.com/extension.zip`, **giải nén ra một thư mục cố định** (đừng xoá sau khi cài)
 2. `chrome://extensions` → bật **Developer mode** → **Load unpacked** → chọn thư mục vừa giải nén
 3. Bấm icon extension → dán URL `wss://...` ở bước C2 vào ô "Địa chỉ MCP server" → **Lưu & kết nối lại**
 4. Badge phải chuyển **`on` màu xanh**
@@ -251,7 +305,7 @@ Dùng tool chrome: mở example.com, đọc tiêu đề trang, rồi chụp màn
 Kiểm chéo phía server:
 
 ```bash
-curl -sS https://chrome.example.com/health
+curl -sS https://cccx.beelyai.com/health
 # extensionsConnected phải là 1
 ```
 
@@ -261,9 +315,9 @@ curl -sS https://chrome.example.com/health
 
 Với mỗi thành viên, gửi đúng bốn thứ:
 
-1. Domain: `https://chrome.example.com`
+1. Domain: `https://cccx.beelyai.com`
 2. Pairing secret — **gửi riêng cho từng người**, đừng đăng lên nhóm chung
-3. Link tải extension: `https://chrome.example.com/extension.zip`
+3. Link tải extension: `https://cccx.beelyai.com/extension.zip`
 4. Ba lệnh họ cần chạy:
 
 ```bash
@@ -272,14 +326,14 @@ bash scripts/install-command.sh
 ```
 ```
 # trong Claude Code
-/ccchrome connect https://chrome.example.com
+/ccchrome connect https://cccx.beelyai.com
 ```
 rồi cài extension và dán URL như bước C3.
 
 Kiểm ai đã nối được:
 
 ```bash
-curl -sS https://chrome.example.com/health     # đếm extensionsConnected
+curl -sS https://cccx.beelyai.com/health     # đếm extensionsConnected
 docker compose logs chrome-bridge | grep "extension connected"
 ```
 
@@ -296,7 +350,7 @@ docker compose exec chrome-bridge cat /data/ccchrome-tokens.json
 **Thu hồi token của một người** — họ tự chạy `/ccchrome disconnect`, hoặc bạn làm hộ:
 
 ```bash
-curl -sS -X DELETE https://chrome.example.com/pair -H "Authorization: Bearer <token-của-họ>"
+curl -sS -X DELETE https://cccx.beelyai.com/pair -H "Authorization: Bearer <token-của-họ>"
 ```
 
 Extension của họ sẽ bị đóng ngay và popup hiện "Token sai hoặc đã bị thu hồi".
@@ -364,7 +418,8 @@ Ai biết domain đều xem được số người đang kết nối. Không l�
 
 | Triệu chứng | Nguyên nhân thường gặp | Cách xử lý |
 |---|---|---|
-| `curl https://domain/health` ra lỗi 1033 hoặc 502 | cloudflared không nối được container | `docker compose ps` xem healthy chưa; kiểm ingress trỏ đúng `http://localhost:8787`; `systemctl restart cloudflared` |
+| `curl https://cccx.beelyai.com/health` ra lỗi 1033 hoặc 502 | cloudflared không nối được container | Xem A3: bridge có healthy không, và có **cùng network** với cloudflared không. Ingress phải là `http://chrome-bridge:8787` (tên container, không phải `localhost`) |
+| Log cloudflared: `dial tcp: lookup chrome-bridge ... no such host` | Hai container khác network | `CC_CHROME_TUNNEL_NETWORK` trong `.env` sai. Sửa rồi `docker compose up -d` |
 | Badge đỏ, popup ghi **"Token sai hoặc đã bị thu hồi"** | Token sai, đã thu hồi, hoặc Cloudflare cắt subprotocol | Chạy B1. Nếu B1 đạt thì lấy token mới bằng `/ccchrome connect` |
 | Badge đỏ, popup ghi **"URL thiếu token, hoặc extension cũ hơn server"** | URL dán vào popup không có `?token=`, hoặc extension còn bản 1.x | Dán lại URL đầy đủ từ `/ccchrome connect`; nếu vẫn thế thì cài lại extension từ `/extension.zip` |
 | Badge đỏ, popup ghi **"origin không hợp lệ"** | Có gì đó không phải extension đang nối, hoặc `CC_CHROME_EXTENSION_ID` bị đặt sai | Bỏ `CC_CHROME_EXTENSION_ID` khỏi `.env` nếu team dùng Load unpacked |
