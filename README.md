@@ -116,6 +116,11 @@ Kiểm tra kết nối trong Claude Code: gõ `/mcp` → chọn `chrome` → xem
 
 Chế độ `--http` cho phép cả team dùng chung **một** server: mỗi thành viên được cấp một token, Claude Code và extension của họ cùng dùng token đó để server ghép cặp đúng người — không ai điều khiển được browser của người khác.
 
+> **Deploy lên home server sau Cloudflare Tunnel?** Dùng hướng dẫn riêng:
+> [`docs/deploy-cloudflare-tunnel.md`](docs/deploy-cloudflare-tunnel.md). Setup đó
+> không cần Caddy (Cloudflare lo TLS) và không mở port nào ra internet, nên nó
+> dùng `deploy/cloudflare/docker-compose.yml` chứ không phải file compose dưới đây.
+
 ### Trên VPS (Docker + Caddy, tự động HTTPS)
 
 ```bash

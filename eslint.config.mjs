@@ -8,7 +8,7 @@ export default [
   js.configs.recommended,
   {
     // MCP server, build scripts, e2e tests — Node.js ESM
-    files: ["server/**/*.js", "scripts/**/*.mjs", "test/**/*.mjs"],
+    files: ["server/**/*.js", "scripts/**/*.mjs", "test/**/*.mjs", "deploy/**/*.mjs"],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: "module",

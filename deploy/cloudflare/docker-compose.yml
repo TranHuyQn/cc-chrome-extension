@@ -1,0 +1,61 @@
+# Deploy sau Cloudflare Tunnel (home server, không mở port ra internet).
+#
+# Khác với deploy/docker-compose.yml: KHÔNG có Caddy. Cloudflare đã lo TLS ở
+# biên, cloudflared chạy sẵn trên host và nối tới container qua loopback.
+#
+#   Claude Code / Chrome  ──HTTPS/WSS──►  Cloudflare  ──tunnel──►  cloudflared
+#                                                                       │
+#                                                        http://localhost:8787
+#                                                                       ▼
+#                                                              container này
+#
+# Hướng dẫn đầy đủ: docs/deploy-cloudflare-tunnel.md
+#
+#   cd deploy/cloudflare
+#   cp .env.example .env     # rồi sửa
+#   docker compose up -d --build
+
+# Đặt tên project rõ ràng thay vì để Docker suy ra từ tên thư mục ("cloudflare"),
+# vì home server rất dễ đã có một stack trùng tên đó.
+name: cc-chrome-bridge
+
+services:
+  chrome-bridge:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    image: cc-chrome-bridge:2.0.0
+    restart: unless-stopped
+    environment:
+      # Token tĩnh do admin cấp tay: "token1=alice,token2=bob"
+      CC_CHROME_TOKENS: ${CC_CHROME_TOKENS:-}
+      # Bật pairing tự phục vụ (/ccchrome connect). Xoá biến này đi sẽ làm MẤT
+      # mọi token đã cấp qua pairing — xem mục "Bẫy đã biết" trong hướng dẫn.
+      CC_CHROME_PAIR_SECRET: ${CC_CHROME_PAIR_SECRET:-}
+      CC_CHROME_STATE_FILE: /data/ccchrome-tokens.json
+      CC_CHROME_DIST_DIR: /app/dist
+      # Bắt buộc: Cloudflare là proxy đứng trước, IP thật nằm ở X-Forwarded-For.
+      # Không đặt biến này thì rate-limit sẽ gom cả team vào một IP duy nhất,
+      # và /pair sẽ trả về URL http:// thay vì https://.
+      CC_CHROME_TRUST_PROXY: "1"
+      CC_CHROME_MAX_TOKENS: ${CC_CHROME_MAX_TOKENS:-20}
+      CC_CHROME_SESSION_TTL_MS: ${CC_CHROME_SESSION_TTL_MS:-28800000}
+    volumes:
+      - bridge_data:/data
+      # Chạy `npm run build` ở gốc repo trước khi deploy, để team tải extension
+      # tại https://<domain>/extension.zip. Thiếu thì endpoint đó trả 404.
+      - ../../dist:/app/dist:ro
+    ports:
+      # CHỈ loopback. cloudflared chạy trên host nối vào đây.
+      # Đừng đổi thành "8787:8787" — thế là mở cổng ra toàn mạng LAN, và ai
+      # trong LAN cũng bỏ qua được Cloudflare.
+      - "127.0.0.1:8787:8787"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  bridge_data:
