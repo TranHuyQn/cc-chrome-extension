@@ -48,10 +48,24 @@ export class RateLimiter {
 // X-Forwarded-For is trivially forged, so it is honored only when the operator
 // states this process really is behind a proxy that sets it. Otherwise an
 // attacker would bypass the limiter by sending a different value every request.
+//
+// Take the RIGHTMOST entry, not the leftmost. The header is a list that grows
+// left-to-right as it passes through proxies, so the *last* entry is the one
+// the adjacent (trusted) proxy appended — the peer address it actually saw.
+// Everything to the left of it was supplied by the client and can say anything.
+// nginx's canonical `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for`
+// appends, so with the leftmost entry an attacker just sends a different
+// X-Forwarded-For on every request and the limiter never fires at all. Caddy
+// 2.7+ replaces a client-supplied header when the peer is not a trusted proxy,
+// leaving exactly one entry — there rightmost and leftmost are the same value,
+// so rightmost is correct under both. Do not "fix" this back to [0].
 export function clientIp(req, trustProxy) {
   if (trustProxy) {
     const forwarded = req.headers["x-forwarded-for"];
-    if (forwarded) return String(forwarded).split(",")[0].trim();
+    if (forwarded) {
+      const nearest = String(forwarded).split(",").pop().trim();
+      if (nearest) return nearest;
+    }
   }
   return req.socket.remoteAddress || "unknown";
 }
