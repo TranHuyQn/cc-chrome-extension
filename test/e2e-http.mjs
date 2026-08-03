@@ -309,6 +309,27 @@ check(
   "expected close 4003"
 );
 
+// --- popup shows why the bridge refused to connect --------------------------
+
+// The popup is the only place a member can see why the bridge will not
+// connect, so a rejected handshake must reach it as a readable reason rather
+// than the generic "is the MCP server running?".
+const extensionId = new URL(sw.url()).host;
+await sw.evaluate(async (wsUrl) => {
+  await chrome.storage.local.set({ wsUrl });
+}, `ws://127.0.0.1:${MCP_PORT}/ws?token=definitely-not-a-real-token`);
+
+const popup = await context.newPage();
+await popup.goto(`chrome-extension://${extensionId}/popup.html`);
+let popupError = "";
+for (let i = 0; i < 40; i++) {
+  popupError = await popup.textContent("#error");
+  if (popupError && popupError.trim()) break;
+  await sleep(250);
+}
+check("popup explains a rejected token", /[Tt]oken/.test(popupError), `popup #error = ${JSON.stringify(popupError)}`);
+await popup.close();
+
 // --- extension package downloads (requires `npm run build` to have run) -----
 
 res = await fetch(`http://127.0.0.1:${MCP_PORT}/extension.zip`);

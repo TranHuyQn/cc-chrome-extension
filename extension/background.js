@@ -11,6 +11,15 @@ const KEEPALIVE_MS = 20000;
 const CONSOLE_BUFFER_MAX = 500;
 const NETWORK_BUFFER_MAX = 400;
 
+// The server refuses a handshake by closing with one of these codes. Without
+// this mapping every refusal reaches the user as a generic socket error, and a
+// misconfigured token looks exactly like a server that is not running.
+const CLOSE_REASONS = {
+  4001: "Token sai hoặc đã bị thu hồi — chạy lại /ccchrome connect",
+  4002: "Extension đã cũ so với server — tải lại bản mới rồi Load unpacked đè lên",
+  4003: "Server từ chối: origin không hợp lệ",
+};
+
 let ws = null;
 let wsUrl = DEFAULT_WS_URL;
 let reconnectDelay = RECONNECT_MIN_MS;
@@ -89,10 +98,11 @@ async function connect() {
     if (msg.type === "request") await handleRequest(msg);
   };
 
-  socket.onclose = () => {
+  socket.onclose = (event) => {
     if (ws !== socket) return;
     clearInterval(keepaliveTimer);
-    setStatus("disconnected");
+    const reason = CLOSE_REASONS[event.code];
+    setStatus("disconnected", reason ? { lastError: reason } : {});
     ws = null;
     scheduleReconnect();
   };
