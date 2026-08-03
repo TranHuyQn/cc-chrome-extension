@@ -24,13 +24,26 @@ cd test && npm install   # e2e deps (playwright)
 ```bash
 npm run build       # package extension -> dist/*.zip + signed dist/*.crx
 npm run lint        # eslint (flat config in eslint.config.mjs); must stay at 0 errors
-npm test            # build.test + e2e (stdio) + e2e (http) — needs real Chromium
-npm run test:stdio  # a single suite: also test:build, test:http
+npm test            # build.test + origin.test + e2e (stdio) + e2e (http) — needs real Chromium
+npm run test:stdio  # a single suite: also test:build, test:origin, test:http
 ```
 
-Tests launch a real Chromium with the extension loaded and hardcode
-`executablePath: "/opt/pw-browsers/chromium"` (CI path) in all three files under `test/`. On a local
-machine, edit that line or drop it so Playwright uses its own download — do not commit that change.
+Tests launch a real Chromium with the extension loaded. All four files under `test/` read
+`CHROME_PATH` for the browser binary (falls back to Playwright's own managed Chromium when unset)
+and `HEADED=1` to run with a visible window instead of headless:
+
+```bash
+HEADED=1 CHROME_PATH="/path/to/chrome" npm test
+```
+
+**On macOS, browser tests need `HEADED=1`** — the extension's service worker never appears in
+headless mode. **Also on macOS, leave `CHROME_PATH` unset** — installed Google Chrome ≥137 has
+removed the `--load-extension`/`--disable-extensions-except` command-line flags for the branded
+stable channel (a Google anti-malware change), so it silently fails to load the unpacked extension
+at all, headed or headless. Playwright's own managed Chromium (branded "Chrome for Testing", not
+the stable Google Chrome channel) still honors those flags, so the working combination on this
+platform is `HEADED=1` with no `CHROME_PATH` — that runs Playwright's bundled browser with a
+visible window.
 
 There is no formatter or bundler, and the extension is plain JS loaded directly by Chrome — never
 introduce a build step for `extension/` without being asked. A `PostToolUse` hook in

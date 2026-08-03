@@ -123,8 +123,10 @@ check("status disconnected before extension", toolText(r).includes('"connected":
 
 const userDataDir = mkdtempSync(join(tmpdir(), "cc-bridge-http-e2e-"));
 const context = await chromium.launchPersistentContext(userDataDir, {
-  headless: true,
-  executablePath: "/opt/pw-browsers/chromium",
+  headless: process.env.HEADED !== "1",
+  // CI points CHROME_PATH at its own Chromium; without it Playwright uses the
+  // browser it manages itself.
+  ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {}),
   args: [
     `--disable-extensions-except=${extensionPath}`,
     `--load-extension=${extensionPath}`,

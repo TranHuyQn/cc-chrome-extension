@@ -54,8 +54,10 @@ const unpackDir = mkdtempSync(join(tmpdir(), "cc-bridge-dist-"));
 zip.extractAllTo(unpackDir, true);
 const userDataDir = mkdtempSync(join(tmpdir(), "cc-bridge-dist-profile-"));
 const context = await chromium.launchPersistentContext(userDataDir, {
-  headless: true,
-  executablePath: "/opt/pw-browsers/chromium",
+  headless: process.env.HEADED !== "1",
+  // CI points CHROME_PATH at its own Chromium; without it Playwright uses the
+  // browser it manages itself.
+  ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {}),
   args: [
     `--disable-extensions-except=${unpackDir}`,
     `--load-extension=${unpackDir}`,
