@@ -534,7 +534,11 @@ async function mainHttp() {
     log("      Behind a reverse proxy that is the proxy itself — set CC_CHROME_TRUST_PROXY=1 there.");
   }
 
-  const SESSION_TTL_MS = Number(process.env.CC_CHROME_SESSION_TTL_MS || 30 * 60 * 1000);
+  const ttlFromEnv = Number(process.env.CC_CHROME_SESSION_TTL_MS);
+  if (process.env.CC_CHROME_SESSION_TTL_MS !== undefined && !(Number.isFinite(ttlFromEnv) && ttlFromEnv > 0)) {
+    log(`Ignoring invalid CC_CHROME_SESSION_TTL_MS=${JSON.stringify(process.env.CC_CHROME_SESSION_TTL_MS)}; must be a positive number. Using the default.`);
+  }
+  const SESSION_TTL_MS = Number.isFinite(ttlFromEnv) && ttlFromEnv > 0 ? ttlFromEnv : 8 * 60 * 60 * 1000;
   const sessions = new Map(); // mcp-session-id -> { transport, token, lastSeen }
 
   // A client that disappears without closing (laptop shut, session killed) used

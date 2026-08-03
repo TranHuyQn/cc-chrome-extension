@@ -58,6 +58,45 @@ await sleep(6000);
 const after = await health();
 check("idle session is reaped after the TTL", after.mcpSessions === 0, JSON.stringify(after));
 
-console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 serverProc.kill();
+
+// An unparseable TTL used to become NaN, and `now - lastSeen <= NaN` is always
+// false, so the sweeper's "still fresh" guard never fired and it reaped every
+// session on its very next tick. A garbage value must fall back to the
+// (long) default instead, so a fresh session survives.
+const BAD_TTL_PORT = 8790;
+const badTtlServerProc = spawn("node", [join(root, "server", "index.js"), "--http"], {
+  env: {
+    ...process.env,
+    CC_CHROME_PORT: String(BAD_TTL_PORT),
+    CC_CHROME_HOST: "127.0.0.1",
+    CC_CHROME_TOKENS: `${TOKEN}=ttl-tester`,
+    CC_CHROME_SESSION_TTL_MS: "abc",
+  },
+  stdio: ["ignore", "inherit", "inherit"],
+});
+const badTtlHealth = async () => await (await fetch(`http://127.0.0.1:${BAD_TTL_PORT}/health`)).json();
+
+let badTtlUp = false;
+for (let i = 0; i < 40; i++) {
+  try {
+    if ((await fetch(`http://127.0.0.1:${BAD_TTL_PORT}/health`)).ok) { badTtlUp = true; break; }
+  } catch {}
+  await sleep(250);
+}
+check("bad-TTL server is up", badTtlUp);
+
+if (badTtlUp) {
+  const badTtlClient = new Client({ name: "ttl-test-bad", version: "1.0.0" });
+  await badTtlClient.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${BAD_TTL_PORT}/mcp`), {
+    requestInit: { headers: { authorization: `Bearer ${TOKEN}` } },
+  }));
+  await badTtlClient.listTools();
+  await sleep(3000);
+  const badTtlAfter = await badTtlHealth();
+  check("garbage CC_CHROME_SESSION_TTL_MS falls back to the default instead of reaping immediately", badTtlAfter.mcpSessions === 1, JSON.stringify(badTtlAfter));
+}
+badTtlServerProc.kill();
+
+console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);
