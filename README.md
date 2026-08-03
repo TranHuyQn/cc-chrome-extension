@@ -20,7 +20,7 @@ Claude Code ──(MCP / stdio)──► MCP server (Node.js) ──(WebSocket, 
 - **`extension/`** — Chrome extension (Manifest V3). Service worker kết nối tới MCP server qua WebSocket `ws://127.0.0.1:9876`, tự động reconnect, và thực thi các lệnh điều khiển browser.
 - **`server/`** — MCP server (Node.js ≥ 18). Claude Code nói chuyện với nó qua stdio; mỗi tool call được chuyển tiếp tới extension và trả kết quả về.
 
-Mọi kết nối chỉ nằm trong `127.0.0.1` — không có dữ liệu nào gửi ra ngoài, không cần tài khoản Anthropic trong browser.
+Ở chế độ local (stdio) mặc định, mọi kết nối chỉ nằm trong `127.0.0.1` — không có dữ liệu nào gửi ra ngoài, không cần tài khoản Anthropic trong browser. (Chế độ `--http` bên dưới thì khác: server bind `0.0.0.0` để reverse proxy tới được — đọc kỹ [Lưu ý bảo mật](#lưu-ý-bảo-mật).)
 
 Ngoài chế độ local, server còn có chế độ `--http` để chạy tập trung trên VPS cho cả team (xem [Triển khai lên VPS](#triển-khai-lên-vps-cho-cả-team)):
 
@@ -179,7 +179,8 @@ Một người mở nhiều phiên Claude Code cùng lúc vẫn ổn — tất c
 - **Thủ công**: sửa `CC_CHROME_TOKENS` trong `.env` rồi `docker compose up -d` (restart server).
 - Token dài tối thiểu 8 ký tự, pairing secret tối thiểu 12 (server từ chối giá trị yếu); nên dùng `openssl rand -hex 16`.
 - Có thể dùng file thay cho biến môi trường: `CC_CHROME_TOKENS_FILE=/path/tokens.json` với nội dung `{"<token>": "<tên>"}`.
-- `/pair` bị giới hạn 10 lần sai secret trong 15 phút cho mỗi IP; vượt thì trả 429 kèm `Retry-After`. Nếu server đứng sau proxy mà quên đặt `CC_CHROME_TRUST_PROXY=1`, mọi người sẽ bị tính chung một IP (IP của proxy) — server có log cảnh báo lúc khởi động.
+- `/pair` bị giới hạn 10 lần sai secret trong 15 phút cho mỗi IP; vượt thì trả **429 kèm `Retry-After`** (chờ hết giờ là dùng lại được). Nếu server đứng sau proxy mà quên đặt `CC_CHROME_TRUST_PROXY=1`, mọi người sẽ bị tính chung một IP (IP của proxy) — server có log cảnh báo lúc khởi động.
+- Chạm trần `CC_CHROME_MAX_TOKENS` là chuyện khác hẳn: `/pair` trả **503, không có `Retry-After`** — chờ bao lâu cũng không hết, phải nhờ admin thu hồi token cũ (`DELETE /pair`) hoặc nâng trần rồi restart.
 
 ## Cấu hình
 
@@ -193,16 +194,19 @@ Một người mở nhiều phiên Claude Code cùng lúc vẫn ổn — tất c
 | `CC_CHROME_PAIR_SECRET` | — | Bật pairing tự phục vụ (`POST /pair`, dùng bởi `/ccchrome connect`). Http mode cần ít nhất token tĩnh hoặc pair secret. |
 | `CC_CHROME_STATE_FILE` | `./ccchrome-tokens.json` | Nơi lưu bền vững token sinh động. |
 | `CC_CHROME_TIMEOUT_MS` | `45000` | Timeout mỗi lệnh gửi tới extension. |
-| `CC_CHROME_TRUST_PROXY` | — | Đặt `1` khi server đứng sau reverse proxy: rate-limit đọc IP thật từ `X-Forwarded-For`. Không đặt thì dùng IP socket. |
-| `CC_CHROME_MAX_TOKENS` | `100` | Trần số token động, chặn việc biến secret bị lộ thành máy phát token. |
+| `CC_CHROME_TRUST_PROXY` | — | Đặt `1` khi server đứng sau reverse proxy: rate-limit đọc IP thật từ `X-Forwarded-For` (**entry cuối cùng** — entry do proxy kề bên nối vào; các entry bên trái do client tự khai), và `/pair` mới tin `X-Forwarded-Proto`/`X-Forwarded-Host` khi dựng URL trả về. Không đặt thì dùng IP socket và host của chính request. Chỉ bật khi port 8787 không tới được từ đâu khác ngoài proxy đó. |
+| `CC_CHROME_MAX_TOKENS` | `100` | Trần số token động, chặn việc biến secret bị lộ thành máy phát token. Chạm trần thì `/pair` trả **503** (chờ không hết — admin phải thu hồi bớt hoặc nâng trần), khác với 429 của rate limit. Giá trị không phải số dương sẽ bị bỏ qua kèm log cảnh báo. |
 | `CC_CHROME_SESSION_TTL_MS` | `28800000` (8 tiếng) | Session MCP không hoạt động quá lâu sẽ bị đóng và dọn. |
-| `CC_CHROME_EXTENSION_ID` | — | Chỉ chấp nhận đúng một extension ID (ID in ra khi `npm run build`). Không đặt thì chấp nhận mọi `chrome-extension://`. |
+| `CC_CHROME_EXTENSION_ID` | — | Chỉ chấp nhận đúng một extension ID. **Chỉ dùng được khi mọi người cài bản `.crx` đã ký** (ID in ra khi `npm run build`, do `key.pem` quyết định): cài kiểu zip + **Load unpacked** sinh ID theo đường dẫn, khác nhau trên từng máy — đặt biến này khi đó sẽ khoá cả team ra ngoài. Không đặt thì chấp nhận mọi `chrome-extension://`. Xem thêm [Lưu ý bảo mật](#lưu-ý-bảo-mật): pin này thu hẹp chứ không đóng được lỗ origin giả. |
 
 Đổi port ở phía extension: bấm icon extension → sửa "Địa chỉ MCP server" → **Lưu & kết nối lại**.
 
 ## Lưu ý bảo mật
 
-- WebSocket server chỉ bind `127.0.0.1` và **bắt buộc** kết nối phải có origin `chrome-extension://` — process khác trên máy (script Node, curl…) không giả làm extension được, máy khác trong mạng LAN không kết nối được. Muốn siết thêm, đặt `CC_CHROME_EXTENSION_ID=<id>` để chỉ chấp nhận đúng một extension (ID in ra khi chạy `npm run build`).
+- **Check origin làm được gì và không làm được gì.** Cả hai chế độ đều **bắt buộc** handshake WebSocket phải có header `Origin: chrome-extension://…` (thiếu origin cũng bị từ chối). Việc này chặn được kết nối cross-origin phát sinh từ trong browser — một trang web bất kỳ mở `new WebSocket("ws://127.0.0.1:9876")` sẽ gửi origin `https://…` và bị từ chối — và nâng rào với client local nghiệp dư. Nhưng `Origin` là header do **client tự đặt**, không có gì bảo chứng: một process viết riêng cho việc này (script Node dùng `ws`, hay `curl`) chỉ cần gửi thêm một dòng header là qua được. Test `test/e2e-http.mjs` của chính repo này chứng minh điều đó — nó nối vào server bằng client `ws` thuần Node với origin giả và được chấp nhận như extension thật. **Đừng coi check origin là hàng rào chống được process local có chủ đích.**
+- **Ở http mode, hàng rào thật là token.** Server bind `0.0.0.0` **có chủ ý** để reverse proxy (Caddy trong `deploy/`) tới được — nghĩa là `/ws` và `/mcp` sẽ tới được từ internet qua proxy đó. Vì vậy hai điều sau là **bắt buộc, không phải khuyến nghị**: (1) TLS phải terminate ở proxy, dùng `wss://`/`https://` — token đi trong subprotocol/header, để plaintext là lộ token trên đường truyền; (2) **đừng bao giờ expose port 8787 trần ra internet** (compose dùng `expose` chứ không `ports`; bản systemd đặt `CC_CHROME_HOST=127.0.0.1`) — 8787 lộ ra ngoài thì ai cũng tự đặt được `X-Forwarded-For` và rate limit của `/pair` mất tác dụng. Token bị lộ thì thu hồi bằng `/ccchrome disconnect` hoặc `DELETE /pair`.
+- **Ở stdio mode không có token nào cả** — hai thứ duy nhất chặn đường là bind `127.0.0.1` (máy khác trong LAN không vào được) và một header có thể giả. Nói thẳng: mô hình đe dọa thực tế ở đây là *"phần mềm khác đang chạy sẵn trên máy bạn"*, và check origin không giải quyết được nó. Biện pháp giảm thiểu thật sự là **dùng một Chrome profile riêng cho automation**, để dù có bị lợi dụng thì cũng không có tab nào đăng nhập tài khoản cá nhân trong đó.
+- `CC_CHROME_EXTENSION_ID=<id>` thu hẹp thêm (chỉ chấp nhận đúng một extension ID) nhưng **không đóng được lỗ trên** — origin vẫn là chuỗi do client tự khai, chỉ là phải đoán đúng thêm một ID. Và pin này **chỉ dùng được khi cả team cài bản `.crx` đã ký** (kéo thả trên Linux, hoặc enterprise policy trên Windows/macOS): cài kiểu **zip + Load unpacked** như hướng dẫn ở trên sinh ID **theo đường dẫn thư mục**, khác nhau trên máy từng người — đặt pin trong trường hợp đó sẽ khoá cả team ra ngoài.
 - Extension có quyền `<all_urls>` + `debugger` (giống extension gốc của Anthropic) — Claude Code sẽ thao tác được trên **mọi trang đang mở, kể cả tab đã đăng nhập**. Khuyến nghị dùng một Chrome profile riêng cho automation nếu không muốn Claude đụng vào tài khoản cá nhân.
 - Khi tool dùng debugger API (screenshot full page, eval, phím, console, network), Chrome hiện thanh thông báo *"... started debugging this browser"* — bình thường, đừng bấm Cancel khi đang chạy.
 
