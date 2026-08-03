@@ -189,6 +189,7 @@ Một người mở nhiều phiên Claude Code cùng lúc vẫn ổn — tất c
 | `CC_CHROME_TIMEOUT_MS` | `45000` | Timeout mỗi lệnh gửi tới extension. |
 | `CC_CHROME_TRUST_PROXY` | — | Đặt `1` khi server đứng sau reverse proxy: rate-limit đọc IP thật từ `X-Forwarded-For`. Không đặt thì dùng IP socket. |
 | `CC_CHROME_MAX_TOKENS` | `100` | Trần số token động, chặn việc biến secret bị lộ thành máy phát token. |
+| `CC_CHROME_SESSION_TTL_MS` | `1800000` | Session MCP không hoạt động quá lâu sẽ bị đóng và dọn. |
 | `CC_CHROME_EXTENSION_ID` | — | Chỉ chấp nhận đúng một extension ID (ID in ra khi `npm run build`). Không đặt thì chấp nhận mọi `chrome-extension://`. |
 
 Đổi port ở phía extension: bấm icon extension → sửa "Địa chỉ MCP server" → **Lưu & kết nối lại**.

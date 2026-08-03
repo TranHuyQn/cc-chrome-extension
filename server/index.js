@@ -534,7 +534,20 @@ async function mainHttp() {
     log("      Behind a reverse proxy that is the proxy itself — set CC_CHROME_TRUST_PROXY=1 there.");
   }
 
-  const sessions = new Map(); // mcp-session-id -> { transport, token }
+  const SESSION_TTL_MS = Number(process.env.CC_CHROME_SESSION_TTL_MS || 30 * 60 * 1000);
+  const sessions = new Map(); // mcp-session-id -> { transport, token, lastSeen }
+
+  // A client that disappears without closing (laptop shut, session killed) used
+  // to leave its transport here forever.
+  setInterval(() => {
+    const now = Date.now();
+    for (const [id, session] of sessions) {
+      if (now - session.lastSeen <= SESSION_TTL_MS) continue;
+      log(`Closing MCP session ${id}: idle for more than ${SESSION_TTL_MS}ms`);
+      sessions.delete(id);
+      try { session.transport.close(); } catch {}
+    }
+  }, Math.min(5 * 60 * 1000, SESSION_TTL_MS)).unref();
 
   const bearerOf = (req) => {
     const header = req.headers.authorization || "";
@@ -580,7 +593,12 @@ async function mainHttp() {
     const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
 
     if (url.pathname === "/health") {
-      return json(res, 200, { ok: true, version: VERSION, extensionsConnected: [...registry.connections.values()].filter((c) => c.connected).length });
+      return json(res, 200, {
+        ok: true,
+        version: VERSION,
+        extensionsConnected: [...registry.connections.values()].filter((c) => c.connected).length,
+        mcpSessions: sessions.size,
+      });
     }
 
     // --- extension downloads (built by `npm run build` into dist/) ----------
@@ -678,6 +696,7 @@ async function mainHttp() {
         if (session.token !== token) {
           return json(res, 403, { error: "session belongs to a different token" });
         }
+        session.lastSeen = Date.now();
         const body = req.method === "POST" ? await readBody(req) : undefined;
         await session.transport.handleRequest(req, res, body);
         return;
@@ -691,7 +710,7 @@ async function mainHttp() {
       const body = await readBody(req);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: randomUUID,
-        onsessioninitialized: (id) => sessions.set(id, { transport, token }),
+        onsessioninitialized: (id) => sessions.set(id, { transport, token, lastSeen: Date.now() }),
       });
       transport.onclose = () => {
         if (transport.sessionId) sessions.delete(transport.sessionId);
