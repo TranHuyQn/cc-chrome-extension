@@ -25,7 +25,12 @@ Mục tiêu: tự sinh token trên server, cấu hình MCP cho Claude Code, và 
      -H "content-type: application/json" \
      -d '{"name": "<tên người dùng, hỏi hoặc lấy $USER>"}'
    ```
-   Kết quả JSON gồm `token`, `name`, `mcpUrl`, `wsUrl`. Nếu 401: secret sai. Nếu 404: server chưa bật pairing (`CC_CHROME_PAIR_SECRET` chưa đặt) — báo người dùng liên hệ admin.
+   Kết quả JSON gồm `token`, `name`, `mcpUrl`, `wsUrl`. Xử lý lỗi:
+   - **401** — pairing secret sai. Hỏi lại secret, đừng sinh token mới bằng giá trị cũ.
+   - **404** — server chưa bật pairing (`CC_CHROME_PAIR_SECRET` chưa đặt) — báo người dùng liên hệ admin.
+   - **429** — bị rate limit vì nhập sai secret quá nhiều (10 lần / 15 phút / IP). Response có header `Retry-After` (giây): báo người dùng chờ đúng chừng đó rồi chạy lại. **Chờ là hết**, không cần làm gì khác. Lấy header bằng `curl -sS -D - -o /dev/null ...` nếu cần.
+   - **503** — server đã chạm trần `CC_CHROME_MAX_TOKENS` (số token động tối đa). **Chờ không hết** — báo người dùng nhờ admin thu hồi token cũ (`DELETE /pair`) hoặc nâng `CC_CHROME_MAX_TOKENS` rồi restart server. Đừng thử lại trong vòng lặp.
+
    **Không bao giờ in pairing secret ra màn hình**; token cá nhân thì in được (người dùng cần dán nó vào extension).
 
 4. **Lưu trạng thái**: ghi `~/.ccchrome.json` chứa `serverUrl`, `token`, `name`.
@@ -36,12 +41,17 @@ Mục tiêu: tự sinh token trên server, cấu hình MCP cho Claude Code, và 
    ```
    Nếu đã tồn tại với token khác: `claude mcp remove --scope user chrome` rồi add lại.
 
-6. **Hướng dẫn nối extension**: in cho người dùng (dùng `wsUrl` từ bước 3, hoặc tự ghép `wss://<host>/ws?token=<token>`):
+6. **Nhắc cài/cập nhật extension lên bản ≥ 2.0.0** — bước này phải nói trước bước dán URL. Từ 2.0.0 token đi qua WebSocket subprotocol chứ không còn ở query string, nên **extension 1.x không bắt tay được với server 2.0.0** (và ngược lại): badge cứ đỏ mãi dù URL và token đều đúng. In cho người dùng:
+   - Tải bản mới nhất tại `<serverUrl>/extension.zip` (chính server này phục vụ file đó), giải nén ra một thư mục cố định
+   - `chrome://extensions` → **Load unpacked** → chọn thư mục đó (đè lên bản cũ), hoặc bấm **Reload** nếu đã cài từ chính thư mục đó
+   - Người dùng đang cài từ source repo thì chỉ cần `git pull` rồi **Reload** trong `chrome://extensions`
+
+7. **Hướng dẫn nối extension**: in cho người dùng (dùng `wsUrl` từ bước 3, hoặc tự ghép `wss://<host>/ws?token=<token>`):
    - Mở Chrome → bấm icon **Claude Code Chrome Bridge**
    - Dán `<wsUrl>` vào ô "Địa chỉ MCP server" → bấm **Lưu & kết nối lại**
-   - Badge chuyển `on` màu xanh là xong
+   - Badge chuyển `on` màu xanh là xong. Badge đỏ `×` thì **xem dòng lỗi ngay trong popup** — từ 2.0.0 server báo rõ lý do từ chối (token sai/bị thu hồi, URL thiếu token, extension cũ hơn server, origin không hợp lệ) chứ không còn im lặng nữa.
 
-7. **Chờ extension kết nối**: poll tối đa ~2 phút:
+8. **Chờ extension kết nối**: poll tối đa ~2 phút:
    ```
    for i in $(seq 1 40); do
      curl -sS -H "Authorization: Bearer <token>" <serverUrl>/pair/status | grep -q '"extensionConnected":true' && echo CONNECTED && break
@@ -49,11 +59,19 @@ Mục tiêu: tự sinh token trên server, cấu hình MCP cho Claude Code, và 
    done
    ```
    - Nếu `CONNECTED`: báo thành công 🎉 và nhắc: **tool chrome chỉ xuất hiện ở phiên Claude Code mới** — thoát và chạy lại `claude` (hoặc `/mcp` để kiểm tra) nếu phiên hiện tại chưa thấy server `chrome`.
-   - Nếu hết giờ: token và cấu hình vẫn đã xong, chỉ còn thiếu bước dán URL vào extension — in lại `wsUrl` và hướng dẫn, bảo người dùng chạy `/ccchrome status` sau khi dán.
+   - Nếu hết giờ: token và cấu hình phía Claude Code đã xong, vấn đề nằm ở phía extension. In lại `wsUrl` và bảo người dùng kiểm tra theo thứ tự này (đừng chỉ nói "chưa dán URL" — nguyên nhân hay gặp nhất hiện nay là extension còn ở bản 1.x, dán URL đúng cũng vẫn không kết nối được):
+     1. **Bản extension** — bấm icon extension xem version, phải **≥ 2.0.0**. Cũ hơn thì tải lại `<serverUrl>/extension.zip` và Load unpacked đè lên (bước 6).
+     2. **Dòng lỗi trong popup** — từ 2.0.0 popup nói rõ lý do bị từ chối; đọc nó rồi xử theo:
+        - *"Token sai hoặc đã bị thu hồi"* → chạy lại `/ccchrome connect` để lấy token mới
+        - *"URL thiếu token"* → URL dán vào thiếu `?token=…`, dán lại đúng `wsUrl` ở trên
+        - *"extension cũ hơn server"* → quay lại mục 1
+        - *"origin không hợp lệ"* → admin đặt `CC_CHROME_EXTENSION_ID` không khớp với extension đang cài; báo admin
+        - Popup trống / *"MCP server chưa chạy"* → URL chưa được dán, hoặc sai host/scheme (`wss://` cho server có HTTPS)
+     3. Dán xong thì chạy `/ccchrome status` để xác nhận.
 
 ## `status`
 
-Đọc `~/.ccchrome.json`; không có thì báo "chưa kết nối, chạy `/ccchrome connect`". Có thì gọi `GET <serverUrl>/pair/status` với Bearer token và báo cáo: server sống không, `extensionConnected` true/false, tên người dùng. Kiểm tra thêm `claude mcp get chrome` để xác nhận MCP đã đăng ký. Nếu `extensionConnected` là false, in lại `wsUrl` và hướng dẫn dán vào popup extension.
+Đọc `~/.ccchrome.json`; không có thì báo "chưa kết nối, chạy `/ccchrome connect`". Có thì gọi `GET <serverUrl>/pair/status` với Bearer token và báo cáo: server sống không, `extensionConnected` true/false, tên người dùng. Kiểm tra thêm `claude mcp get chrome` để xác nhận MCP đã đăng ký. Nếu `extensionConnected` là false, in lại `wsUrl` và chạy đúng danh sách kiểm tra ở nhánh hết giờ của `connect` (bản extension ≥ 2.0.0 trước, rồi đọc dòng lỗi trong popup, rồi mới tới chuyện dán URL).
 
 ## `disconnect`
 
