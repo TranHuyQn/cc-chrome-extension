@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const extensionPath = join(root, "extension");
@@ -330,6 +330,56 @@ for (let i = 0; i < 40; i++) {
 }
 check("popup explains a rejected token", /[Tt]oken/.test(popupError), `popup #error = ${JSON.stringify(popupError)}`);
 await popup.close();
+
+// --- a refused handshake must not reset the reconnect backoff ----------------
+
+// Since 2.0.0 the server refuses by completing the 101 handshake and then
+// closing with a code, so the extension's `open` event fires for refusals too.
+// While `open` reset reconnectDelay to RECONNECT_MIN_MS, every member with a
+// wrong or revoked token retried once a second forever — a permanent 1 Hz
+// storm in the server log and in Caddy's access log, with the badge flashing
+// green then red once a second.
+//
+// A standalone server stands in for the real one so the attempts can be
+// counted directly; it mirrors server/index.js's reject path exactly (echo the
+// offered subprotocol, complete the handshake, close 4001).
+const REJECT_PORT = 8933;
+const rejectAttempts = [];
+const rejectServer = new WebSocketServer({
+  host: "127.0.0.1",
+  port: REJECT_PORT,
+  handleProtocols: (protocols) => [...protocols][0] ?? false,
+});
+rejectServer.on("connection", (socket) => {
+  rejectAttempts.push(Date.now());
+  socket.close(4001, "invalid token");
+});
+await new Promise((r) => rejectServer.once("listening", r));
+
+// Changing the URL runs forceReconnect(), which resets the backoff to 1s — so
+// the window below starts from the most favourable possible state for a storm.
+await sw.evaluate(async (wsUrl) => {
+  await chrome.storage.local.set({ wsUrl });
+}, `ws://127.0.0.1:${REJECT_PORT}/ws?token=definitely-not-a-real-token`);
+
+for (let i = 0; i < 40 && rejectAttempts.length === 0; i++) await sleep(250);
+check("extension reaches the refusing server", rejectAttempts.length > 0);
+
+// Count, not exact timings: a 1 Hz storm puts ~12 attempts in this window,
+// while a backoff that jumps to RECONNECT_MAX_MS (30s) on a refusal allows at
+// most the 30s keepalive alarm to sneak one extra in. The threshold sits far
+// from both, so the check does not depend on scheduler jitter.
+const BACKOFF_WINDOW_MS = 12000;
+const firstAttempt = rejectAttempts[0] ?? Date.now();
+await sleep(BACKOFF_WINDOW_MS);
+const retries = rejectAttempts.filter((t) => t > firstAttempt);
+const gaps = rejectAttempts.map((t) => t - firstAttempt);
+check(
+  "a refused handshake does not reset the backoff (no 1 Hz reconnect storm)",
+  retries.length <= 3,
+  `${retries.length} retries in ${BACKOFF_WINDOW_MS}ms; offsets=${gaps.join(",")}`
+);
+rejectServer.close();
 
 // --- extension package downloads (requires `npm run build` to have run) -----
 

@@ -14,11 +14,22 @@ const NETWORK_BUFFER_MAX = 400;
 // The server refuses a handshake by closing with one of these codes. Without
 // this mapping every refusal reaches the user as a generic socket error, and a
 // misconfigured token looks exactly like a server that is not running.
+//
+// 4002 covers two different causes and must name both: a pre-2.0.0 extension
+// has no CLOSE_REASONS map at all, so the only client that can ever *display*
+// this message is a 2.0.0 extension whose saved URL simply has no ?token=.
 const CLOSE_REASONS = {
   4001: "Token sai hoặc đã bị thu hồi — chạy lại /ccchrome connect",
-  4002: "Extension đã cũ so với server — tải lại bản mới rồi Load unpacked đè lên",
+  4002: "URL thiếu token, hoặc extension cũ hơn server — kiểm tra URL đã có ?token=… chưa, rồi tải lại extension từ <server>/extension.zip nếu vẫn lỗi",
   4003: "Server từ chối: origin không hợp lệ",
 };
+
+// Refusals: the server will keep refusing until a human changes something, so
+// retrying every second helps nobody.
+const REFUSAL_CODES = new Set([4001, 4002, 4003]);
+
+const MISSING_TOKEN_REASON =
+  "URL thiếu token — server từ xa cần dạng wss://<domain>/ws?token=… (chạy /ccchrome connect để lấy URL)";
 
 let ws = null;
 let wsUrl = DEFAULT_WS_URL;
@@ -53,6 +64,14 @@ function scheduleReconnect() {
   reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
 }
 
+// A loopback URL is the stdio-mode bridge (ws://127.0.0.1:9876), which has no
+// tokens at all. Anything else is a shared server, where a URL without a token
+// can only ever be refused — worth saying locally instead of round-tripping.
+function isLoopbackUrl(parsed) {
+  const host = parsed.hostname.replace(/^\[|\]$/g, "");
+  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+}
+
 async function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   await loadConfig();
@@ -64,6 +83,12 @@ async function connect() {
     const parsed = new URL(wsUrl);
     const token = parsed.searchParams.get("token");
     parsed.searchParams.delete("token");
+    if (!token && !isLoopbackUrl(parsed)) {
+      setStatus("disconnected", { lastError: MISSING_TOKEN_REASON });
+      reconnectDelay = RECONNECT_MAX_MS;
+      scheduleReconnect();
+      return;
+    }
     socket = token
       ? new WebSocket(parsed.toString(), [`ccchrome.token.${token}`])
       : new WebSocket(parsed.toString());
@@ -74,20 +99,35 @@ async function connect() {
   }
   ws = socket;
 
+  // `open` is NOT proof of success. Since 2.0.0 the server refuses by
+  // completing the 101 handshake and then closing with a code (a browser cannot
+  // read the HTTP status of a failed upgrade), so `open` fires for refusals
+  // too. Treating it as success reset the backoff on every refusal, turning a
+  // wrong token into a permanent 1 Hz reconnect storm with a badge flashing
+  // green once a second. The connection is only proven once the server has
+  // actually spoken to us — it sends nothing to a socket it is about to close.
+  let proven = false;
+
   // Every handler checks `ws === socket` so events from a stale socket
   // (e.g. one the server replaced during a reconnect) can't clobber the
   // current connection and cause a reconnect storm.
   socket.onopen = () => {
     if (ws !== socket) return;
-    reconnectDelay = RECONNECT_MIN_MS;
-    setStatus("connected", { lastError: null });
     send({ type: "hello", client: "claude-code-chrome-bridge", version: chrome.runtime.getManifest().version });
+    // The server answers `ping` with `pong`, so this turns "proven" into a
+    // sub-second signal instead of waiting a whole keepalive period.
+    send({ type: "ping" });
     clearInterval(keepaliveTimer);
     keepaliveTimer = setInterval(() => send({ type: "ping" }), KEEPALIVE_MS);
   };
 
   socket.onmessage = async (event) => {
     if (ws !== socket) return;
+    if (!proven) {
+      proven = true;
+      reconnectDelay = RECONNECT_MIN_MS;
+      setStatus("connected", { lastError: null });
+    }
     let msg;
     try {
       msg = JSON.parse(event.data);
@@ -101,9 +141,16 @@ async function connect() {
   socket.onclose = (event) => {
     if (ws !== socket) return;
     clearInterval(keepaliveTimer);
-    const reason = CLOSE_REASONS[event.code];
-    setStatus("disconnected", reason ? { lastError: reason } : {});
+    // Always compute the reason, never merge: code 4000 ("replaced by new
+    // connection") has no mapping, and merging would leave a stale "Token sai…"
+    // on screen for a member who has since fixed their token. An unmapped code
+    // on a socket that never proved itself is the ordinary "nothing answered"
+    // case; one that did prove itself just ended, and has nothing to report.
+    const reason = CLOSE_REASONS[event.code]
+      ?? (proven ? null : "Không kết nối được — MCP server chưa chạy, hoặc URL sai?");
+    setStatus("disconnected", { lastError: reason });
     ws = null;
+    if (REFUSAL_CODES.has(event.code)) reconnectDelay = RECONNECT_MAX_MS;
     scheduleReconnect();
   };
 
