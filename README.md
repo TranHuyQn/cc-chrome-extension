@@ -191,7 +191,7 @@ Một người mở nhiều phiên Claude Code cùng lúc vẫn ổn — tất c
 
 ## Lưu ý bảo mật
 
-- WebSocket server chỉ bind `127.0.0.1` và chỉ chấp nhận kết nối có origin `chrome-extension://` — process khác trên máy không giả làm Claude Code được, máy khác trong mạng LAN không kết nối được.
+- WebSocket server chỉ bind `127.0.0.1` và **bắt buộc** kết nối phải có origin `chrome-extension://` — process khác trên máy (script Node, curl…) không giả làm extension được, máy khác trong mạng LAN không kết nối được. Muốn siết thêm, đặt `CC_CHROME_EXTENSION_ID=<id>` để chỉ chấp nhận đúng một extension (ID in ra khi chạy `npm run build`).
 - Extension có quyền `<all_urls>` + `debugger` (giống extension gốc của Anthropic) — Claude Code sẽ thao tác được trên **mọi trang đang mở, kể cả tab đã đăng nhập**. Khuyến nghị dùng một Chrome profile riêng cho automation nếu không muốn Claude đụng vào tài khoản cá nhân.
 - Khi tool dùng debugger API (screenshot full page, eval, phím, console, network), Chrome hiện thanh thông báo *"... started debugging this browser"* — bình thường, đừng bấm Cancel khi đang chạy.
 

@@ -34,6 +34,18 @@ const VERSION = "1.2.0";
 
 const log = (...args) => console.error("[claude-code-chrome-mcp]", ...args);
 
+// Only the Chrome extension may drive the bridge. An absent Origin used to slip
+// through this check, which let any local process connect and control the
+// browser. Optionally pin to one extension id for a tighter guarantee — left
+// unset by default because a Load-unpacked extension gets a path-derived id
+// that differs from the signed .crx build.
+const EXTENSION_ID = process.env.CC_CHROME_EXTENSION_ID || null;
+
+function originAllowed(origin) {
+  if (!origin.startsWith("chrome-extension://")) return false;
+  return EXTENSION_ID ? origin === `chrome-extension://${EXTENSION_ID}` : true;
+}
+
 // ---------------------------------------------------------------------------
 // Extension connections
 // ---------------------------------------------------------------------------
@@ -457,8 +469,8 @@ async function mainStdio() {
   });
   wss.on("connection", (socket, req) => {
     const origin = req.headers.origin || "";
-    if (origin && !origin.startsWith("chrome-extension://")) {
-      log(`Rejected connection from origin: ${origin}`);
+    if (!originAllowed(origin)) {
+      log(`Rejected connection from origin: ${origin || "(none)"}`);
       socket.close(4003, "origin not allowed");
       return;
     }
@@ -650,19 +662,28 @@ async function mainHttp() {
       socket.destroy();
       return;
     }
+
+    // Rejections complete the handshake and then close with a specific code.
+    // A browser cannot read the HTTP status of a failed upgrade, so destroying
+    // the socket would reach the extension as an indistinguishable 1006 — the
+    // user would see "server not running" for what is really a config error.
+    // A rejected socket is never registered, so it can do nothing meanwhile.
+    const reject = (code, reason) => {
+      wss.handleUpgrade(req, socket, head, (ws) => ws.close(code, reason));
+    };
+
     const origin = req.headers.origin || "";
-    if (origin && !origin.startsWith("chrome-extension://")) {
-      log(`Rejected ws upgrade from origin: ${origin}`);
-      socket.destroy();
-      return;
+    if (!originAllowed(origin)) {
+      log(`Rejected ws upgrade from origin: ${origin || "(none)"}`);
+      return reject(4003, "origin not allowed");
     }
+
     const token = url.searchParams.get("token");
     if (!token || !tokens.has(token)) {
       log("Rejected ws upgrade: bad token");
-      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-      socket.destroy();
-      return;
+      return reject(4001, "invalid token");
     }
+
     wss.handleUpgrade(req, socket, head, (ws) => {
       registry.attach(ws, token, tokens.get(token));
     });

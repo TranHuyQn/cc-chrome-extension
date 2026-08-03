@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
+import WebSocket from "ws";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const extensionPath = join(root, "extension");
@@ -272,6 +273,17 @@ r = await client.callTool("switch_tab", { tabId: newTabId });
 check("switch_tab", toolText(r).includes(String(newTabId)), toolText(r));
 r = await client.callTool("close_tab", { tabId: newTabId });
 check("close_tab", toolText(r).includes(String(newTabId)), toolText(r));
+
+// A non-extension local process must not be able to drive the browser. The `ws`
+// client sends no Origin header, which is exactly the case that used to slip
+// through.
+const rawCloseCode = await new Promise((resolve) => {
+  const raw = new WebSocket(`ws://127.0.0.1:${WS_PORT}`);
+  raw.on("close", (code) => resolve(code));
+  raw.on("error", () => resolve(-1));
+  setTimeout(() => resolve(0), 5000);
+});
+check("raw ws client without Origin is rejected with 4003", rawCloseCode === 4003, `code=${rawCloseCode}`);
 
 // error paths
 r = await client.callTool("click", { selector: "#does-not-exist" });
