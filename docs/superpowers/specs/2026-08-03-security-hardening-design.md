@@ -102,8 +102,11 @@ rồi spam tạo token. Vượt trần → 429 với thông báo liên hệ admi
 ### D. Dọn session hết hạn
 
 Mỗi entry trong `sessions` lưu thêm `lastSeen`, cập nhật ở mỗi request. Timer
-quét mỗi 5 phút, xoá entry idle quá `CC_CHROME_SESSION_TTL_MS` (mặc định 30
-phút) và gọi `transport.close()`. Timer `.unref()`.
+quét mỗi 5 phút, xoá entry idle quá `CC_CHROME_SESSION_TTL_MS` (mặc định 8 giờ,
+`28800000`) và gọi `transport.close()`. Timer `.unref()`. Mặc định ban đầu là 30
+phút, nhưng đã đổi thành 8 giờ vì một TTL ngắn sẽ reap nhầm session đang giữ một
+SSE stream còn sống nhưng chưa gửi request nào — làm hỏng trải nghiệm của người
+dùng để Claude Code idle một lúc.
 
 ### E. Thông báo lỗi ở extension
 

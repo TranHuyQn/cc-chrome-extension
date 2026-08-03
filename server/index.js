@@ -31,7 +31,7 @@ const MODE = process.argv.includes("--http") || process.env.CC_CHROME_MODE === "
 const PORT = Number(process.env.CC_CHROME_PORT || (MODE === "http" ? 8787 : 9876));
 const HOST = process.env.CC_CHROME_HOST || (MODE === "http" ? "0.0.0.0" : "127.0.0.1");
 const REQUEST_TIMEOUT_MS = Number(process.env.CC_CHROME_TIMEOUT_MS || 45000);
-const VERSION = "1.2.0";
+const VERSION = "2.0.0";
 
 const log = (...args) => console.error("[claude-code-chrome-mcp]", ...args);
 

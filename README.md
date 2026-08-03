@@ -2,6 +2,12 @@
 
 Extension thay thế cho **Claude in Chrome** chính thức, dành cho team dùng chung tài khoản Claude **chỉ với Claude Code** (không đăng nhập được claude.ai). Extension gốc bắt buộc đăng nhập claude.ai trong browser; bản bridge này thì **không cần bất kỳ đăng nhập nào** — Claude Code điều khiển Chrome thông qua một MCP server chạy local trên máy bạn.
 
+> **Nâng lên 2.0.0 — bắt buộc cập nhật cả hai phía.** Token giờ đi qua WebSocket
+> subprotocol thay vì query string, nên extension 1.x **không** kết nối được
+> server 2.0.0 và ngược lại. Sau khi deploy server, mọi thành viên phải tải lại
+> `extension.zip` và Load unpacked đè lên bản cũ. URL đã lưu trong popup không
+> cần đổi — extension tự tách token ra khỏi URL.
+
 ## Kiến trúc
 
 ```

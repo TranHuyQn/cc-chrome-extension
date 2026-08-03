@@ -90,12 +90,22 @@ the session. Log through `log()` (which is `console.error`) or `process.stderr` 
 
 ## Security invariants — do not relax without being asked
 
-- stdio mode binds `127.0.0.1` only and rejects WebSocket connections whose origin is not
-  `chrome-extension://`.
-- http mode requires a token (`CC_CHROME_TOKENS` / `CC_CHROME_TOKENS_FILE` / `CC_CHROME_PAIR_SECRET`);
-  a token maps a Claude Code session to exactly one member's extension. Tokens ≥ 8 chars, pair secret
-  ≥ 12 — the server rejects weaker values on purpose.
-- The deploy path assumes TLS terminates at Caddy (`deploy/`); port 8787 is never exposed directly.
+- Both modes require `Origin: chrome-extension://…` on the WebSocket handshake.
+  An absent Origin is a rejection, not a pass — that hole let any local process
+  drive the browser. `CC_CHROME_EXTENSION_ID` optionally pins one extension id.
+- The http-mode token travels in `Sec-WebSocket-Protocol` (`ccchrome.token.<t>`),
+  never in the query string, because reverse proxies log the full URI. The
+  server must echo the selected subprotocol via `handleProtocols` or browsers
+  fail the handshake with no usable error.
+- Refusals complete the handshake and close with a code (4001 bad token, 4002
+  missing subprotocol, 4003 bad origin) so the extension can explain itself.
+  Destroying the socket reaches the browser as an indistinguishable 1006.
+- `POST /pair` is rate limited per IP. `X-Forwarded-For` is honored only when
+  `CC_CHROME_TRUST_PROXY=1`, otherwise a forged header would bypass the limiter.
+- Tokens ≥ 8 chars, pair secret ≥ 12 — the server rejects weaker values on
+  purpose. Dynamic tokens are capped by `CC_CHROME_MAX_TOKENS`.
+- The deploy path assumes TLS terminates at Caddy (`deploy/`); port 8787 is
+  never exposed directly.
 
 ## Conventions
 

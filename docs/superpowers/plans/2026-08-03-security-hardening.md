@@ -1129,7 +1129,7 @@ header. Both deploy configs set it."
 
 **Interfaces:**
 - Consumes: không có.
-- Produces: `/health` trả thêm trường `mcpSessions: number`. Biến `CC_CHROME_SESSION_TTL_MS` (mặc định `1800000`).
+- Produces: `/health` trả thêm trường `mcpSessions: number`. Biến `CC_CHROME_SESSION_TTL_MS` (mặc định `28800000`, 8 giờ).
 
 - [ ] **Step 1: Viết test thất bại**
 
@@ -1219,7 +1219,7 @@ Kỳ vọng: `FAIL  no sessions before any client connects  -- {"ok":true,...}` 
 Trong `server/index.js`, `mainHttp()`, thay dòng khai báo `sessions` và thêm timer ngay dưới:
 
 ```js
-  const SESSION_TTL_MS = Number(process.env.CC_CHROME_SESSION_TTL_MS || 30 * 60 * 1000);
+  const SESSION_TTL_MS = Number(process.env.CC_CHROME_SESSION_TTL_MS || 8 * 60 * 60 * 1000);
   const sessions = new Map(); // mcp-session-id -> { transport, token, lastSeen }
 
   // A client that disappears without closing (laptop shut, session killed) used
@@ -1286,7 +1286,7 @@ Kỳ vọng: năm suite đều `ALL TESTS PASSED`.
 Thêm dòng vào bảng "Cấu hình":
 
 ```markdown
-| `CC_CHROME_SESSION_TTL_MS` | `1800000` | Session MCP không hoạt động quá lâu sẽ bị đóng và dọn. |
+| `CC_CHROME_SESSION_TTL_MS` | `28800000` | Session MCP không hoạt động quá lâu sẽ bị đóng và dọn. |
 ```
 
 - [ ] **Step 8: Commit**
