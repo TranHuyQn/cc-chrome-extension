@@ -20,7 +20,7 @@ Spec nguồn: `docs/superpowers/specs/2026-08-03-security-hardening-design.md`
 - `npm run lint` phải sạch trước mọi commit. Hook `PostToolUse` trong `.claude/settings.json` đã tự chạy ESLint sau mỗi lần ghi file `.js`/`.mjs` — sửa hết lỗi nó báo trước khi đi tiếp.
 - Toàn bộ test đang có phải tiếp tục pass sau mỗi task. Đó là lưới an toàn cho việc tách file.
 - Code và comment viết bằng tiếng Anh. Commit message tiếng Anh. Tài liệu người dùng (`README.md`) tiếng Việt.
-- Chrome dùng để test: `CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"` (Chrome 150 đã có sẵn trên máy này).
+- Lệnh chạy test trên máy này: `HEADED=1 npm test`, **để `CHROME_PATH` trống**. Google Chrome bản stable ≥137 đã bỏ cờ `--load-extension`/`--disable-extensions-except` nên không nạp được extension unpacked; Playwright's Chromium (đã có sẵn trong cache máy) vẫn nhận. Extension service worker cũng không xuất hiện ở chế độ headless trên macOS, nên bắt buộc `HEADED=1`. Phát hiện ở Task 1, ghi chi tiết trong `CLAUDE.md`.
 - Ba con số version phải khớp nhau ở mọi thời điểm sau Task 8: `extension/manifest.json`, hằng `VERSION` trong `server/index.js`, `server/package.json`.
 
 ## File Structure
@@ -188,7 +188,7 @@ Trong `package.json`, phần `scripts`, thêm `test:origin` và đưa nó vào `
 Chạy:
 
 ```bash
-CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm run test:origin
+HEADED=1 npm run test:origin
 ```
 
 Kỳ vọng: cả hai dòng `PASS`, kết thúc `ALL TESTS PASSED`.
@@ -196,7 +196,7 @@ Kỳ vọng: cả hai dòng `PASS`, kết thúc `ALL TESTS PASSED`.
 **Nếu FAIL ở dòng "extension opened a websocket connection"** — nhiều khả năng Chrome ở chế độ headless không nạp extension. Chạy lại với `HEADED=1`:
 
 ```bash
-HEADED=1 CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm run test:origin
+HEADED=1 npm run test:origin
 ```
 
 Nếu bản headed pass, ghi lại trong `CLAUDE.md` rằng test cần `HEADED=1` trên máy này và dùng biến đó cho mọi bước sau.
@@ -208,7 +208,7 @@ Nếu bản headed pass, ghi lại trong `CLAUDE.md` rằng test cần `HEADED=1
 Chạy:
 
 ```bash
-CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm test
+HEADED=1 npm test
 ```
 
 Kỳ vọng: cả bốn suite in `ALL TESTS PASSED`.
@@ -374,7 +374,7 @@ COPY server/*.js ./
 
 ```bash
 npm run lint
-CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm test
+HEADED=1 npm test
 ```
 
 Kỳ vọng: lint sạch, cả bốn suite `ALL TESTS PASSED`. Refactor thuần nên không được có bất kỳ thay đổi kết quả nào.
@@ -447,7 +447,7 @@ check("raw ws client without Origin is rejected with 4003", rawCloseCode === 400
 - [ ] **Step 2: Chạy test để xác nhận nó fail**
 
 ```bash
-CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm run test:stdio
+HEADED=1 npm run test:stdio
 ```
 
 Kỳ vọng: `FAIL  raw ws client without Origin is rejected with 4003  -- code=0` (kết nối được chấp nhận, không bị đóng). Đây chính là lỗ hổng, giờ đã có bằng chứng.
@@ -531,7 +531,7 @@ Ghi chú: đường token vẫn đọc từ query ở bước này — Task 4 s�
 
 ```bash
 npm run lint
-CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm test
+HEADED=1 npm test
 ```
 
 Kỳ vọng: `PASS  raw ws client without Origin is rejected with 4003`, và toàn bộ suite còn lại vẫn `ALL TESTS PASSED` — đặc biệt là extension thật vẫn kết nối được ở cả `e2e.mjs` lẫn `e2e-http.mjs`.
@@ -630,7 +630,7 @@ check(
 - [ ] **Step 2: Chạy test để xác nhận fail**
 
 ```bash
-CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm run test:http
+HEADED=1 npm run test:http
 ```
 
 Kỳ vọng: `FAIL  token in the query string is refused` (hiện vẫn được chấp nhận, trả 0) và `FAIL  valid token in the subprotocol is accepted` (server chưa đọc subprotocol nên trả 4001).
@@ -736,7 +736,7 @@ Trong `extension/background.js`, hàm `connect`, thay khối tạo socket:
 
 ```bash
 npm run lint
-CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm test
+HEADED=1 npm test
 ```
 
 Kỳ vọng: bốn ca mới đều PASS, và — quan trọng nhất — `extension connects with alice token` trong `e2e-http.mjs` vẫn PASS. Ca đó dùng URL `ws://127.0.0.1:PORT/ws?token=...` không đổi, nên nó đang chứng minh đúng luồng người dùng thật: URL cũ vẫn dán được, token đi qua subprotocol.
@@ -798,7 +798,7 @@ await popup.close();
 - [ ] **Step 2: Chạy test để xác nhận fail**
 
 ```bash
-CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm run test:http
+HEADED=1 npm run test:http
 ```
 
 Kỳ vọng: `FAIL  popup explains a rejected token` — popup hiện rỗng hoặc "websocket error (is the MCP server running?)", không có chữ "token".
@@ -835,7 +835,7 @@ Thay `socket.onclose`:
 
 ```bash
 npm run lint
-CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm test
+HEADED=1 npm test
 ```
 
 Kỳ vọng: `PASS  popup explains a rejected token`, mọi suite khác vẫn xanh.
@@ -930,7 +930,7 @@ check("rate limited response carries Retry-After", !!retryAfter && Number(retryA
 - [ ] **Step 2: Chạy test để xác nhận fail**
 
 ```bash
-CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm run test:http
+HEADED=1 npm run test:http
 ```
 
 Kỳ vọng: `FAIL  pair beyond CC_CHROME_MAX_TOKENS is refused  -- status=200` và `FAIL  repeated bad pairing secrets get rate limited  -- 401,401,401,...`.
@@ -1066,7 +1066,7 @@ Thay khối `if (url.pathname === "/pair" && req.method === "POST")`:
 
 ```bash
 npm run lint
-CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm test
+HEADED=1 npm test
 ```
 
 Kỳ vọng: bốn ca mới PASS, mọi ca cũ vẫn PASS.
@@ -1276,7 +1276,7 @@ Kỳ vọng: cả bốn dòng PASS. Ca cuối chứng minh session idle bị d�
 - [ ] **Step 6: Chạy toàn bộ test**
 
 ```bash
-CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm test
+HEADED=1 npm test
 ```
 
 Kỳ vọng: năm suite đều `ALL TESTS PASSED`.
@@ -1339,7 +1339,7 @@ check(
 - [ ] **Step 2: Chạy để xác nhận fail**
 
 ```bash
-CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm run test:build
+HEADED=1 npm run test:build
 ```
 
 Kỳ vọng: `FAIL  manifest, server VERSION and server package.json agree  -- manifest=1.1.0 index.js=1.2.0 package.json=1.0.0`.
@@ -1354,7 +1354,7 @@ Kỳ vọng: `FAIL  manifest, server VERSION and server package.json agree  -- m
 
 ```bash
 npm run lint
-CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm test
+HEADED=1 npm test
 ```
 
 Kỳ vọng: năm suite `ALL TESTS PASSED`, trong đó có dòng version mới.
@@ -1432,7 +1432,7 @@ Kỳ vọng: không in ra gì, exit 0.
 - [ ] **Step 2: Toàn bộ test từ trạng thái sạch**
 
 ```bash
-CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm test
+HEADED=1 npm test
 ```
 
 Kỳ vọng: năm suite, mỗi suite kết thúc `ALL TESTS PASSED`. Ghi lại số ca PASS của từng suite để đưa vào báo cáo.
