@@ -24,6 +24,7 @@ services:
       CC_CHROME_PAIR_SECRET: ${CC_CHROME_PAIR_SECRET:-}
       CC_CHROME_STATE_FILE: /data/ccchrome-tokens.json
       CC_CHROME_DIST_DIR: /app/dist
+      CC_CHROME_TRUST_PROXY: "1"
     volumes:
       - bridge_data:/data
       # Chạy `npm run build` ở gốc repo trước khi deploy để team tải extension

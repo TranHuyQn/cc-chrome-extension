@@ -25,6 +25,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { TokenStore } from "./tokens.js";
+import { RateLimiter, clientIp } from "./ratelimit.js";
 
 const MODE = process.argv.includes("--http") || process.env.CC_CHROME_MODE === "http" ? "http" : "stdio";
 const PORT = Number(process.env.CC_CHROME_PORT || (MODE === "http" ? 8787 : 9876));
@@ -525,6 +526,14 @@ async function mainHttp() {
     ? `Self-service pairing ENABLED (POST /pair). Dynamic tokens persist in ${tokens.stateFile}`
     : "Self-service pairing disabled (set CC_CHROME_PAIR_SECRET to enable /ccchrome connect)");
 
+  const TRUST_PROXY = process.env.CC_CHROME_TRUST_PROXY === "1";
+  const MAX_TOKENS = Number(process.env.CC_CHROME_MAX_TOKENS || 100);
+  const pairLimiter = new RateLimiter({ limit: 10, windowMs: 15 * 60 * 1000 });
+  if (tokens.pairSecret && !TRUST_PROXY) {
+    log("Note: CC_CHROME_TRUST_PROXY is not set, so /pair rate limiting keys on the socket address.");
+    log("      Behind a reverse proxy that is the proxy itself — set CC_CHROME_TRUST_PROXY=1 there.");
+  }
+
   const sessions = new Map(); // mcp-session-id -> { transport, token }
 
   const bearerOf = (req) => {
@@ -596,7 +605,24 @@ async function mainHttp() {
 
     if (url.pathname === "/pair" && req.method === "POST") {
       if (!tokens.pairSecret) return json(res, 404, { error: "pairing disabled on this server (CC_CHROME_PAIR_SECRET not set)" });
-      if (!isPairSecret(bearerOf(req))) return json(res, 401, { error: "bad pairing secret. Send 'Authorization: Bearer <CC_CHROME_PAIR_SECRET>'." });
+
+      const ip = clientIp(req, TRUST_PROXY);
+      const wait = pairLimiter.retryAfter(ip);
+      if (wait > 0) {
+        res.setHeader("retry-after", String(wait));
+        return json(res, 429, { error: `too many failed pairing attempts; retry in ${wait}s` });
+      }
+      if (!isPairSecret(bearerOf(req))) {
+        pairLimiter.fail(ip);
+        log(`Failed pairing attempt from ${ip}`);
+        return json(res, 401, { error: "bad pairing secret. Send 'Authorization: Bearer <CC_CHROME_PAIR_SECRET>'." });
+      }
+      pairLimiter.reset(ip);
+
+      if (tokens.dynamicSize >= MAX_TOKENS) {
+        return json(res, 429, { error: `token limit reached (${MAX_TOKENS}); ask the admin to revoke unused tokens or raise CC_CHROME_MAX_TOKENS` });
+      }
+
       let body = {};
       try {
         body = (await readBody(req)) || {};

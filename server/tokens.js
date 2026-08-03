@@ -55,6 +55,10 @@ export class TokenStore {
     return this.static.size + this.dynamic.size;
   }
 
+  get dynamicSize() {
+    return this.dynamic.size;
+  }
+
   has(token) {
     return this.static.has(token) || this.dynamic.has(token);
   }

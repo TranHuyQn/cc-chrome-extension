@@ -12,6 +12,8 @@ WorkingDirectory=/opt/cc-chrome-extension/server
 Environment=CC_CHROME_MODE=http
 Environment=CC_CHROME_PORT=8787
 Environment=CC_CHROME_HOST=127.0.0.1
+# Server đứng sau reverse proxy (Caddy/nginx) nên IP thật nằm ở X-Forwarded-For.
+Environment=CC_CHROME_TRUST_PROXY=1
 # Sinh secret/token: openssl rand -hex 16
 # Bật pairing tự phục vụ cho /ccchrome connect:
 Environment=CC_CHROME_PAIR_SECRET=DOI_SECRET_NAY_openssl_rand_hex_16

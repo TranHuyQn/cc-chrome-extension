@@ -93,6 +93,7 @@ const serverProc = spawn("node", [join(root, "server", "index.js"), "--http"], {
     CC_CHROME_PAIR_SECRET: PAIR_SECRET,
     CC_CHROME_STATE_FILE: stateFile,
     CC_CHROME_DIST_DIR: join(root, "dist"),
+    CC_CHROME_MAX_TOKENS: "2",
   },
   stdio: ["ignore", "inherit", "inherit"],
 });
@@ -343,6 +344,44 @@ if (res.status === 404) {
   const crxBytes = Buffer.from(await res.arrayBuffer());
   check("download extension.crx", res.status === 200 && crxBytes.subarray(0, 4).toString() === "Cr24", `status=${res.status} len=${crxBytes.length}`);
 }
+
+// --- pairing abuse limits ---------------------------------------------------
+
+// Dynamic tokens are capped so a leaked secret cannot be turned into an
+// unbounded token factory. carol's token was revoked above, so the store is
+// empty again and the cap of 2 applies cleanly from here.
+async function pairAs(name) {
+  return await fetch(`http://127.0.0.1:${MCP_PORT}/pair`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${PAIR_SECRET}`, "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+}
+check("pair below the cap succeeds", (await pairAs("cap-one")).status === 200);
+check("pair at the cap succeeds", (await pairAs("cap-two")).status === 200);
+const overCap = await pairAs("cap-three");
+check("pair beyond CC_CHROME_MAX_TOKENS is refused", overCap.status === 429, `status=${overCap.status}`);
+
+// The pairing secret is the one value a human chooses, so it is the one worth
+// throttling. Tokens are 128-bit random and not worth guessing.
+const attemptStatuses = [];
+let sawRateLimit = false;
+let retryAfter = null;
+for (let i = 0; i < 14; i++) {
+  const attempt = await fetch(`http://127.0.0.1:${MCP_PORT}/pair`, {
+    method: "POST",
+    headers: { authorization: "Bearer wrong-secret-000000", "content-type": "application/json" },
+    body: "{}",
+  });
+  attemptStatuses.push(attempt.status);
+  if (attempt.status === 429) {
+    sawRateLimit = true;
+    retryAfter = attempt.headers.get("retry-after");
+    break;
+  }
+}
+check("repeated bad pairing secrets get rate limited", sawRateLimit, attemptStatuses.join(","));
+check("rate limited response carries Retry-After", !!retryAfter && Number(retryAfter) > 0, `retry-after=${retryAfter}`);
 
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 

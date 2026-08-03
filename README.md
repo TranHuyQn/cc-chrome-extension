@@ -173,6 +173,7 @@ Một người mở nhiều phiên Claude Code cùng lúc vẫn ổn — tất c
 - **Thủ công**: sửa `CC_CHROME_TOKENS` trong `.env` rồi `docker compose up -d` (restart server).
 - Token dài tối thiểu 8 ký tự, pairing secret tối thiểu 12 (server từ chối giá trị yếu); nên dùng `openssl rand -hex 16`.
 - Có thể dùng file thay cho biến môi trường: `CC_CHROME_TOKENS_FILE=/path/tokens.json` với nội dung `{"<token>": "<tên>"}`.
+- `/pair` bị giới hạn 10 lần sai secret trong 15 phút cho mỗi IP; vượt thì trả 429 kèm `Retry-After`. Nếu server đứng sau proxy mà quên đặt `CC_CHROME_TRUST_PROXY=1`, mọi người sẽ bị tính chung một IP (IP của proxy) — server có log cảnh báo lúc khởi động.
 
 ## Cấu hình
 
@@ -186,6 +187,9 @@ Một người mở nhiều phiên Claude Code cùng lúc vẫn ổn — tất c
 | `CC_CHROME_PAIR_SECRET` | — | Bật pairing tự phục vụ (`POST /pair`, dùng bởi `/ccchrome connect`). Http mode cần ít nhất token tĩnh hoặc pair secret. |
 | `CC_CHROME_STATE_FILE` | `./ccchrome-tokens.json` | Nơi lưu bền vững token sinh động. |
 | `CC_CHROME_TIMEOUT_MS` | `45000` | Timeout mỗi lệnh gửi tới extension. |
+| `CC_CHROME_TRUST_PROXY` | — | Đặt `1` khi server đứng sau reverse proxy: rate-limit đọc IP thật từ `X-Forwarded-For`. Không đặt thì dùng IP socket. |
+| `CC_CHROME_MAX_TOKENS` | `100` | Trần số token động, chặn việc biến secret bị lộ thành máy phát token. |
+| `CC_CHROME_EXTENSION_ID` | — | Chỉ chấp nhận đúng một extension ID (ID in ra khi `npm run build`). Không đặt thì chấp nhận mọi `chrome-extension://`. |
 
 Đổi port ở phía extension: bấm icon extension → sửa "Địa chỉ MCP server" → **Lưu & kết nối lại**.
 
