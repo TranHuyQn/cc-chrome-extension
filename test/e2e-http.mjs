@@ -359,8 +359,16 @@ async function pairAs(name) {
 }
 check("pair below the cap succeeds", (await pairAs("cap-one")).status === 200);
 check("pair at the cap succeeds", (await pairAs("cap-two")).status === 200);
+// 503, not 429: the cap will not clear by waiting, so it must be
+// distinguishable from the rate limit below (which does carry Retry-After).
 const overCap = await pairAs("cap-three");
-check("pair beyond CC_CHROME_MAX_TOKENS is refused", overCap.status === 429, `status=${overCap.status}`);
+check("pair beyond CC_CHROME_MAX_TOKENS is refused with 503", overCap.status === 503, `status=${overCap.status}`);
+check("token-cap refusal has no Retry-After", !overCap.headers.get("retry-after"), `retry-after=${overCap.headers.get("retry-after")}`);
+check(
+  "token-cap message names CC_CHROME_MAX_TOKENS",
+  ((await overCap.json()).error || "").includes("CC_CHROME_MAX_TOKENS"),
+  "expected the error to name the env var"
+);
 
 // The pairing secret is the one value a human chooses, so it is the one worth
 // throttling. Tokens are 128-bit random and not worth guessing.

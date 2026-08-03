@@ -527,7 +527,13 @@ async function mainHttp() {
     : "Self-service pairing disabled (set CC_CHROME_PAIR_SECRET to enable /ccchrome connect)");
 
   const TRUST_PROXY = process.env.CC_CHROME_TRUST_PROXY === "1";
-  const MAX_TOKENS = Number(process.env.CC_CHROME_MAX_TOKENS || 100);
+  // A typo here used to become NaN, and `dynamicSize >= NaN` is always false —
+  // the cap disappeared silently. Same guard as CC_CHROME_SESSION_TTL_MS below.
+  const maxTokensFromEnv = Number(process.env.CC_CHROME_MAX_TOKENS);
+  if (process.env.CC_CHROME_MAX_TOKENS !== undefined && !(Number.isFinite(maxTokensFromEnv) && maxTokensFromEnv > 0)) {
+    log(`Ignoring invalid CC_CHROME_MAX_TOKENS=${JSON.stringify(process.env.CC_CHROME_MAX_TOKENS)}; must be a positive number. Using the default.`);
+  }
+  const MAX_TOKENS = Number.isFinite(maxTokensFromEnv) && maxTokensFromEnv > 0 ? maxTokensFromEnv : 100;
   const pairLimiter = new RateLimiter({ limit: 10, windowMs: 15 * 60 * 1000 });
   if (tokens.pairSecret && !TRUST_PROXY) {
     log("Note: CC_CHROME_TRUST_PROXY is not set, so /pair rate limiting keys on the socket address.");
@@ -570,10 +576,14 @@ async function mainHttp() {
     return a.length === b.length && timingSafeEqual(a, b);
   };
 
-  // Public URLs as seen by clients (honors reverse-proxy headers).
+  // Public URLs as seen by clients. x-forwarded-proto/-host are client-supplied
+  // exactly like x-forwarded-for, so they are honored under the same flag —
+  // otherwise anyone reaching this process directly could steer the URLs handed
+  // back by /pair (and printed by /ccchrome connect) at a host of their choice.
+  const firstHop = (value) => (value ? String(value).split(",")[0].trim() : "");
   const publicUrls = (req, token) => {
-    const proto = (req.headers["x-forwarded-proto"] || "http").split(",")[0].trim();
-    const host = req.headers["x-forwarded-host"] || req.headers.host || `localhost:${PORT}`;
+    const proto = (TRUST_PROXY && firstHop(req.headers["x-forwarded-proto"])) || "http";
+    const host = (TRUST_PROXY && firstHop(req.headers["x-forwarded-host"])) || req.headers.host || `localhost:${PORT}`;
     const wsProto = proto === "https" ? "wss" : "ws";
     return {
       mcpUrl: `${proto}://${host}/mcp`,
@@ -641,8 +651,11 @@ async function mainHttp() {
       }
       pairLimiter.reset(ip);
 
+      // 503, not 429: the rate limit above says "wait and retry" and carries
+      // Retry-After, while this says "the server is full until a human acts".
+      // Returning 429 for both left the client unable to tell them apart.
       if (tokens.dynamicSize >= MAX_TOKENS) {
-        return json(res, 429, { error: `token limit reached (${MAX_TOKENS}); ask the admin to revoke unused tokens or raise CC_CHROME_MAX_TOKENS` });
+        return json(res, 503, { error: `token limit reached (${MAX_TOKENS} dynamic tokens, CC_CHROME_MAX_TOKENS); waiting will not help — ask the admin to revoke unused tokens or raise CC_CHROME_MAX_TOKENS` });
       }
 
       let body = {};
