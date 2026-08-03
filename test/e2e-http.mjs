@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import WebSocket from "ws";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const extensionPath = join(root, "extension");
@@ -32,6 +33,35 @@ function check(name, cond, detail = "") {
 
 const toolText = (result) => (result.content || []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Opens a raw websocket and resolves with the close code, so tests can assert
+// exactly why the server refused.
+//
+// A rejected upgrade (see server/index.js's `reject` helper) completes the
+// WebSocket handshake before closing with a specific code — that's the only
+// way a browser can read a real close code instead of an indistinguishable
+// 1006. That means the client's `open` event fires even for a connection the
+// server is about to reject, strictly before `close` — the `ws` library
+// guarantees that ordering (see setSocket() in lib/websocket.js). So `open`
+// alone can't tell a real accept from an accept-then-immediately-reject; give
+// a same-tick/next-tick `close` a brief window to preempt it.
+function rawWsCloseCode(url, { origin, protocols } = {}) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (code) => {
+      if (settled) return;
+      settled = true;
+      resolve(code);
+    };
+    const ws = new WebSocket(url, protocols, origin ? { headers: { origin } } : undefined);
+    ws.on("open", () => { setTimeout(() => { ws.close(); done(0); }, 250); });
+    ws.on("close", (code) => done(code));
+    ws.on("error", () => done(-1));
+    setTimeout(() => done(-2), 5000);
+  });
+}
+
+const EXT_ORIGIN = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 // --- test page -------------------------------------------------------------
 
@@ -253,6 +283,31 @@ res = await fetch(`http://127.0.0.1:${MCP_PORT}/pair`, {
   headers: { authorization: `Bearer ${TOKEN_A}` },
 });
 check("static token revoke refused", res.status === 400, `status=${res.status}`);
+
+// --- websocket auth moved out of the URL ------------------------------------
+
+const base = `ws://127.0.0.1:${MCP_PORT}/ws`;
+
+check(
+  "token in the query string is refused",
+  (await rawWsCloseCode(`${base}?token=${TOKEN_B}`, { origin: EXT_ORIGIN })) === 4002,
+  "expected close 4002"
+);
+check(
+  "valid token in the subprotocol is accepted",
+  (await rawWsCloseCode(base, { origin: EXT_ORIGIN, protocols: [`ccchrome.token.${TOKEN_B}`] })) === 0,
+  "expected the connection to open"
+);
+check(
+  "bad token in the subprotocol is refused",
+  (await rawWsCloseCode(base, { origin: EXT_ORIGIN, protocols: ["ccchrome.token.nope-000000"] })) === 4001,
+  "expected close 4001"
+);
+check(
+  "missing Origin is refused even with a valid token",
+  (await rawWsCloseCode(base, { protocols: [`ccchrome.token.${TOKEN_B}`] })) === 4003,
+  "expected close 4003"
+);
 
 // --- extension package downloads (requires `npm run build` to have run) -----
 

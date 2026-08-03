@@ -46,6 +46,32 @@ function originAllowed(origin) {
   return EXTENSION_ID ? origin === `chrome-extension://${EXTENSION_ID}` : true;
 }
 
+// Browsers cannot set custom headers on a WebSocket, so the token travels in
+// Sec-WebSocket-Protocol rather than the query string — a query string ends up
+// verbatim in every reverse-proxy access log.
+const SUBPROTOCOL_PREFIX = "ccchrome.token.";
+
+function tokenFromSubprotocol(req) {
+  const header = req.headers["sec-websocket-protocol"] || "";
+  for (const raw of header.split(",")) {
+    const proto = raw.trim();
+    if (proto.startsWith(SUBPROTOCOL_PREFIX)) return proto.slice(SUBPROTOCOL_PREFIX.length);
+  }
+  return null;
+}
+
+// `ws` omits Sec-WebSocket-Protocol from the 101 response unless a protocol is
+// selected here, and a browser that offered protocols and got none back fails
+// the handshake with no usable error. Both modes install this: stdio normally
+// sees no subprotocol, but a local URL that still carries ?token= would make
+// the extension offer one.
+function pickSubprotocol(protocols) {
+  for (const proto of protocols) {
+    if (proto.startsWith(SUBPROTOCOL_PREFIX)) return proto;
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Extension connections
 // ---------------------------------------------------------------------------
@@ -458,7 +484,7 @@ function buildMcpServer(getBridge, statusExtra = {}) {
 // ---------------------------------------------------------------------------
 
 async function mainStdio() {
-  const wss = new WebSocketServer({ host: "127.0.0.1", port: PORT });
+  const wss = new WebSocketServer({ host: "127.0.0.1", port: PORT, handleProtocols: pickSubprotocol });
   wss.on("listening", () => log(`WebSocket bridge listening on ws://127.0.0.1:${PORT}`));
   wss.on("error", (err) => {
     if (err.code === "EADDRINUSE") {
@@ -506,8 +532,8 @@ async function mainHttp() {
     return header.startsWith("Bearer ") ? header.slice(7).trim() : null;
   };
 
-  const authToken = (req, url) => {
-    const token = bearerOf(req) || url.searchParams.get("token");
+  const authToken = (req) => {
+    const token = bearerOf(req);
     return token && tokens.has(token) ? token : null;
   };
 
@@ -583,7 +609,7 @@ async function mainHttp() {
     }
 
     if (url.pathname === "/pair/status" && req.method === "GET") {
-      const token = authToken(req, url);
+      const token = authToken(req);
       if (!token) return json(res, 401, { error: "unauthorized" });
       return json(res, 200, {
         name: tokens.get(token),
@@ -593,7 +619,7 @@ async function mainHttp() {
     }
 
     if (url.pathname === "/pair" && req.method === "DELETE") {
-      const token = authToken(req, url);
+      const token = authToken(req);
       if (!token) return json(res, 401, { error: "unauthorized" });
       try {
         const conn = registry.get(token);
@@ -611,7 +637,7 @@ async function mainHttp() {
       return json(res, 404, { error: "not found" });
     }
 
-    const token = authToken(req, url);
+    const token = authToken(req);
     if (!token) {
       return json(res, 401, { error: "unauthorized. Send 'Authorization: Bearer <token>'." });
     }
@@ -654,8 +680,8 @@ async function mainHttp() {
     }
   });
 
-  // WebSocket endpoint for extensions: /ws?token=<token>
-  const wss = new WebSocketServer({ noServer: true });
+  // WebSocket endpoint for extensions: /ws (token carried in Sec-WebSocket-Protocol)
+  const wss = new WebSocketServer({ noServer: true, handleProtocols: pickSubprotocol });
   httpServer.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
     if (url.pathname !== "/ws") {
@@ -678,8 +704,12 @@ async function mainHttp() {
       return reject(4003, "origin not allowed");
     }
 
-    const token = url.searchParams.get("token");
-    if (!token || !tokens.has(token)) {
+    const token = tokenFromSubprotocol(req);
+    if (!token) {
+      log("Rejected ws upgrade: no token subprotocol (extension older than 2.0.0?)");
+      return reject(4002, "missing token subprotocol");
+    }
+    if (!tokens.has(token)) {
       log("Rejected ws upgrade: bad token");
       return reject(4001, "invalid token");
     }

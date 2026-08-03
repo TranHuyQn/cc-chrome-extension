@@ -50,7 +50,14 @@ async function connect() {
   setStatus("connecting");
   let socket;
   try {
-    socket = new WebSocket(wsUrl);
+    // The user pastes a URL that still carries ?token=... — strip it and send
+    // the token as a subprotocol so it never appears in a proxy access log.
+    const parsed = new URL(wsUrl);
+    const token = parsed.searchParams.get("token");
+    parsed.searchParams.delete("token");
+    socket = token
+      ? new WebSocket(parsed.toString(), [`ccchrome.token.${token}`])
+      : new WebSocket(parsed.toString());
   } catch (err) {
     setStatus("disconnected", { lastError: String(err) });
     scheduleReconnect();
