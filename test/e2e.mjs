@@ -394,10 +394,18 @@ const hostOutsideBody = await drivenPage().evaluate(() => {
 /* eslint-enable no-undef */
 check("khung cam nằm ngoài <body>, không lọt vào read_page/get_page_text", hostOutsideBody, String(hostOutsideBody));
 
+// Read the real idle window out of the service worker rather than repeating a
+// number here: tuning BORDER_IDLE_MS must not silently desynchronise the tests.
+/* eslint-disable no-undef -- BORDER_IDLE_MS is a service-worker global, evaluated there by Playwright, not by this Node process */
+const idleMs = await sw.evaluate(() => BORDER_IDLE_MS);
+/* eslint-enable no-undef */
+check("đọc được BORDER_IDLE_MS từ service worker", Number.isInteger(idleMs) && idleMs > 0, String(idleMs));
+const pastIdle = idleMs + 600;
+
 // Nothing must touch this tab during the wait, so the page-side timer fires.
-await sleep(10600);
+await sleep(pastIdle);
 border = await borderState();
-check("khung cam tự tắt sau ~10s không thao tác", border === "absent", border);
+check(`khung cam tự tắt sau ~${Math.round(idleMs / 1000)}s không thao tác`, border === "absent", border);
 
 // A tab where injection is impossible must behave exactly as it did before:
 // same error, no new failure mode from the painter.
@@ -452,7 +460,7 @@ check(
 // Nothing must touch this tab during the wait, so the idle timer fires and
 // must clear every #__cc_border it finds, not just the one a
 // getElementById-based sweep would have seen.
-await sleep(10600);
+await sleep(pastIdle);
 /* eslint-disable no-undef -- browser globals, evaluated inside the page by Playwright, not by this Node process */
 const ghostCountAfterIdle = await drivenPage().evaluate(() => document.querySelectorAll("#__cc_border").length);
 /* eslint-enable no-undef */
@@ -515,7 +523,7 @@ await hostileTransform.evaluate((el) => el.remove());
 //
 // Re-arm the frame with a tool call right before tampering, rather than
 // relying on whatever paint is left over from the checks above: this
-// sequence must not lean on the 10s idle window still having time left
+// sequence must not lean on the idle window still having time left
 // on it, or a slow/loaded machine makes borderState() read "absent" here
 // instead of the tampered "no-frame" this check needs as its starting point.
 r = await client.callTool("read_page", {});

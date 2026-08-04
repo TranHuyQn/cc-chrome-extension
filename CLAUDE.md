@@ -70,7 +70,7 @@ enforced — skipping it silently reopens the hole `close_tab` and `switch_tab` 
 
 `resolveTab()` also paints the orange "Claude is driving this tab" frame, so a handler that
 uses it gets the indicator for free and must not paint one itself. The frame removes itself
-~10s later from a timer held in the page — never move that timer into the service worker,
+~30s later from a timer held in the page — never move that timer into the service worker,
 Chrome terminates the worker mid-sequence and a ghost frame would survive on the user's page.
 A handler that captures pixels must call `await clearBorder(tab.id)` before the capture and
 `paintBorder(tab.id)` in a `finally`, the way `take_screenshot` does.
