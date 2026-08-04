@@ -41,6 +41,18 @@ const BORDER_ID = "__cc_border";
 const BORDER_IDLE_MS = 2000;
 const BORDER_COLOR = "#E8710A";
 
+// Passed to pageShowBorder as one object because injected functions may not
+// close over anything — every value they use has to arrive as an argument.
+// The glow is what makes the frame read as an overlay rather than a rendering
+// bug: the solid edge fades inward over `glowSpread` instead of stopping dead.
+const BORDER_LOOK = {
+  color: BORDER_COLOR,
+  width: 4,
+  radius: 10,
+  glow: "rgba(232, 113, 10, 0.5)",
+  glowSpread: 24,
+};
+
 // The group title is the source of truth, not an in-memory map: MV3 kills the
 // service worker at will, and re-deriving the group by querying its title
 // costs one call and cannot go stale.
@@ -380,7 +392,7 @@ async function resolveTabInGroup(params) {
 // an indicator failure must never become a tool error.
 function paintBorder(tabId) {
   chrome.scripting
-    .executeScript({ target: { tabId }, func: pageShowBorder, args: [BORDER_ID, BORDER_IDLE_MS, BORDER_COLOR] })
+    .executeScript({ target: { tabId }, func: pageShowBorder, args: [BORDER_ID, BORDER_IDLE_MS, BORDER_LOOK] })
     .catch(() => {});
 }
 
@@ -835,7 +847,7 @@ function pageWaitCheck(selector) {
 // reusing it — full tamper-proofing is impossible in a DOM the page also
 // controls, so healing on the next paint is the achievable goal, not
 // prevention.
-function pageShowBorder(id, idleMs, color) {
+function pageShowBorder(id, idleMs, look) {
   try {
     // getElementById would only ever see the FIRST id="__cc_border" in tree
     // order. A page that plants a decoy earlier in the tree (e.g. as the
@@ -890,9 +902,13 @@ function pageShowBorder(id, idleMs, color) {
         left: "0",
         right: "0",
         bottom: "0",
-        border: `3px solid ${color}`,
+        border: `${look.width}px solid ${look.color}`,
+        "border-radius": `${look.radius}px`,
         "box-sizing": "border-box",
-        "box-shadow": "inset 0 0 0 1px rgba(0,0,0,0.15)",
+        // Two inset shadows, in paint order: a hairline that keeps the frame
+        // legible against an orange-ish page, then the glow that fades the
+        // colour inward instead of ending at a hard line.
+        "box-shadow": `inset 0 0 0 1px rgba(0,0,0,0.15), inset 0 0 ${look.glowSpread}px 0 ${look.glow}`,
         "pointer-events": "none",
         margin: "0",
         padding: "0",

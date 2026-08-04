@@ -42,7 +42,7 @@ const REQUEST_TIMEOUT_MS = Number(process.env.CC_CHROME_TIMEOUT_MS || 45000);
 // CC_CHROME_SESSION_TTL_MS.
 const graceFromEnv = Number(process.env.CC_CHROME_RECONNECT_GRACE_MS);
 const RECONNECT_GRACE_MS = Number.isFinite(graceFromEnv) && graceFromEnv >= 0 ? graceFromEnv : 25000;
-const VERSION = "3.1.0";
+const VERSION = "3.1.1";
 
 // One Chrome tab group per Claude Code session. stdio serves exactly one
 // session per process, so a value minted at startup is that session's identity;

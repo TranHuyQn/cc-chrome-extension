@@ -127,8 +127,9 @@ MCP ở chế độ `--http`) có **một tab group riêng** trong Chrome, đặ
 `Claude · xxxx` (4 ký tự đầu của session id) và tô màu cam để phân biệt với
 tab cá nhân.
 
-Trong lúc Claude thao tác, tab đó còn được viền một khung cam mỏng quanh khung
-nhìn. Khung tự biến mất khoảng 2 giây sau khi Claude ngừng đụng vào tab, nên khi
+Trong lúc Claude thao tác, tab đó còn được viền một khung cam quanh khung nhìn:
+đường viền đậm bo góc nhẹ ở sát mép, mờ dần vào trong rồi tan hẳn.
+Khung tự biến mất khoảng 2 giây sau khi Claude ngừng đụng vào tab, nên khi
 không thấy khung nghĩa là không có lệnh nào đang chạy trên tab đó. Khung do
 extension vẽ đè lên trang, không phải lỗi hiển thị của website, không nhận chuột
 và không lọt vào ảnh `take_screenshot`. Một số trang extension không chèn được

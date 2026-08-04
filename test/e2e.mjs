@@ -265,9 +265,13 @@ async function borderState() {
     const frame = host.shadowRoot.firstElementChild;
     if (!frame) return "no-frame";
     const s = getComputedStyle(frame);
-    return s.borderTopWidth === "3px" && s.position === "fixed" && s.pointerEvents === "none"
+    // The glow is half the look: without it the frame is a hard rectangle
+    // again, so an inset shadow carrying the frame colour is asserted too.
+    const glows = /inset/.test(s.boxShadow) && /232,\s*113,\s*10/.test(s.boxShadow);
+    return s.borderTopWidth === "4px" && s.borderTopLeftRadius === "10px" && glows
+      && s.position === "fixed" && s.pointerEvents === "none"
       ? "present"
-      : `bad-style:${s.borderTopWidth}/${s.position}/${s.pointerEvents}`;
+      : `bad-style:${s.borderTopWidth}/${s.borderTopLeftRadius}/glow=${glows}/${s.position}/${s.pointerEvents}`;
   });
   /* eslint-enable no-undef */
 }
