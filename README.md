@@ -144,6 +144,23 @@ tab cá nhân.
 - Extension cần thêm quyền `tabGroups` (đã có trong `extension/manifest.json`
   từ 3.0.0) để tạo và quản lý các nhóm này.
 
+### Hai điều cần biết trước khi dùng
+
+**Nhóm cũ không tự dọn.** Session id đổi mỗi lần bạn chạy lại `claude`, và ở
+chế độ `--http` cũng đổi sau khi phiên MCP hết hạn nhàn rỗi. Nhóm của phiên cũ
+vẫn nằm nguyên trong Chrome nhưng đã **mồ côi**: không phiên nào đang sống sở
+hữu nó nữa, nên Claude không thao tác được lên tab trong đó (bị từ chối như mọi
+tab ngoài nhóm) và `list_tabs` cũng không thấy. Extension không tự đóng chúng —
+bạn tự đóng bằng tay khi thấy nhiều nhóm cam xếp đống. Đây là hành vi đúng như
+thiết kế, không phải lỗi.
+
+**`resize_window` tác động lên cả cửa sổ, không chỉ tab trong nhóm.** Nó tìm
+tab trong nhóm của phiên rồi đổi kích thước **cửa sổ chứa tab đó** — mà cửa sổ
+đó có thể đang chứa cả tab cá nhân của bạn. Ranh giới nhóm là **theo tab**, chứ
+không phải theo cửa sổ: Claude không đọc/không bấm được tab ngoài nhóm, nhưng
+vẫn có thể làm cửa sổ chứa chúng đổi kích thước. Muốn tách hẳn thì để nhóm của
+Claude ở một cửa sổ riêng.
+
 ## Triển khai lên VPS cho cả team
 
 Chế độ `--http` cho phép cả team dùng chung **một** server: mỗi thành viên được cấp một token, Claude Code và extension của họ cùng dùng token đó để server ghép cặp đúng người — không ai điều khiển được browser của người khác.
