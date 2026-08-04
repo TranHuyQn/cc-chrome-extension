@@ -39,18 +39,24 @@ const GROUP_COLOR = "orange";
 // leave a permanent ghost frame on the user's page every time that happens.
 const BORDER_ID = "__cc_border";
 const BORDER_IDLE_MS = 2000;
-const BORDER_COLOR = "#E8710A";
 
 // Passed to pageShowBorder as one object because injected functions may not
 // close over anything — every value they use has to arrive as an argument.
-// The glow is what makes the frame read as an overlay rather than a rendering
-// bug: the solid edge fades inward over `glowSpread` instead of stopping dead.
+//
+// There is deliberately no solid edge. A hard line reads as a rendering fault
+// on the page; what marks the tab is a wash of colour strongest at the very
+// edge and gone by ~110px in. Three stacked inset shadows do that better than
+// one: a single large-blur shadow falls off too evenly and still shows where
+// it stops, while layering a tight bright one over two wide faint ones gives a
+// falloff that has no visible end.
+const BORDER_RGB = "232, 113, 10";
 const BORDER_LOOK = {
-  color: BORDER_COLOR,
-  width: 4,
-  radius: 10,
-  glow: "rgba(232, 113, 10, 0.5)",
-  glowSpread: 24,
+  rgb: BORDER_RGB,
+  glow: [
+    { blur: 16, spread: 0, alpha: 0.5 },
+    { blur: 48, spread: 8, alpha: 0.28 },
+    { blur: 110, spread: 24, alpha: 0.12 },
+  ],
 };
 
 // The group title is the source of truth, not an in-memory map: MV3 kills the
@@ -902,13 +908,12 @@ function pageShowBorder(id, idleMs, look) {
         left: "0",
         right: "0",
         bottom: "0",
-        border: `${look.width}px solid ${look.color}`,
-        "border-radius": `${look.radius}px`,
+        border: "0",
+        "border-radius": "0",
         "box-sizing": "border-box",
-        // Two inset shadows, in paint order: a hairline that keeps the frame
-        // legible against an orange-ish page, then the glow that fades the
-        // colour inward instead of ending at a hard line.
-        "box-shadow": `inset 0 0 0 1px rgba(0,0,0,0.15), inset 0 0 ${look.glowSpread}px 0 ${look.glow}`,
+        "box-shadow": look.glow
+          .map((layer) => `inset 0 0 ${layer.blur}px ${layer.spread}px rgba(${look.rgb}, ${layer.alpha})`)
+          .join(", "),
         "pointer-events": "none",
         margin: "0",
         padding: "0",

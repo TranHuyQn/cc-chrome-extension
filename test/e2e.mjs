@@ -265,13 +265,16 @@ async function borderState() {
     const frame = host.shadowRoot.firstElementChild;
     if (!frame) return "no-frame";
     const s = getComputedStyle(frame);
-    // The glow is half the look: without it the frame is a hard rectangle
-    // again, so an inset shadow carrying the frame colour is asserted too.
-    const glows = /inset/.test(s.boxShadow) && /232,\s*113,\s*10/.test(s.boxShadow);
-    return s.borderTopWidth === "4px" && s.borderTopLeftRadius === "10px" && glows
+    // The whole look IS the glow now — there is no solid edge to measure, so
+    // the assertion counts the stacked inset layers carrying the frame colour.
+    // A style silently reverted to a hard border fails here instead of passing
+    // on "some frame exists".
+    const layers = (s.boxShadow.match(/inset/g) || []).length;
+    const tinted = /232,\s*113,\s*10/.test(s.boxShadow);
+    return layers >= 3 && tinted && s.borderTopWidth === "0px"
       && s.position === "fixed" && s.pointerEvents === "none"
       ? "present"
-      : `bad-style:${s.borderTopWidth}/${s.borderTopLeftRadius}/glow=${glows}/${s.position}/${s.pointerEvents}`;
+      : `bad-style:layers=${layers}/tinted=${tinted}/border=${s.borderTopWidth}/${s.position}/${s.pointerEvents}`;
   });
   /* eslint-enable no-undef */
 }
@@ -327,19 +330,23 @@ async function pngHasOrange(base64) {
     canvas.height = h;
     const ctx = canvas.getContext("2d");
     ctx.drawImage(img, 0, 0);
-    const target = [0xe8, 0x71, 0x0a]; // #E8710A
-    const tolerance = 40; // absorbs PNG/compositing rounding, not enough to hide a real frame
+    // Matching #E8710A within a tolerance would find nothing: the frame has no
+    // solid pixels any more, it is a translucent wash, so every pixel it
+    // produces is the frame colour blended with whatever the page painted.
+    // What survives blending is the hue direction — far more red than blue.
+    // The test page is white with black text, so nothing else on it is warm:
+    // white and black both give r-b = 0. Over white, the frame's strongest
+    // band lands near (242,178,120), i.e. r-b = 122.
     const rows = [0, 1, 2, h - 1].filter((y) => y >= 0 && y < h);
     for (const y of rows) {
       const row = ctx.getImageData(0, y, w, 1).data;
       for (let x = 0; x < w; x++) {
         const i = x * 4;
-        if (
-          Math.abs(row[i] - target[0]) <= tolerance &&
-          Math.abs(row[i + 1] - target[1]) <= tolerance &&
-          Math.abs(row[i + 2] - target[2]) <= tolerance
-        ) {
-          return `orange at ${x},${y}`;
+        const r = row[i];
+        const g = row[i + 1];
+        const b = row[i + 2];
+        if (r - b >= 30 && r - g >= 15 && r > 120) {
+          return `orange at ${x},${y} (rgb ${r},${g},${b})`;
         }
       }
     }
