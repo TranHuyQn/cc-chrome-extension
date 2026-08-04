@@ -12,6 +12,20 @@ WorkingDirectory=/opt/cc-chrome-extension/server
 Environment=CC_CHROME_MODE=http
 Environment=CC_CHROME_PORT=8787
 Environment=CC_CHROME_HOST=127.0.0.1
+# Server đứng sau reverse proxy (Caddy/nginx) nên IP thật nằm ở X-Forwarded-For.
+#
+# GIẢ ĐỊNH: proxy đứng trước PHẢI là thứ ghi đè hoặc nối thêm X-Forwarded-For.
+#   - nginx:  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;  (nối thêm)
+#   - Caddy:  reverse_proxy ... (2.7+ ghi đè header client gửi)
+# Server đọc entry CUỐI CÙNG của header (entry do proxy kề bên nối vào — xem
+# clientIp trong server/ratelimit.js), nên cả hai kiểu đều đúng. Proxy nào chỉ
+# forward nguyên header của client thì rate limit của /pair sẽ vô hiệu.
+#
+# CC_CHROME_TRUST_PROXY=1 chỉ an toàn khi cổng 8787 không tới được từ đâu khác
+# ngoài proxy đó — giữ CC_CHROME_HOST=127.0.0.1 như dưới đây, và đừng mở 8787
+# trên firewall. Nếu 8787 lộ ra ngoài, ai cũng tự đặt được X-Forwarded-For và
+# bypass được rate limit.
+Environment=CC_CHROME_TRUST_PROXY=1
 # Sinh secret/token: openssl rand -hex 16
 # Bật pairing tự phục vụ cho /ccchrome connect:
 Environment=CC_CHROME_PAIR_SECRET=DOI_SECRET_NAY_openssl_rand_hex_16

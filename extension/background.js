@@ -11,6 +11,94 @@ const KEEPALIVE_MS = 20000;
 const CONSOLE_BUFFER_MAX = 500;
 const NETWORK_BUFFER_MAX = 400;
 
+// The server refuses a handshake by closing with one of these codes. Without
+// this mapping every refusal reaches the user as a generic socket error, and a
+// misconfigured token looks exactly like a server that is not running.
+//
+// 4002 covers two different causes and must name both: a pre-2.0.0 extension
+// has no CLOSE_REASONS map at all, so the only client that can ever *display*
+// this message is a 2.0.0 extension whose saved URL simply has no ?token=.
+const CLOSE_REASONS = {
+  4001: "Token sai hoặc đã bị thu hồi — chạy lại /ccchrome connect",
+  4002: "URL thiếu token, hoặc extension cũ hơn server — kiểm tra URL đã có ?token=… chưa, rồi tải lại extension từ <server>/extension.zip nếu vẫn lỗi",
+  4003: "Server từ chối: origin không hợp lệ",
+};
+
+// Refusals: the server will keep refusing until a human changes something, so
+// retrying every second helps nobody.
+const REFUSAL_CODES = new Set([4001, 4002, 4003]);
+
+const MISSING_TOKEN_REASON =
+  "URL thiếu token — server từ xa cần dạng wss://<domain>/ws?token=… (chạy /ccchrome connect để lấy URL)";
+
+const GROUP_COLOR = "orange";
+
+// The group title is the source of truth, not an in-memory map: MV3 kills the
+// service worker at will, and re-deriving the group by querying its title
+// costs one call and cannot go stale.
+//
+// A missing session id fails closed. Only a pre-3.0.0 server sends none, which
+// happens during a staged rollout or when a popup still points at an older
+// instance; substituting a constant would put every session on that extension
+// into one shared group and silently delete the isolation this version
+// promises. handleRequest turns this into an ordinary tool error, so Claude
+// sees the remedy instead of a dead service worker.
+function sessionGroupTitle(session) {
+  if (!session) {
+    throw new Error(
+      "This MCP server is older than the extension and sends no session id, so tab-group isolation cannot be enforced. " +
+      "Update the server to 3.0.0, or reinstall the matching 2.x extension."
+    );
+  }
+  return `Claude · ${String(session).replace(/-/g, "").slice(0, 4)}`;
+}
+
+// Scoped per window on purpose. chrome.tabs.group moves a tab into the group's
+// window, so a window-wide lookup would yank tabs across windows.
+async function sessionGroupId(session, windowId) {
+  const title = sessionGroupTitle(session);
+  const [existing] = await chrome.tabGroups.query({ title, windowId });
+  return existing ? existing.id : null;
+}
+
+// Creating the group is read-then-write across awaits, and Claude Code issues
+// independent tool calls concurrently (the http transport does not serialize
+// them). Two new_tab calls could both see "no group yet" and both create one
+// with the same title; chrome.tabGroups.query then returns one arbitrary
+// winner and every tab in the loser is permanently unreachable — invisible to
+// list_tabs and refused by resolveTab, with no way back from Claude's side.
+//
+// So group creation is chained per title: the second caller waits for the
+// first and then finds the group it made. The race only exists between
+// in-flight requests inside one service-worker lifetime, so an in-memory map
+// is enough — nothing needs to survive a worker restart.
+const groupLocks = new Map();
+
+function withGroupLock(title, fn) {
+  const previous = groupLocks.get(title) || Promise.resolve();
+  // .then(fn, fn) so one failed call does not wedge the chain for the rest.
+  const next = previous.then(fn, fn);
+  groupLocks.set(title, next);
+  // Drop the entry once the chain drains, so the map does not grow one
+  // permanent entry per session the worker has ever served.
+  next.catch(() => {}).then(() => {
+    if (groupLocks.get(title) === next) groupLocks.delete(title);
+  });
+  return next;
+}
+
+async function addTabToSessionGroup(tab, session) {
+  const title = sessionGroupTitle(session);
+  return await withGroupLock(title, async () => {
+    let groupId = await sessionGroupId(session, tab.windowId);
+    groupId = groupId === null
+      ? await chrome.tabs.group({ tabIds: [tab.id] })
+      : await chrome.tabs.group({ tabIds: [tab.id], groupId });
+    await chrome.tabGroups.update(groupId, { title, color: GROUP_COLOR });
+    return groupId;
+  });
+}
+
 let ws = null;
 let wsUrl = DEFAULT_WS_URL;
 let reconnectDelay = RECONNECT_MIN_MS;
@@ -44,13 +132,34 @@ function scheduleReconnect() {
   reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
 }
 
+// A loopback URL is the stdio-mode bridge (ws://127.0.0.1:9876), which has no
+// tokens at all. Anything else is a shared server, where a URL without a token
+// can only ever be refused — worth saying locally instead of round-tripping.
+function isLoopbackUrl(parsed) {
+  const host = parsed.hostname.replace(/^\[|\]$/g, "");
+  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+}
+
 async function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   await loadConfig();
   setStatus("connecting");
   let socket;
   try {
-    socket = new WebSocket(wsUrl);
+    // The user pastes a URL that still carries ?token=... — strip it and send
+    // the token as a subprotocol so it never appears in a proxy access log.
+    const parsed = new URL(wsUrl);
+    const token = parsed.searchParams.get("token");
+    parsed.searchParams.delete("token");
+    if (!token && !isLoopbackUrl(parsed)) {
+      setStatus("disconnected", { lastError: MISSING_TOKEN_REASON });
+      reconnectDelay = RECONNECT_MAX_MS;
+      scheduleReconnect();
+      return;
+    }
+    socket = token
+      ? new WebSocket(parsed.toString(), [`ccchrome.token.${token}`])
+      : new WebSocket(parsed.toString());
   } catch (err) {
     setStatus("disconnected", { lastError: String(err) });
     scheduleReconnect();
@@ -58,20 +167,37 @@ async function connect() {
   }
   ws = socket;
 
+  // `open` is NOT proof of success. Since 2.0.0 the server refuses by
+  // completing the 101 handshake and then closing with a code (a browser cannot
+  // read the HTTP status of a failed upgrade), so `open` fires for refusals
+  // too. Treating it as success reset the backoff on every refusal, turning a
+  // wrong token into a permanent 1 Hz reconnect storm with a badge flashing
+  // green once a second. The connection is only proven once the server has
+  // actually spoken to us — it sends nothing to a socket it is about to close.
+  let proven = false;
+
   // Every handler checks `ws === socket` so events from a stale socket
   // (e.g. one the server replaced during a reconnect) can't clobber the
   // current connection and cause a reconnect storm.
   socket.onopen = () => {
     if (ws !== socket) return;
-    reconnectDelay = RECONNECT_MIN_MS;
-    setStatus("connected", { lastError: null });
     send({ type: "hello", client: "claude-code-chrome-bridge", version: chrome.runtime.getManifest().version });
+    // The server answers `ping` with `pong`, so this turns "proven" into a
+    // sub-second signal instead of waiting a whole keepalive period.
+    send({ type: "ping" });
+    // The fast path only — see the cc-keepalive alarm below for why this timer
+    // is not enough on its own.
     clearInterval(keepaliveTimer);
     keepaliveTimer = setInterval(() => send({ type: "ping" }), KEEPALIVE_MS);
   };
 
   socket.onmessage = async (event) => {
     if (ws !== socket) return;
+    if (!proven) {
+      proven = true;
+      reconnectDelay = RECONNECT_MIN_MS;
+      setStatus("connected", { lastError: null });
+    }
     let msg;
     try {
       msg = JSON.parse(event.data);
@@ -82,11 +208,19 @@ async function connect() {
     if (msg.type === "request") await handleRequest(msg);
   };
 
-  socket.onclose = () => {
+  socket.onclose = (event) => {
     if (ws !== socket) return;
     clearInterval(keepaliveTimer);
-    setStatus("disconnected");
+    // Always compute the reason, never merge: code 4000 ("replaced by new
+    // connection") has no mapping, and merging would leave a stale "Token sai…"
+    // on screen for a member who has since fixed their token. An unmapped code
+    // on a socket that never proved itself is the ordinary "nothing answered"
+    // case; one that did prove itself just ended, and has nothing to report.
+    const reason = CLOSE_REASONS[event.code]
+      ?? (proven ? null : "Không kết nối được — MCP server chưa chạy, hoặc URL sai?");
+    setStatus("disconnected", { lastError: reason });
     ws = null;
+    if (REFUSAL_CODES.has(event.code)) reconnectDelay = RECONNECT_MAX_MS;
     scheduleReconnect();
   };
 
@@ -103,10 +237,13 @@ function send(obj) {
 }
 
 async function handleRequest(msg) {
-  const { id, method, params = {} } = msg;
+  const { id, method, params = {}, session } = msg;
   try {
     const handler = handlers[method];
     if (!handler) throw new Error(`Unknown method: ${method}`);
+    // resolveTab() reads this to find the session's tab group. Injecting it
+    // here keeps all 22 handler signatures unchanged.
+    params.__session = session;
     const result = await handler(params);
     send({ type: "response", id, result: result ?? { ok: true } });
   } catch (err) {
@@ -115,9 +252,32 @@ async function handleRequest(msg) {
 }
 
 // Keep the service worker alive while connected and retry when Chrome wakes us.
+//
+// TWO keepalives on purpose — do not delete either as redundant:
+//
+// * The setInterval in socket.onopen is the fast path. At 20s it beats the
+//   alarm's 30s floor whenever Chrome is in the foreground, and it costs
+//   nothing.
+// * This alarm is the throttling-proof floor. Once Chrome's window has been
+//   hidden for ~5 minutes it applies intensive throttling and checks timers
+//   only about once a minute, so the 20s interval stops landing inside the 30s
+//   window a service worker needs to stay considered active. Chrome then kills
+//   the worker, which closes the websocket with 1001 — measured on the live
+//   deployment as `close=1001, lived=327s, silent_for=47s`. Chrome's own MV3
+//   migration guide says it outright: setTimeout/setInterval "can fail in
+//   service workers because the timers are canceled whenever the service worker
+//   is terminated. You'll need to replace them with alarms."
+//
+// chrome.alarms is not throttled the same way, so sending the ping from here
+// too keeps traffic on the wire when the interval has been throttled into
+// uselessness. 0.5 minutes is Chrome's minimum period — it cannot go lower.
 chrome.alarms.create("cc-keepalive", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "cc-keepalive") connect();
+  if (alarm.name !== "cc-keepalive") return;
+  // An open socket needs a ping, not a reconnect; connect() returns early for
+  // one anyway, so it would otherwise be a wasted wakeup.
+  if (ws && ws.readyState === WebSocket.OPEN) send({ type: "ping" });
+  connect();
 });
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
@@ -158,17 +318,53 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 // Tab helpers
 // ---------------------------------------------------------------------------
 
+// Every one of the 22 tools routes through here, which is what makes the
+// in-group restriction enforceable in one place. A tab outside the session's
+// group is refused with a message that says how to grant access, because the
+// fix is a user action in Chrome that Claude cannot perform.
 async function resolveTab(params) {
+  const session = params.__session;
+  const title = sessionGroupTitle(session);
+
   if (params.tabId) {
     const tab = await chrome.tabs.get(params.tabId).catch(() => null);
     if (!tab) throw new Error(`No tab with id ${params.tabId}`);
+    const groupId = await sessionGroupId(session, tab.windowId);
+    if (groupId === null || tab.groupId !== groupId) {
+      throw new Error(
+        `Tab ${params.tabId} is outside the "${title}" tab group. Drag that tab into the group to let me work on it, or call new_tab to open a fresh one.`
+      );
+    }
     return tab;
   }
-  const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (active) return active;
-  const [anyTab] = await chrome.tabs.query({ active: true });
-  if (anyTab) return anyTab;
-  throw new Error("No active tab found");
+
+  // No tabId: look in the window the user is actually in first, then the rest
+  // in chrome.windows.getAll() order (roughly window creation order). Within a
+  // window it takes the group's last tab in tab-strip order — Chrome exposes no
+  // per-tab activation time, so this is position, not recency.
+  //
+  // Checking the focused window first is what keeps this in step with new_tab,
+  // which creates in the focused window: without it, a session that opened a
+  // tab in window 1 and then had new_tab land in window 2 would keep resolving
+  // to the stale window-1 tab, and Claude would silently read the wrong page.
+  const focused = await chrome.windows.getLastFocused().catch(() => null);
+  const all = await chrome.windows.getAll({ windowTypes: ["normal"] });
+  const windows = focused
+    ? [...all.filter((w) => w.id === focused.id), ...all.filter((w) => w.id !== focused.id)]
+    : all;
+  for (const win of windows) {
+    const groupId = await sessionGroupId(session, win.id);
+    if (groupId === null) continue;
+    const tabs = await chrome.tabs.query({ groupId });
+    if (tabs.length) return tabs[tabs.length - 1];
+  }
+
+  // active: false — this fallback runs on any tabId-less tool call made
+  // before the session has opened anything, so jumping to the front here
+  // would steal the user's focus just as often as new_tab would.
+  const created = await chrome.tabs.create({ url: "about:blank", active: false });
+  await addTabToSessionGroup(created, session);
+  return await chrome.tabs.get(created.id);
 }
 
 function assertScriptableUrl(tab) {
@@ -183,12 +379,20 @@ function assertScriptableUrl(tab) {
 // wrap their body in try/catch and report failures as { __cc_err }.
 async function execInTab(tab, func, args = [], world = "ISOLATED") {
   assertScriptableUrl(tab);
-  const [result] = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func,
-    args,
-    world,
-  });
+  let injected;
+  try {
+    injected = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func, args, world });
+  } catch (err) {
+    // resolveTab opens an about:blank tab when the session's group is empty, so
+    // a read tool called before any navigate lands here. Chrome's own message
+    // ("manifest must request permission to access this host") points at the
+    // wrong fix — the fix is to navigate somewhere.
+    if ((tab.url || "").startsWith("about:blank")) {
+      throw new Error("This session's tab group has no page open yet (about:blank). Call navigate with a url first.", { cause: err });
+    }
+    throw err;
+  }
+  const [result] = injected;
   if (!result) throw new Error("Script returned no result");
   const value = result.result;
   if (value && typeof value === "object" && value.__cc_err) {
@@ -782,9 +986,19 @@ const handlers = {
     };
   },
 
-  async list_tabs() {
-    const tabs = await chrome.tabs.query({});
+  // Scoped to the session's group for the same reason resolveTab is: listing a
+  // tab the session cannot touch only leads to a refusal one call later.
+  async list_tabs(params) {
+    const windows = await chrome.windows.getAll({ windowTypes: ["normal"] });
+    const tabs = [];
+    for (const win of windows) {
+      const groupId = await sessionGroupId(params.__session, win.id);
+      if (groupId === null) continue;
+      tabs.push(...(await chrome.tabs.query({ groupId })));
+    }
     return {
+      group: sessionGroupTitle(params.__session),
+      note: tabs.length ? undefined : "No tabs in this session's group yet. Use new_tab, or drag a tab into the group in Chrome.",
       tabs: tabs.map((t) => ({
         tabId: t.id,
         title: t.title,
@@ -796,21 +1010,31 @@ const handlers = {
   },
 
   async new_tab(params) {
-    const tab = await chrome.tabs.create({ url: params.url || "about:blank", active: true });
+    // active: false — tabs Claude opens must not steal the user's focus.
+    // switch_tab is the tool for actually bringing a tab to the front.
+    const tab = await chrome.tabs.create({ url: params.url || "about:blank", active: false });
     if (params.url) await waitForTabComplete(tab.id);
+    await addTabToSessionGroup(tab, params.__session);
     const updated = await chrome.tabs.get(tab.id);
-    return { tabId: updated.id, url: updated.url, title: updated.title };
+    return { tabId: updated.id, url: updated.url, title: updated.title, groupId: updated.groupId };
   },
 
+  // close_tab and switch_tab used chrome.tabs directly, which is the one way a
+  // tool could still reach outside the group — and closing a stranger's tab is
+  // the most damaging thing this extension can do. They go through resolveTab
+  // like everything else; the tabId guard stays so "no tabId" keeps saying so
+  // instead of silently acting on some other tab in the group.
   async close_tab(params) {
     if (!params.tabId) throw new Error("tabId is required");
-    await chrome.tabs.remove(params.tabId);
-    return { closed: params.tabId };
+    const tab = await resolveTab(params);
+    await chrome.tabs.remove(tab.id);
+    return { closed: tab.id };
   },
 
   async switch_tab(params) {
     if (!params.tabId) throw new Error("tabId is required");
-    const tab = await chrome.tabs.update(params.tabId, { active: true });
+    const target = await resolveTab(params);
+    const tab = await chrome.tabs.update(target.id, { active: true });
     await chrome.windows.update(tab.windowId, { focused: true });
     return { tabId: tab.id, url: tab.url, title: tab.title };
   },

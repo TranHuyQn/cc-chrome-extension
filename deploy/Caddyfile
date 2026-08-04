@@ -1,5 +1,18 @@
 {$DOMAIN} {
 	# Caddy tự lấy và gia hạn chứng chỉ Let's Encrypt cho {$DOMAIN}.
 	# WebSocket (/ws) được proxy tự động, không cần cấu hình thêm.
+	#
+	# GIẢ ĐỊNH mà rate limit của /pair dựa vào (CC_CHROME_TRUST_PROXY=1 trong
+	# docker-compose.yml): proxy đứng trước phải là thứ *ghi đè hoặc nối thêm*
+	# X-Forwarded-For. Caddy 2.7+ thay thế header do client gửi khi peer không
+	# phải trusted proxy, nên chỉ còn đúng một entry — server đọc entry cuối
+	# cùng (xem clientIp trong server/ratelimit.js) nên đúng trong cả hai kiểu.
+	# Đổi sang proxy khác (nginx…) thì phải chắc chắn nó cũng làm như vậy.
+	#
+	# CC_CHROME_TRUST_PROXY=1 chỉ an toàn khi cổng 8787 KHÔNG thể tới được từ
+	# đâu khác ngoài proxy này (ở đây: `expose` chứ không `ports`, nên container
+	# chỉ nghe trong network nội bộ của compose). Nếu publish 8787 ra host/
+	# internet thì bất kỳ ai cũng tự đặt được X-Forwarded-For và rate limit mất
+	# tác dụng.
 	reverse_proxy chrome-bridge:8787
 }

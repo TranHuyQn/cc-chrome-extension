@@ -37,6 +37,21 @@ for (const required of ["manifest.json", "background.js", "popup.html", "popup.j
 const zippedManifest = JSON.parse(zip.readAsText("manifest.json"));
 check("zip manifest version matches source", zippedManifest.version === manifest.version, zippedManifest.version);
 
+// --- version consistency ----------------------------------------------------
+
+// Three files carried three different versions before 2.0.0 and nothing caught
+// it. chrome_status reports the server number while the build names artifacts
+// after the manifest, so a mismatch is invisible until someone debugs remotely.
+const serverPkg = JSON.parse(readFileSync(join(root, "server", "package.json"), "utf8"));
+const serverSource = readFileSync(join(root, "server", "index.js"), "utf8");
+const serverVersion = (serverSource.match(/^const VERSION = "([^"]+)";$/m) || [])[1];
+check("server/index.js declares a VERSION", !!serverVersion, 'no `const VERSION = "..."` line found');
+check(
+  "manifest, server VERSION and server package.json agree",
+  manifest.version === serverVersion && manifest.version === serverPkg.version,
+  `manifest=${manifest.version} index.js=${serverVersion} package.json=${serverPkg.version}`
+);
+
 // --- crx envelope -----------------------------------------------------------
 
 const crx = readFileSync(crxPath);
@@ -54,8 +69,10 @@ const unpackDir = mkdtempSync(join(tmpdir(), "cc-bridge-dist-"));
 zip.extractAllTo(unpackDir, true);
 const userDataDir = mkdtempSync(join(tmpdir(), "cc-bridge-dist-profile-"));
 const context = await chromium.launchPersistentContext(userDataDir, {
-  headless: true,
-  executablePath: "/opt/pw-browsers/chromium",
+  headless: process.env.HEADED !== "1",
+  // CI points CHROME_PATH at its own Chromium; without it Playwright uses the
+  // browser it manages itself.
+  ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {}),
   args: [
     `--disable-extensions-except=${unpackDir}`,
     `--load-extension=${unpackDir}`,

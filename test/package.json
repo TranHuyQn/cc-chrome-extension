@@ -4,6 +4,7 @@
   "type": "module",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "playwright": "^1.50.0"
+    "playwright": "^1.50.0",
+    "ws": "^8.18.0"
   }
 }
