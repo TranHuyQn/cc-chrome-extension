@@ -618,9 +618,14 @@ if (res.status === 404) {
     "expected the request's own base URL inside the script"
   );
   check(
-    "install.sh embeds the fixed extension install path",
-    installBody.includes(".cc-chrome-bridge/extension"),
-    "expected the fixed extraction path inside the script"
+    "install.sh installs the /ccchrome slash command",
+    installBody.includes("$HOME/.claude/commands/ccchrome.md") && installBody.includes("/ccchrome.md"),
+    "expected the slash-command install step inside the script"
+  );
+  check(
+    "install.sh no longer downloads or extracts the extension",
+    !installBody.includes("extension.zip") && !installBody.includes(".cc-chrome-bridge/extension"),
+    "expected no reference to the extension zip or extension folder"
   );
 
   // --- 404s: both downloads must fail with an actionable message when the
@@ -642,19 +647,19 @@ if (res.status === 404) {
     renameSync(distCcchromeHidden, distCcchrome);
   }
 
-  const distZip = join(root, "dist", "extension.zip");
-  const distZipHidden = `${distZip}.hidden-for-test`;
-  renameSync(distZip, distZipHidden);
+  // install.sh only serves the slash command now, so its own dist/ dependency
+  // is ccchrome.md (not extension.zip, which it no longer downloads).
+  renameSync(distCcchrome, distCcchromeHidden);
   try {
     res = await fetch(`http://127.0.0.1:${MCP_PORT}/install.sh`);
     const errBody = await res.json();
     check(
-      "install.sh 404s with an actionable message when dist/ is missing extension.zip",
+      "install.sh 404s with an actionable message when dist/ is missing ccchrome.md",
       res.status === 404 && /npm run build/.test(errBody.error || ""),
       `status=${res.status} body=${JSON.stringify(errBody)}`
     );
   } finally {
-    renameSync(distZipHidden, distZip);
+    renameSync(distCcchromeHidden, distCcchrome);
   }
 }
 

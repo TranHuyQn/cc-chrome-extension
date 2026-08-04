@@ -208,10 +208,13 @@ less install.sh        # đọc trước khi chạy
 bash install.sh
 ```
 
-Script cài slash command `/ccchrome` vào `~/.claude/commands/`, tải và giải nén extension vào **một thư mục cố định** `~/.cc-chrome-bridge/extension` (cố định để những lần chạy lại giữ nguyên extension ID mà Chrome sinh theo đường dẫn — script có giải thích ngay trong comment), rồi in ra đúng hai việc còn phải làm bằng tay:
+Script chỉ cài slash command `/ccchrome` vào `~/.claude/commands/`, rồi in ra một bước tiếp theo duy nhất — trong Claude Code, chạy:
 
-1. `chrome://extensions` → **Developer mode** → **Load unpacked** → chọn thư mục vừa giải nén (đã Load unpacked từ đúng thư mục đó rồi thì bấm **Reload**)
-2. Trong Claude Code: `/ccchrome connect https://chrome.example.com` — lệnh sẽ hỏi pairing secret, admin cấp
+```
+/ccchrome connect https://chrome.example.com
+```
+
+Lệnh đó mới là nơi dẫn cài extension Chrome từng bước (tải, giải nén vào một thư mục cố định để giữ nguyên extension ID mà Chrome sinh theo đường dẫn, **Load unpacked**/**Reload** trong `chrome://extensions`) và hỏi pairing secret, admin cấp.
 
 Script không tự chạy `claude mcp add`, không tự hỏi pairing secret thay bạn, và không tự động điều khiển Chrome — những việc đó cần Developer mode hoặc secret của admin, không tự động hoá được.
 

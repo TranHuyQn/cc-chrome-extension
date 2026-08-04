@@ -646,20 +646,18 @@ function installScript(base) {
 #   curl -fsSL ${base}/install.sh -o install.sh
 #   less install.sh
 #   bash install.sh
+#
+# Script này chỉ làm việc mà một script làm được từ đầu đến cuối: cài slash
+# command /ccchrome. Cài extension Chrome cần bấm tay trong chrome://extensions,
+# nên việc đó chuyển sang '/ccchrome connect' — chạy đúng lúc người dùng cần nó
+# và đang chú ý, chứ không nhét vào một script chạy nền im lặng.
 
 BASE="${base}"
 COMMAND_DEST="$HOME/.claude/commands/ccchrome.md"
-# Đường dẫn CỐ ĐỊNH, không đổi giữa các lần chạy lại: Chrome sinh id của một
-# extension "Load unpacked" từ chính đường dẫn thư mục chứa nó. Giải nén lại
-# vào đúng thư mục này ở lần sau giữ nguyên id đó — và giữ luôn mọi cấu hình
-# đã lưu trong extension, kể cả URL server bạn từng dán vào popup. Giải nén
-# sang một thư mục khác sẽ tạo ra MỘT EXTENSION THỨ HAI với cấu hình trống.
-EXTENSION_DIR="$HOME/.cc-chrome-bridge/extension"
 
 echo "Claude Code Chrome Bridge — cài đặt"
 echo "  Server:         $BASE"
 echo "  Slash command:  $COMMAND_DEST"
-echo "  Extension:      $EXTENSION_DIR"
 echo ""
 
 if [ -z "$BASH_VERSION" ]; then
@@ -670,7 +668,7 @@ fi
 set -euo pipefail
 
 missing=""
-for cmd in curl unzip; do
+for cmd in curl; do
   command -v "$cmd" >/dev/null 2>&1 || missing="$missing $cmd"
 done
 if [ -n "$missing" ]; then
@@ -678,7 +676,7 @@ if [ -n "$missing" ]; then
   exit 1
 fi
 
-# --- 1. Slash command /ccchrome ---------------------------------------------
+# --- Slash command /ccchrome -------------------------------------------------
 
 mkdir -p "$(dirname "$COMMAND_DEST")"
 tmp_cmd="$(mktemp)"
@@ -689,40 +687,16 @@ fi
 mv "$tmp_cmd" "$COMMAND_DEST"
 echo "Đã cài slash command: $COMMAND_DEST"
 
-# --- 2. Extension, giải nén vào đường dẫn cố định ở trên ---------------------
-
-mkdir -p "$EXTENSION_DIR"
-tmp_zip="$(mktemp)"
-curl -fsSL "$BASE/extension.zip" -o "$tmp_zip"
-unzip -oq "$tmp_zip" -d "$EXTENSION_DIR"
-rm -f "$tmp_zip"
-
-# --- 3. Xác nhận giải nén đúng -----------------------------------------------
-
-if [ ! -f "$EXTENSION_DIR/manifest.json" ]; then
-  echo "Lỗi: giải nén xong nhưng không thấy manifest.json trong $EXTENSION_DIR" >&2
-  exit 1
-fi
-version="$(grep '"version"' "$EXTENSION_DIR/manifest.json" | head -1 | cut -d'"' -f4)"
-echo "Đã cài extension bản $version vào: $EXTENSION_DIR"
-
-# --- 4. Hai bước còn lại — phải làm bằng tay ---------------------------------
-# Chrome không cho script bật Developer mode hay bấm Load unpacked hộ bạn, và
-# pairing secret chỉ admin của server này mới có — tự động hoá dừng ở đây.
+# --- Bước tiếp theo -----------------------------------------------------------
 
 echo ""
-echo "Còn hai bước làm bằng tay:"
+echo "Xong. Bước tiếp theo:"
 echo ""
-echo "  1. Mở chrome://extensions, bật 'Developer mode', bấm 'Load unpacked',"
-echo "     rồi chọn thư mục:"
-echo "       $EXTENSION_DIR"
-echo "     (đã Load unpacked đúng thư mục này từ trước? bấm 'Reload' thay vì Load unpacked lại)"
+echo "  Mở Claude Code, gõ:"
+echo "    /ccchrome connect $BASE"
 echo ""
-echo "  2. Trong Claude Code, gõ:"
-echo "       /ccchrome connect $BASE"
-echo "     Lệnh sẽ hỏi pairing secret — xin admin của server này cấp secret đó."
-echo ""
-echo "Xong hai bước trên là dùng được."
+echo "  Lệnh sẽ dẫn bạn cài extension Chrome từng bước, và hỏi pairing secret"
+echo "  — xin admin của server này cấp secret đó."
 `;
 }
 
@@ -893,8 +867,9 @@ async function mainHttp() {
 
     if (req.method === "GET" && url.pathname === "/install.sh") {
       // Refuse to hand out a script guaranteed to fail: it downloads exactly
-      // these two dist/ files further down.
-      if (!existsSync(join(distDir(), "extension.zip")) || !existsSync(join(distDir(), "ccchrome.md"))) {
+      // this dist/ file further down. The extension zip is no longer part of
+      // the installer — /ccchrome connect fetches it separately, when needed.
+      if (!existsSync(join(distDir(), "ccchrome.md"))) {
         return json(res, 404, distNotBuilt("installer"));
       }
       const { base } = publicOrigin(req);

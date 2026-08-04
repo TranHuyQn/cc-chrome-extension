@@ -324,7 +324,7 @@ Rồi họ chỉ cần chạy một lệnh (không cần clone repo):
 curl -fsSL https://cccb.beelyai.com/install.sh | bash
 ```
 
-Lệnh này tải và chạy một script bash trực tiếp từ server — họ nên biết vậy trước khi chạy; ai muốn đọc trước thì tách làm hai bước (`curl -fsSL .../install.sh -o install.sh`, đọc, rồi `bash install.sh`). Script tự cài slash command `/ccchrome` và tự tải + giải nén extension vào một thư mục cố định, rồi in ra đúng hai việc còn lại phải làm bằng tay: **Load unpacked** trong `chrome://extensions`, và `/ccchrome connect https://cccb.beelyai.com` trong Claude Code — lệnh đó sẽ hỏi pairing secret bạn vừa gửi riêng cho họ.
+Lệnh này tải và chạy một script bash trực tiếp từ server — họ nên biết vậy trước khi chạy; ai muốn đọc trước thì tách làm hai bước (`curl -fsSL .../install.sh -o install.sh`, đọc, rồi `bash install.sh`). Script chỉ tự cài slash command `/ccchrome`, rồi in ra bước tiếp theo: `/ccchrome connect https://cccb.beelyai.com` trong Claude Code — lệnh đó sẽ dẫn cài extension Chrome từng bước (tải, giải nén vào một thư mục cố định, **Load unpacked** trong `chrome://extensions`) và hỏi pairing secret bạn vừa gửi riêng cho họ.
 
 Kiểm ai đã nối được:
 
