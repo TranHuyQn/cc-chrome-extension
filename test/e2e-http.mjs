@@ -181,6 +181,12 @@ for (let i = 0; i < 60; i++) {
 check("extension connects with alice token", connected);
 if (!connected) process.exit(1);
 
+// The tab-group feature is per session, so the session id has to reach the
+// extension on every request. Read it back through the service worker.
+await clientA.callTool({ name: "list_tabs", arguments: {} });
+const seenSession = await sw.evaluate(() => self.__cc_lastSession ?? null);
+check("session id reaches the extension", typeof seenSession === "string" && seenSession.length > 0, String(seenSession));
+
 // --- drive the browser over http MCP ----------------------------------------
 
 r = await clientA.callTool({ name: "navigate", arguments: { url: `http://127.0.0.1:${HTTP_PORT}/` } });

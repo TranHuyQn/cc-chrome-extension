@@ -12,8 +12,9 @@ export default [
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: "module",
-      // `chrome` appears inside page.evaluate() callbacks, which run in the browser.
-      globals: { ...globals.node, chrome: "readonly" },
+      // `chrome` and `self` appear inside page.evaluate()/sw.evaluate() callbacks,
+      // which run in the browser/service worker, not in this Node process.
+      globals: { ...globals.node, chrome: "readonly", self: "readonly" },
     },
   },
   {

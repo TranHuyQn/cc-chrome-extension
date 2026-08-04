@@ -33,6 +33,11 @@ const HOST = process.env.CC_CHROME_HOST || (MODE === "http" ? "0.0.0.0" : "127.0
 const REQUEST_TIMEOUT_MS = Number(process.env.CC_CHROME_TIMEOUT_MS || 45000);
 const VERSION = "2.0.0";
 
+// One Chrome tab group per Claude Code session. stdio serves exactly one
+// session per process, so a value minted at startup is that session's identity;
+// http reuses the MCP session id, which already means the same thing.
+const STDIO_SESSION_ID = randomUUID();
+
 const log = (...args) => console.error("[claude-code-chrome-mcp]", ...args);
 
 // Only the Chrome extension may drive the bridge. An absent Origin used to slip
@@ -127,7 +132,7 @@ class ExtensionConnection {
     return this.socket.readyState === 1;
   }
 
-  call(method, params = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+  call(method, params = {}, timeoutMs = REQUEST_TIMEOUT_MS, session) {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -135,7 +140,7 @@ class ExtensionConnection {
         reject(new Error(`Request '${method}' timed out after ${timeoutMs}ms`));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
-      this.socket.send(JSON.stringify({ type: "request", id, method, params }));
+      this.socket.send(JSON.stringify({ type: "request", id, method, params, session }));
     });
   }
 }
@@ -202,7 +207,10 @@ const textResult = (obj) => ({
 });
 
 // getBridge: () => ExtensionConnection (throws a helpful error when absent)
-function buildMcpServer(getBridge, statusExtra = {}) {
+// sessionRef: { id: string|null }, read at call time rather than passed as a
+// plain string — in http mode the MCP session id doesn't exist yet when this
+// is called and is only assigned later, in onsessioninitialized.
+function buildMcpServer(getBridge, statusExtra = {}, sessionRef = { id: null }) {
   const server = new McpServer({ name: "claude-chrome", version: VERSION });
 
   // Wraps handlers so extension errors come back as MCP tool errors (isError),
@@ -217,7 +225,7 @@ function buildMcpServer(getBridge, statusExtra = {}) {
     });
   };
 
-  const call = (method, args, timeoutMs) => getBridge().call(method, args, timeoutMs);
+  const call = (method, args, timeoutMs) => getBridge().call(method, args, timeoutMs, sessionRef.id);
 
   const tabIdSchema = z.number().int().optional()
     .describe("Target tab id (from list_tabs). Defaults to the active tab.");
@@ -504,7 +512,7 @@ async function mainStdio() {
     registry.attach(socket, "default", "local");
   });
 
-  const server = buildMcpServer(() => registry.require("default"), { mode: "stdio" });
+  const server = buildMcpServer(() => registry.require("default"), { mode: "stdio" }, { id: STDIO_SESSION_ID });
   await server.connect(new StdioServerTransport());
   log(`MCP server ready (stdio). Waiting for the Chrome extension on ws://127.0.0.1:${PORT} ...`);
 }
@@ -725,15 +733,19 @@ async function mainHttp() {
 
       // New session (initialize request).
       const body = await readBody(req);
+      const sessionRef = { id: null };
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: randomUUID,
-        onsessioninitialized: (id) => sessions.set(id, { transport, token, lastSeen: Date.now() }),
+        onsessioninitialized: (id) => {
+          sessionRef.id = id;
+          sessions.set(id, { transport, token, lastSeen: Date.now() });
+        },
       });
       transport.onclose = () => {
         if (transport.sessionId) sessions.delete(transport.sessionId);
       };
       const name = tokens.get(token);
-      const server = buildMcpServer(() => registry.require(token), { mode: "http", user: name });
+      const server = buildMcpServer(() => registry.require(token), { mode: "http", user: name }, sessionRef);
       await server.connect(transport);
       await transport.handleRequest(req, res, body);
     } catch (err) {

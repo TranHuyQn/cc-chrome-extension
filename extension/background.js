@@ -167,10 +167,14 @@ function send(obj) {
 }
 
 async function handleRequest(msg) {
-  const { id, method, params = {} } = msg;
+  const { id, method, params = {}, session } = msg;
   try {
     const handler = handlers[method];
     if (!handler) throw new Error(`Unknown method: ${method}`);
+    // resolveTab() reads this to find the session's tab group. Injecting it
+    // here keeps all 22 handler signatures unchanged.
+    params.__session = session;
+    self.__cc_lastSession = session ?? null;
     const result = await handler(params);
     send({ type: "response", id, result: result ?? { ok: true } });
   } catch (err) {
