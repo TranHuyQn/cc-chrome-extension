@@ -6,9 +6,9 @@
 //
 // Usage: node test/e2e-http.mjs   (requires `npm install` in test/ and server/)
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, rmSync, renameSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, renameSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -662,6 +662,98 @@ if (res.status === 404) {
     renameSync(distCcchromeHidden, distCcchrome);
   }
 }
+
+// --- /uninstall.sh ----------------------------------------------------------
+//
+// Outside the dist/-built block on purpose: the uninstaller downloads nothing,
+// so it must be served whether or not dist/ exists. A server that cannot hand
+// out the installer must still be able to help someone remove what an earlier
+// build installed.
+
+res = await fetch(`http://127.0.0.1:${MCP_PORT}/uninstall.sh`);
+const uninstallBody = await res.text();
+check("uninstall.sh status", res.status === 200, `status=${res.status}`);
+check("uninstall.sh cache-control forbids storing", res.headers.get("cache-control") === "no-store", res.headers.get("cache-control"));
+check("uninstall.sh content-type is a shell script type", (res.headers.get("content-type") || "").includes("shellscript"), res.headers.get("content-type"));
+check(
+  "uninstall.sh embeds the server's own base URL, not a hardcoded domain",
+  uninstallBody.includes(`http://127.0.0.1:${MCP_PORT}`),
+  "expected the request's own base URL inside the script"
+);
+
+// String checks stop here: what matters is what the script DOES to a machine,
+// so the rest runs it for real against a throwaway HOME.
+//
+// PATH is narrowed to the system directories so `claude` is guaranteed absent:
+// the script would otherwise run `claude mcp remove` against whatever CLI this
+// machine has installed, and a test must not reach into the developer's own
+// Claude Code configuration.
+const uninstallScriptPath = join(mkdtempSync(join(tmpdir(), "cc-bridge-uninstall-")), "uninstall.sh");
+writeFileSync(uninstallScriptPath, uninstallBody);
+
+function fakeInstalledHome() {
+  const home = mkdtempSync(join(tmpdir(), "cc-bridge-home-"));
+  mkdirSync(join(home, ".claude", "commands"), { recursive: true });
+  writeFileSync(join(home, ".claude", "commands", "ccchrome.md"), "---\ndescription: test\n---\n");
+  writeFileSync(join(home, ".ccchrome.json"), JSON.stringify({ serverUrl: "http://example.invalid", token: "t", name: "test" }));
+  return home;
+}
+
+function runUninstall(home, args = []) {
+  return spawnSync("bash", [uninstallScriptPath, ...args], {
+    env: { HOME: home, PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
+    encoding: "utf8",
+  });
+}
+
+// 1. --dry-run must report without touching anything.
+let home = fakeInstalledHome();
+let run = runUninstall(home, ["--dry-run"]);
+check("uninstall.sh --dry-run exits 0", run.status === 0, `status=${run.status} stderr=${(run.stderr || "").slice(0, 200)}`);
+check(
+  "uninstall.sh --dry-run leaves every file in place",
+  existsSync(join(home, ".claude", "commands", "ccchrome.md")) && existsSync(join(home, ".ccchrome.json")),
+  run.stdout
+);
+rmSync(home, { recursive: true, force: true });
+
+// 2. A real run removes exactly what install.sh and /ccchrome connect created.
+home = fakeInstalledHome();
+run = runUninstall(home);
+check("uninstall.sh exits 0", run.status === 0, `status=${run.status} stderr=${(run.stderr || "").slice(0, 200)}`);
+check("uninstall.sh removes the slash command", !existsSync(join(home, ".claude", "commands", "ccchrome.md")), run.stdout);
+check("uninstall.sh removes the connect config", !existsSync(join(home, ".ccchrome.json")), run.stdout);
+check(
+  "uninstall.sh says how to remove the extension and that the token stays valid",
+  /chrome:\/\/extensions/.test(run.stdout) && /thu hồi/i.test(run.stdout),
+  run.stdout.slice(-400)
+);
+check(
+  "uninstall.sh tells the user to unregister MCP by hand when the claude CLI is absent",
+  /claude mcp remove --scope user chrome/.test(run.stdout),
+  run.stdout.slice(-400)
+);
+
+// 3. Running it twice must be as quiet as running it once — an uninstaller
+//    that fails on an already-clean machine is one people stop trusting.
+run = runUninstall(home);
+check("uninstall.sh is idempotent (second run exits 0)", run.status === 0, `status=${run.status} stderr=${(run.stderr || "").slice(0, 200)}`);
+check("uninstall.sh reports nothing left to remove on the second run", /bỏ qua/.test(run.stdout), run.stdout.slice(0, 400));
+rmSync(home, { recursive: true, force: true });
+
+// 4. The commands directory belongs to the user, not to this project: it must
+//    survive when it still holds someone else's slash command.
+home = fakeInstalledHome();
+writeFileSync(join(home, ".claude", "commands", "my-own-command.md"), "mine\n");
+run = runUninstall(home);
+check(
+  "uninstall.sh keeps other slash commands and their directory",
+  run.status === 0
+    && existsSync(join(home, ".claude", "commands", "my-own-command.md"))
+    && !existsSync(join(home, ".claude", "commands", "ccchrome.md")),
+  run.stdout
+);
+rmSync(home, { recursive: true, force: true });
 
 // --- pairing abuse limits ---------------------------------------------------
 

@@ -42,7 +42,7 @@ const REQUEST_TIMEOUT_MS = Number(process.env.CC_CHROME_TIMEOUT_MS || 45000);
 // CC_CHROME_SESSION_TTL_MS.
 const graceFromEnv = Number(process.env.CC_CHROME_RECONNECT_GRACE_MS);
 const RECONNECT_GRACE_MS = Number.isFinite(graceFromEnv) && graceFromEnv >= 0 ? graceFromEnv : 25000;
-const VERSION = "3.2.1";
+const VERSION = "3.3.0";
 
 // One Chrome tab group per Claude Code session. stdio serves exactly one
 // session per process, so a value minted at startup is that session's identity;
@@ -631,7 +631,7 @@ async function mainStdio() {
 }
 
 // ---------------------------------------------------------------------------
-// GET /install.sh — one-command onboarding
+// GET /install.sh, GET /uninstall.sh — one-command onboarding and removal
 // ---------------------------------------------------------------------------
 
 // Generates the installer as plain bash text, with `base` (this server's own
@@ -697,6 +697,144 @@ echo "    /ccchrome connect $BASE"
 echo ""
 echo "  Lệnh sẽ dẫn bạn cài extension Chrome từng bước, và hỏi pairing secret"
 echo "  — xin admin của server này cấp secret đó."
+`;
+}
+
+// The counterpart to installScript. It removes more than install.sh created:
+// install.sh only writes the slash command, but by the time anyone uninstalls,
+// /ccchrome connect has also written ~/.ccchrome.json and registered the MCP
+// server. Leaving that registration behind is the worst outcome — Claude Code
+// would keep starting a bridge that can no longer work, once per session, with
+// no hint why.
+//
+// Two things it deliberately does NOT do, both stated in its own output rather
+// than left for the user to discover: it cannot remove the Chrome extension
+// (that is a click in chrome://extensions, and the unpacked folder is wherever
+// the user chose to put it), and it does not revoke the token on the server.
+function uninstallScript(base) {
+  return `#!/usr/bin/env bash
+# Claude Code Chrome Bridge — gỡ cài đặt.
+# Được tải mới mỗi lần từ ${base}/uninstall.sh. Nên đọc trước khi chạy:
+#   curl -fsSL ${base}/uninstall.sh -o uninstall.sh
+#   less uninstall.sh
+#   bash uninstall.sh
+#
+# Xem trước mà không xoá gì:
+#   curl -fsSL ${base}/uninstall.sh | bash -s -- --dry-run
+
+BASE="${base}"
+COMMAND_DIR="$HOME/.claude/commands"
+COMMAND_DEST="$COMMAND_DIR/ccchrome.md"
+CONFIG="$HOME/.ccchrome.json"
+
+if [ -z "$BASH_VERSION" ]; then
+  echo "Lỗi: script này cần chạy bằng bash (vd: curl -fsSL $BASE/uninstall.sh | bash)." >&2
+  exit 1
+fi
+
+set -euo pipefail
+
+# while/shift, not 'for arg in "$@"': bash 3.2 (mặc định trên macOS) coi "$@"
+# rỗng là biến chưa gán khi có 'set -u', nên chạy không tham số sẽ chết ngay.
+DRY_RUN=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run|-n) DRY_RUN=1 ;;
+    -h|--help)
+      echo "Cách dùng: bash uninstall.sh [--dry-run]"
+      exit 0
+      ;;
+    *)
+      echo "Tham số không hiểu: $1 (chỉ hỗ trợ --dry-run)" >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+echo "Claude Code Chrome Bridge — gỡ cài đặt"
+echo "  Server: $BASE"
+if [ "$DRY_RUN" = "1" ]; then
+  echo "  CHẾ ĐỘ XEM TRƯỚC — không xoá gì cả."
+fi
+echo ""
+echo "Trước khi xoá: token của bạn trên server vẫn còn hiệu lực sau khi gỡ."
+echo "Muốn thu hồi thì dừng lại (Ctrl-C), chạy '/ccchrome disconnect' trong Claude Code trước."
+echo ""
+
+removed=0
+
+drop_file() {
+  # $1 = đường dẫn, $2 = mô tả
+  if [ -f "$1" ]; then
+    if [ "$DRY_RUN" = "0" ]; then
+      rm -f "$1"
+    fi
+    echo "  [x] $2: $1"
+    removed=$((removed + 1))
+  else
+    echo "  [ ] $2: không có sẵn, bỏ qua"
+  fi
+}
+
+# install.sh tạo file này.
+drop_file "$COMMAND_DEST" "slash command /ccchrome"
+
+# Chỉ xoá thư mục khi nó rỗng: người dùng có thể có slash command khác ở đó,
+# và install.sh cũng chỉ 'mkdir -p' chứ không sở hữu thư mục này.
+if [ -d "$COMMAND_DIR" ] && [ -z "$(ls -A "$COMMAND_DIR" 2>/dev/null)" ]; then
+  if [ "$DRY_RUN" = "0" ]; then
+    rmdir "$COMMAND_DIR" 2>/dev/null || true
+  fi
+  echo "  [x] thư mục rỗng: $COMMAND_DIR"
+  removed=$((removed + 1))
+fi
+
+# /ccchrome connect tạo file này (chứa serverUrl + token).
+drop_file "$CONFIG" "cấu hình kết nối"
+
+# /ccchrome connect đăng ký MCP server này.
+if command -v claude >/dev/null 2>&1; then
+  if claude mcp get chrome >/dev/null 2>&1; then
+    if [ "$DRY_RUN" = "0" ]; then
+      claude mcp remove --scope user chrome >/dev/null 2>&1 || true
+      # Kiểm chứng thay vì tin: 'chrome' có thể được đăng ký ở scope project
+      # hoặc local, mà lệnh trên chỉ gỡ scope user — báo "đã gỡ" lúc đó là sai.
+      if claude mcp get chrome >/dev/null 2>&1; then
+        echo "  [!] MCP server 'chrome' vẫn còn đăng ký (nhiều khả năng ở scope project hoặc local)."
+        echo "      Gỡ tay: claude mcp remove --scope project chrome   (hoặc --scope local)"
+      else
+        echo "  [x] đăng ký MCP server 'chrome' (scope user)"
+        removed=$((removed + 1))
+      fi
+    else
+      echo "  [x] đăng ký MCP server 'chrome'"
+      removed=$((removed + 1))
+    fi
+  else
+    echo "  [ ] đăng ký MCP server 'chrome': không có sẵn, bỏ qua"
+  fi
+else
+  echo "  [!] không thấy lệnh 'claude' trong PATH — tự chạy: claude mcp remove --scope user chrome"
+fi
+
+echo ""
+if [ "$DRY_RUN" = "1" ]; then
+  echo "Xem trước xong: $removed mục sẽ bị xoá. Chạy lại không kèm --dry-run để xoá thật."
+else
+  echo "Đã gỡ $removed mục."
+fi
+
+echo ""
+echo "Script không tự làm được hai việc sau — cần bạn tự tay:"
+echo ""
+echo "  1. Gỡ extension khỏi Chrome: mở chrome://extensions, xoá 'Claude Code Chrome"
+echo "     Bridge', rồi xoá thư mục bạn đã giải nén extension vào (đường dẫn ghi ngay"
+echo "     trên thẻ extension đó)."
+echo ""
+echo "  2. Thu hồi token trên server: token vừa xoá khỏi máy bạn vẫn còn hiệu lực trên"
+echo "     $BASE cho tới khi bị thu hồi. Nếu đã lỡ xoá file cấu hình rồi, nhờ admin thu"
+echo "     hồi giúp."
 `;
 }
 
@@ -882,6 +1020,21 @@ async function mainHttp() {
       return res.end(body);
     }
 
+    // No dist/ guard here, unlike /install.sh: the uninstaller downloads
+    // nothing, it only deletes local files. Gating it on a built dist/ would
+    // mean a server that cannot serve the installer also refuses to help
+    // anyone remove what an earlier build installed.
+    if (req.method === "GET" && url.pathname === "/uninstall.sh") {
+      const { base } = publicOrigin(req);
+      const body = uninstallScript(base);
+      res.writeHead(200, {
+        "content-type": "text/x-shellscript; charset=utf-8",
+        "content-length": Buffer.byteLength(body),
+        "cache-control": "no-store",
+      });
+      return res.end(body);
+    }
+
     // --- self-service pairing (used by the /ccchrome slash command) ---------
 
     if (url.pathname === "/pair" && req.method === "POST") {
@@ -1055,6 +1208,7 @@ async function mainHttp() {
     log(`  Pairing:      POST /pair, GET /pair/status, DELETE /pair (for /ccchrome connect)`);
     log(`  Downloads:    GET /extension.zip, GET /extension.crx, GET /ccchrome.md (if dist/ is built)`);
     log(`  Onboarding:   GET /install.sh  (curl -fsSL https://<domain>/install.sh | bash)`);
+    log(`  Removal:      GET /uninstall.sh  (curl -fsSL https://<domain>/uninstall.sh | bash)`);
   });
 }
 

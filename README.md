@@ -226,6 +226,25 @@ Lệnh đó mới là nơi dẫn cài extension Chrome từng bước (tải, gi
 
 Script không tự chạy `claude mcp add`, không tự hỏi pairing secret thay bạn, và không tự động điều khiển Chrome — những việc đó cần Developer mode hoặc secret của admin, không tự động hoá được.
 
+### Gỡ khỏi máy
+
+```bash
+curl -fsSL https://chrome.example.com/uninstall.sh | bash
+```
+
+Xem trước sẽ xoá những gì mà không đụng vào file nào:
+
+```bash
+curl -fsSL https://chrome.example.com/uninstall.sh | bash -s -- --dry-run
+```
+
+Script xoá `~/.claude/commands/ccchrome.md` (do `install.sh` tạo), `~/.ccchrome.json` và gỡ đăng ký MCP server `chrome` ở scope user (do `/ccchrome connect` tạo). Thư mục `~/.claude/commands/` chỉ bị xoá khi nó rỗng — slash command khác của bạn nằm nguyên đó. Chạy lại lần hai không báo lỗi.
+
+Hai việc script **không** làm, và nó tự nói rõ khi chạy xong:
+
+- **Gỡ extension khỏi Chrome** — phải bấm tay trong `chrome://extensions`, rồi xoá thư mục bạn đã giải nén extension vào.
+- **Thu hồi token trên server** — token vẫn còn hiệu lực sau khi xoá khỏi máy. Muốn thu hồi thì chạy `/ccchrome disconnect` **trước**, vì lệnh đó cần chính file cấu hình mà uninstall sẽ xoá.
+
 ### Trên máy mỗi thành viên — từng bước bằng tay, hoặc muốn hiểu `/ccchrome connect` làm gì
 
 Cài slash command một lần:
