@@ -20,7 +20,8 @@
     "scripting",
     "debugger",
     "storage",
-    "alarms"
+    "alarms",
+    "tabGroups"
   ],
   "host_permissions": ["<all_urls>"]
 }

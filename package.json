@@ -7,11 +7,12 @@
     "lint": "eslint .",
     "test:build": "node test/build.test.mjs",
     "test:origin": "node test/origin.test.mjs",
+    "test:tabgroups": "node test/tabgroups.test.mjs",
     "test:ratelimit": "node test/ratelimit.test.mjs",
     "test:stdio": "node test/e2e.mjs",
     "test:http": "node test/e2e-http.mjs",
     "test:session": "node test/session-ttl.test.mjs",
-    "test": "node test/ratelimit.test.mjs && node test/build.test.mjs && node test/origin.test.mjs && node test/e2e.mjs && node test/e2e-http.mjs && node test/session-ttl.test.mjs"
+    "test": "node test/ratelimit.test.mjs && node test/build.test.mjs && node test/origin.test.mjs && node test/tabgroups.test.mjs && node test/e2e.mjs && node test/e2e-http.mjs && node test/session-ttl.test.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
