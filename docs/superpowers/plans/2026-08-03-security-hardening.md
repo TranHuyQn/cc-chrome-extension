@@ -29,7 +29,7 @@ Spec nguồn: `docs/superpowers/specs/2026-08-03-security-hardening-design.md`
 |---|---|---|
 | `server/tokens.js` | **Tạo.** Class `TokenStore`: nạp token tĩnh, cấp/thu hồi token động, lưu bền vững | 2 |
 | `server/ratelimit.js` | **Tạo.** Class `RateLimiter` + hàm `clientIp` | 6 |
-| `server/index.js` | **Sửa.** Bắt tay WebSocket, định nghĩa 23 tool, vòng đời MCP session | 2,3,4,6,7,8 |
+| `server/index.js` | **Sửa.** Bắt tay WebSocket, định nghĩa 22 tool, vòng đời MCP session | 2,3,4,6,7,8 |
 | `extension/background.js` | **Sửa.** Gửi token qua subprotocol, dịch close code thành thông báo tiếng Việt | 4,5 |
 | `test/origin.test.mjs` | **Tạo.** Chứng minh Chrome gửi `Origin`, và client không phải extension bị chặn | 1,3 |
 | `test/session-ttl.test.mjs` | **Tạo.** Vòng đời MCP session, không cần Chromium | 7 |

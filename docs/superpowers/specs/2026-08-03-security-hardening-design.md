@@ -23,7 +23,7 @@ không chạy được — không có test thì không bước nào có output v
 
 ## Nguyên tắc
 
-Không đổi kiến trúc. Không đụng 23 tool, cơ chế `ref`, hay tầng CDP. Mọi thay
+Không đổi kiến trúc. Không đụng 22 tool, cơ chế `ref`, hay tầng CDP. Mọi thay
 đổi nằm ở tầng bắt tay kết nối và vòng đời session.
 
 ## Quyết định đã chốt
