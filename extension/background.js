@@ -252,17 +252,38 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 // Tab helpers
 // ---------------------------------------------------------------------------
 
+// Every one of the 22 tools routes through here, which is what makes the
+// in-group restriction enforceable in one place. A tab outside the session's
+// group is refused with a message that says how to grant access, because the
+// fix is a user action in Chrome that Claude cannot perform.
 async function resolveTab(params) {
+  const session = params.__session;
+  const title = sessionGroupTitle(session);
+
   if (params.tabId) {
     const tab = await chrome.tabs.get(params.tabId).catch(() => null);
     if (!tab) throw new Error(`No tab with id ${params.tabId}`);
+    const groupId = await sessionGroupId(session, tab.windowId);
+    if (groupId === null || tab.groupId !== groupId) {
+      throw new Error(
+        `Tab ${params.tabId} is outside the "${title}" tab group. Drag that tab into the group to let me work on it, or call new_tab to open a fresh one.`
+      );
+    }
     return tab;
   }
-  const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (active) return active;
-  const [anyTab] = await chrome.tabs.query({ active: true });
-  if (anyTab) return anyTab;
-  throw new Error("No active tab found");
+
+  // No tabId: use the session's own tabs, most recently active first.
+  const windows = await chrome.windows.getAll({ windowTypes: ["normal"] });
+  for (const win of windows) {
+    const groupId = await sessionGroupId(session, win.id);
+    if (groupId === null) continue;
+    const tabs = await chrome.tabs.query({ groupId });
+    if (tabs.length) return tabs[tabs.length - 1];
+  }
+
+  const created = await chrome.tabs.create({ url: "about:blank", active: true });
+  await addTabToSessionGroup(created, session);
+  return await chrome.tabs.get(created.id);
 }
 
 function assertScriptableUrl(tab) {
@@ -277,12 +298,20 @@ function assertScriptableUrl(tab) {
 // wrap their body in try/catch and report failures as { __cc_err }.
 async function execInTab(tab, func, args = [], world = "ISOLATED") {
   assertScriptableUrl(tab);
-  const [result] = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func,
-    args,
-    world,
-  });
+  let injected;
+  try {
+    injected = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func, args, world });
+  } catch (err) {
+    // resolveTab opens an about:blank tab when the session's group is empty, so
+    // a read tool called before any navigate lands here. Chrome's own message
+    // ("manifest must request permission to access this host") points at the
+    // wrong fix — the fix is to navigate somewhere.
+    if ((tab.url || "").startsWith("about:blank")) {
+      throw new Error("This session's tab group has no page open yet (about:blank). Call navigate with a url first.", { cause: err });
+    }
+    throw err;
+  }
+  const [result] = injected;
   if (!result) throw new Error("Script returned no result");
   const value = result.result;
   if (value && typeof value === "object" && value.__cc_err) {
@@ -876,9 +905,19 @@ const handlers = {
     };
   },
 
-  async list_tabs() {
-    const tabs = await chrome.tabs.query({});
+  // Scoped to the session's group for the same reason resolveTab is: listing a
+  // tab the session cannot touch only leads to a refusal one call later.
+  async list_tabs(params) {
+    const windows = await chrome.windows.getAll({ windowTypes: ["normal"] });
+    const tabs = [];
+    for (const win of windows) {
+      const groupId = await sessionGroupId(params.__session, win.id);
+      if (groupId === null) continue;
+      tabs.push(...(await chrome.tabs.query({ groupId })));
+    }
     return {
+      group: sessionGroupTitle(params.__session),
+      note: tabs.length ? undefined : "No tabs in this session's group yet. Use new_tab, or drag a tab into the group in Chrome.",
       tabs: tabs.map((t) => ({
         tabId: t.id,
         title: t.title,
@@ -897,15 +936,22 @@ const handlers = {
     return { tabId: updated.id, url: updated.url, title: updated.title, groupId: updated.groupId };
   },
 
+  // close_tab and switch_tab used chrome.tabs directly, which is the one way a
+  // tool could still reach outside the group — and closing a stranger's tab is
+  // the most damaging thing this extension can do. They go through resolveTab
+  // like everything else; the tabId guard stays so "no tabId" keeps saying so
+  // instead of silently acting on some other tab in the group.
   async close_tab(params) {
     if (!params.tabId) throw new Error("tabId is required");
-    await chrome.tabs.remove(params.tabId);
-    return { closed: params.tabId };
+    const tab = await resolveTab(params);
+    await chrome.tabs.remove(tab.id);
+    return { closed: tab.id };
   },
 
   async switch_tab(params) {
     if (!params.tabId) throw new Error("tabId is required");
-    const tab = await chrome.tabs.update(params.tabId, { active: true });
+    const target = await resolveTab(params);
+    const tab = await chrome.tabs.update(target.id, { active: true });
     await chrome.windows.update(tab.windowId, { focused: true });
     return { tabId: tab.id, url: tab.url, title: tab.title };
   },

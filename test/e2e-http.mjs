@@ -214,10 +214,19 @@ check("bob is isolated from alice's browser", toolText(r).includes('"connected":
 r = await clientB.callTool({ name: "navigate", arguments: { url: "https://example.com" } });
 check("bob navigate fails cleanly", r.isError && toolText(r).includes("not connected"), toolText(r).slice(0, 200));
 
-// A second Claude Code session with alice's token shares her browser.
+// A second Claude Code session with alice's token reaches the same browser —
+// bob's does not. It no longer shares alice's *tabs*, though: since 3.0.0 every
+// MCP session works inside its own tab group, so "same browser" is proven by
+// reaching her extension, and the isolation is asserted right after.
 const clientA2 = await mcpConnect(TOKEN_A);
-r = await clientA2.callTool({ name: "get_page_text", arguments: {} });
-check("second session, same token, same browser", toolText(r).includes("Hi TeamMate"), toolText(r).slice(0, 200));
+r = await clientA2.callTool({ name: "chrome_status", arguments: {} });
+check("second session, same token, same browser", toolText(r).includes('"connected": true'), toolText(r).slice(0, 200));
+r = await clientA2.callTool({ name: "get_page_text", arguments: { tabId: mainTabId } });
+check(
+  "phiên thứ hai không với được tab của phiên đầu",
+  r.isError && /is outside the "Claude · [0-9a-f]{4}" tab group/.test(toolText(r)),
+  toolText(r).slice(0, 200)
+);
 
 // --- per-session tab groups --------------------------------------------------
 //
@@ -242,10 +251,29 @@ const tabB = JSON.parse(toolText(await clientA2.callTool({ name: "new_tab", argu
 const otherGroup = await sw.evaluate(async (id) => (await chrome.tabs.get(id)).groupId, tabB.tabId);
 check("phiên khác thì group khác", otherGroup >= 0 && otherGroup !== groupsSame.a, `${otherGroup} vs ${groupsSame.a}`);
 
-// new_tab activates each tab it opens, which stole focus from the original
-// tab that carries the "Hi TeamMate" state the paired-token test below reads
-// back via a tabId-less get_page_text. Restore focus before moving on.
-await clientA.callTool({ name: "switch_tab", arguments: { tabId: mainTabId } });
+// Yêu cầu 3: tab ngoài group phải bị từ chối, và kéo vào group thì thao tác được.
+const outsideId = await sw.evaluate(async (url) => (await chrome.tabs.create({ url, active: false })).id, `http://127.0.0.1:${HTTP_PORT}/`);
+await sleep(500);
+const blocked = await clientA.callTool({ name: "get_page_text", arguments: { tabId: outsideId } });
+check("tab ngoài group bị từ chối", blocked.isError === true, toolText(blocked).slice(0, 160));
+check("thông báo lỗi nêu tên nhóm", /Claude · [0-9a-f]{4}/.test(toolText(blocked)), toolText(blocked).slice(0, 160));
+
+// close_tab is the most damaging thing this extension can do to a tab it does
+// not own, so it gets its own check — and the tab must still be there after.
+const blockedClose = await clientA.callTool({ name: "close_tab", arguments: { tabId: outsideId } });
+check("close_tab tab ngoài nhóm bị từ chối", blockedClose.isError === true && /tab group/.test(toolText(blockedClose)), toolText(blockedClose).slice(0, 160));
+const stillOpen = await sw.evaluate(async (id) => !!(await chrome.tabs.get(id).catch(() => null)), outsideId);
+check("tab ngoài nhóm không bị đóng", stillOpen === true, String(stillOpen));
+
+// Người dùng kéo tab vào nhóm — mô phỏng bằng chính API Chrome dùng khi kéo.
+await sw.evaluate(async ([tabId, groupId]) => { await chrome.tabs.group({ tabIds: [tabId], groupId }); }, [outsideId, groupsSame.a]);
+const allowed = await clientA.callTool({ name: "get_page_text", arguments: { tabId: outsideId } });
+check("kéo tab vào nhóm thì thao tác được", !allowed.isError, toolText(allowed).slice(0, 160));
+
+// switch_tab goes through resolveTab too since 3.0.0, so an in-group tab must
+// still be allowed through it.
+r = await clientA.callTool({ name: "switch_tab", arguments: { tabId: mainTabId } });
+check("switch_tab tab trong nhóm vẫn được", !r.isError && toolText(r).includes(String(mainTabId)), toolText(r).slice(0, 160));
 
 // --- self-service pairing (the /ccchrome connect flow) ----------------------
 
@@ -292,8 +320,12 @@ for (let i = 0; i < 40; i++) {
 }
 check("extension connects with paired token", pairedConnected);
 
+// carol's session has its own tab group, so it proves browser control by
+// opening a tab of its own and reading it back, not by inheriting alice's.
+r = await clientC.callTool({ name: "new_tab", arguments: { url: `http://127.0.0.1:${HTTP_PORT}/` } });
+check("paired token mở được tab", !r.isError && toolText(r).includes(`127.0.0.1:${HTTP_PORT}`), toolText(r).slice(0, 200));
 r = await clientC.callTool({ name: "get_page_text", arguments: {} });
-check("browser control via paired token", toolText(r).includes("Hi TeamMate"), toolText(r).slice(0, 200));
+check("browser control via paired token", toolText(r).includes("Hello VPS Bridge"), toolText(r).slice(0, 200));
 
 // Revoke: token stops working everywhere.
 res = await fetch(`http://127.0.0.1:${MCP_PORT}/pair`, {

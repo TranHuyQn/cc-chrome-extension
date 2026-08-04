@@ -267,8 +267,33 @@ check("read_network_requests", toolText(r).includes(`127.0.0.1:${HTTP_PORT}`), t
 r = await client.callTool("new_tab", { url: `http://127.0.0.1:${HTTP_PORT}/second` });
 const newTabId = JSON.parse(toolText(r)).tabId;
 check("new_tab", Number.isInteger(newTabId), toolText(r));
+// Since 3.0.0 list_tabs is scoped to the session's group, so it must name the
+// group, include the tab new_tab just put in it, and leave out a tab opened
+// outside it (the browser's own first tab, which nothing ever grouped).
+const ungroupedId = await sw.evaluate(async () => {
+  const tabs = await chrome.tabs.query({ groupId: chrome.tabGroups.TAB_GROUP_ID_NONE });
+  return tabs.length ? tabs[0].id : null;
+});
+check("có tab ngoài group để đối chứng", Number.isInteger(ungroupedId), String(ungroupedId));
 r = await client.callTool("list_tabs", {});
-check("list_tabs", toolText(r).includes(String(newTabId)), toolText(r).slice(0, 300));
+const listed = JSON.parse(toolText(r));
+check("list_tabs names the session group", /^Claude · [0-9a-f]{4}$/.test(listed.group || ""), toolText(r).slice(0, 300));
+check("list_tabs", listed.tabs.some((t) => t.tabId === newTabId), toolText(r).slice(0, 300));
+check("list_tabs bỏ qua tab ngoài group", !listed.tabs.some((t) => t.tabId === ungroupedId), toolText(r).slice(0, 300));
+
+// The refusal has to name the group and both ways out, because the remedy is a
+// drag in Chrome that Claude cannot perform for the user.
+r = await client.callTool("get_page_text", { tabId: ungroupedId });
+const refusal = toolText(r);
+console.log(`refusal message: ${refusal}`);
+check("tab ngoài group bị từ chối", r.isError === true, refusal.slice(0, 200));
+check(
+  "thông báo từ chối nêu nhóm và cả hai cách xử lý",
+  /is outside the "Claude · [0-9a-f]{4}" tab group/.test(refusal)
+    && /[Dd]rag that tab into the group/.test(refusal)
+    && /new_tab/.test(refusal),
+  refusal.slice(0, 200)
+);
 r = await client.callTool("switch_tab", { tabId: newTabId });
 check("switch_tab", toolText(r).includes(String(newTabId)), toolText(r));
 r = await client.callTool("close_tab", { tabId: newTabId });
