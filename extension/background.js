@@ -48,13 +48,42 @@ async function sessionGroupId(session, windowId) {
   return existing ? existing.id : null;
 }
 
+// Creating the group is read-then-write across awaits, and Claude Code issues
+// independent tool calls concurrently (the http transport does not serialize
+// them). Two new_tab calls could both see "no group yet" and both create one
+// with the same title; chrome.tabGroups.query then returns one arbitrary
+// winner and every tab in the loser is permanently unreachable — invisible to
+// list_tabs and refused by resolveTab, with no way back from Claude's side.
+//
+// So group creation is chained per title: the second caller waits for the
+// first and then finds the group it made. The race only exists between
+// in-flight requests inside one service-worker lifetime, so an in-memory map
+// is enough — nothing needs to survive a worker restart.
+const groupLocks = new Map();
+
+function withGroupLock(title, fn) {
+  const previous = groupLocks.get(title) || Promise.resolve();
+  // .then(fn, fn) so one failed call does not wedge the chain for the rest.
+  const next = previous.then(fn, fn);
+  groupLocks.set(title, next);
+  // Drop the entry once the chain drains, so the map does not grow one
+  // permanent entry per session the worker has ever served.
+  next.catch(() => {}).then(() => {
+    if (groupLocks.get(title) === next) groupLocks.delete(title);
+  });
+  return next;
+}
+
 async function addTabToSessionGroup(tab, session) {
-  let groupId = await sessionGroupId(session, tab.windowId);
-  groupId = groupId === null
-    ? await chrome.tabs.group({ tabIds: [tab.id] })
-    : await chrome.tabs.group({ tabIds: [tab.id], groupId });
-  await chrome.tabGroups.update(groupId, { title: sessionGroupTitle(session), color: GROUP_COLOR });
-  return groupId;
+  const title = sessionGroupTitle(session);
+  return await withGroupLock(title, async () => {
+    let groupId = await sessionGroupId(session, tab.windowId);
+    groupId = groupId === null
+      ? await chrome.tabs.group({ tabIds: [tab.id] })
+      : await chrome.tabs.group({ tabIds: [tab.id], groupId });
+    await chrome.tabGroups.update(groupId, { title, color: GROUP_COLOR });
+    return groupId;
+  });
 }
 
 let ws = null;
@@ -272,8 +301,20 @@ async function resolveTab(params) {
     return tab;
   }
 
-  // No tabId: use the session's own tabs, most recently active first.
-  const windows = await chrome.windows.getAll({ windowTypes: ["normal"] });
+  // No tabId: look in the window the user is actually in first, then the rest
+  // in chrome.windows.getAll() order (roughly window creation order). Within a
+  // window it takes the group's last tab in tab-strip order — Chrome exposes no
+  // per-tab activation time, so this is position, not recency.
+  //
+  // Checking the focused window first is what keeps this in step with new_tab,
+  // which creates in the focused window: without it, a session that opened a
+  // tab in window 1 and then had new_tab land in window 2 would keep resolving
+  // to the stale window-1 tab, and Claude would silently read the wrong page.
+  const focused = await chrome.windows.getLastFocused().catch(() => null);
+  const all = await chrome.windows.getAll({ windowTypes: ["normal"] });
+  const windows = focused
+    ? [...all.filter((w) => w.id === focused.id), ...all.filter((w) => w.id !== focused.id)]
+    : all;
   for (const win of windows) {
     const groupId = await sessionGroupId(session, win.id);
     if (groupId === null) continue;

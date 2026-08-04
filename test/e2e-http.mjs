@@ -275,6 +275,58 @@ check("kéo tab vào nhóm thì thao tác được", !allowed.isError, toolText(
 r = await clientA.callTool({ name: "switch_tab", arguments: { tabId: mainTabId } });
 check("switch_tab tab trong nhóm vẫn được", !r.isError && toolText(r).includes(String(mainTabId)), toolText(r).slice(0, 160));
 
+// Nhiều cửa sổ: new_tab mở ở cửa sổ đang focus, nên lời gọi không kèm tabId
+// phải bám theo cửa sổ đó chứ không quay về nhóm cũ ở cửa sổ đầu tiên (nếu
+// không, Claude đọc nhầm trang mà không có lỗi nào báo).
+const win2 = await sw.evaluate(async (url) => {
+  const w = await chrome.windows.create({ url, focused: true });
+  return { windowId: w.id, tabId: w.tabs[0].id };
+}, `http://127.0.0.1:${HTTP_PORT}/`);
+await sleep(500);
+const tabW2 = JSON.parse(toolText(await clientA.callTool({ name: "new_tab", arguments: { url: `http://127.0.0.1:${HTTP_PORT}/` } })));
+const win2Info = await sw.evaluate(async (id) => {
+  const t = await chrome.tabs.get(id);
+  return { windowId: t.windowId, groupId: t.groupId };
+}, tabW2.tabId);
+check("new_tab mở ở cửa sổ đang focus", win2Info.windowId === win2.windowId, JSON.stringify({ win2Info, expected: win2.windowId }));
+const resolved = JSON.parse(toolText(await clientA.callTool({ name: "navigate", arguments: { action: "reload" } })));
+check(
+  "không có tabId thì bám cửa sổ đang focus",
+  resolved.tabId === tabW2.tabId,
+  JSON.stringify({ resolved: resolved.tabId, expected: tabW2.tabId, firstWindowTab: tabA.tabId })
+);
+// Trả trạng thái về như cũ cho các phần kiểm thử phía sau.
+await sw.evaluate(async (id) => { await chrome.windows.remove(id); }, win2.windowId);
+await sleep(500);
+
+// Claude Code gọi tool song song. Với một phiên chưa có nhóm, hai new_tab cùng
+// lúc mà không tuần tự hoá sẽ cùng thấy "chưa có nhóm" và tạo hai nhóm trùng
+// tên — tabGroups.query chỉ trả về một nhóm, tab của nhóm thua vĩnh viễn không
+// với tới được và cũng không hiện trong list_tabs.
+const clientA3 = await mcpConnect(TOKEN_A);
+const [race1, race2] = await Promise.all([
+  clientA3.callTool({ name: "new_tab", arguments: { url: `http://127.0.0.1:${HTTP_PORT}/` } }),
+  clientA3.callTool({ name: "new_tab", arguments: { url: `http://127.0.0.1:${HTTP_PORT}/` } }),
+]);
+const raceTabs = [JSON.parse(toolText(race1)).tabId, JSON.parse(toolText(race2)).tabId];
+const raceGroups = await sw.evaluate(async ([a, b]) => {
+  const ta = await chrome.tabs.get(a), tb = await chrome.tabs.get(b);
+  const g = ta.groupId >= 0 ? await chrome.tabGroups.get(ta.groupId) : null;
+  const sameTitle = g ? await chrome.tabGroups.query({ title: g.title }) : [];
+  return { a: ta.groupId, b: tb.groupId, title: g ? g.title : null, count: sameTitle.length };
+}, raceTabs);
+check(
+  "hai new_tab song song chỉ tạo một nhóm",
+  raceGroups.a >= 0 && raceGroups.a === raceGroups.b && raceGroups.count === 1,
+  JSON.stringify(raceGroups)
+);
+const raceListed = JSON.parse(toolText(await clientA3.callTool({ name: "list_tabs", arguments: {} })));
+check(
+  "cả hai tab đều thấy được sau khi chạy song song",
+  raceTabs.every((id) => raceListed.tabs.some((t) => t.tabId === id)),
+  JSON.stringify({ raceTabs, listed: raceListed.tabs.map((t) => t.tabId) })
+);
+
 // --- self-service pairing (the /ccchrome connect flow) ----------------------
 
 res = await fetch(`http://127.0.0.1:${MCP_PORT}/pair`, {
