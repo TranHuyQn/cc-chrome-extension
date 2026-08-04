@@ -272,6 +272,37 @@ async function borderState() {
   /* eslint-enable no-undef */
 }
 
+// Bounding rect of the visible frame (inside the shadow root), so a caller
+// can tell "the host exists" apart from "the frame actually covers the
+// viewport" — a hostile containing-block collapses it to a 0-height box
+// while borderState() alone would still happily report "present". Returns
+// document.documentElement.clientWidth/clientHeight alongside the rect,
+// measured in the same evaluate call: that is what a position:fixed element
+// is actually sized against, and on a page with a scrollbar (this test page
+// has one) it is ~15-20px narrower than window.innerWidth, which includes
+// the scrollbar gutter and would make a healthy frame look "short".
+async function frameRect() {
+  const p = drivenPage();
+  if (!p) return null;
+  /* eslint-disable no-undef -- browser globals, evaluated inside the page by Playwright, not by this Node process */
+  return await p.evaluate(() => {
+    const host = document.getElementById("__cc_border");
+    if (!host || !host.shadowRoot) return null;
+    const frame = host.shadowRoot.firstElementChild;
+    if (!frame) return null;
+    const r = frame.getBoundingClientRect();
+    return {
+      width: r.width,
+      height: r.height,
+      top: r.top,
+      left: r.left,
+      clientWidth: document.documentElement.clientWidth,
+      clientHeight: document.documentElement.clientHeight,
+    };
+  });
+  /* eslint-enable no-undef */
+}
+
 // Detects the frame's orange edge inside a PNG by decoding it in the driven
 // page itself — this test has no PNG library, but the browser does. Proves
 // take_screenshot really strips the frame before capturing, rather than just
@@ -338,9 +369,12 @@ r = await client.callTool("read_page", {});
 let border = await borderState();
 check("khung cam xuất hiện khi Claude thao tác", border === "present", border);
 
-// The frame lives outside <body> so it never shows up in read_page/get_page_text.
-r = await client.callTool("get_page_text", {});
-check("khung cam không lọt vào get_page_text", !toolText(r).includes("__cc_border"), toolText(r).slice(0, 200));
+// The frame lives in a shadow root outside <body>, so it must never surface in
+// read_page's element/heading dump. Unlike a get_page_text (innerText) check —
+// which could never fail here since element ids structurally never appear in
+// innerText — read_page's dump does include id-bearing element descriptions,
+// so this assertion is actually capable of catching a regression.
+check("khung cam không lọt vào read_page", !toolText(r).includes("__cc_border"), toolText(r).slice(0, 200));
 
 // Nothing must touch this tab during the wait, so the page-side timer fires.
 await sleep(2600);
@@ -363,6 +397,48 @@ await client.callTool("close_tab", { tabId: blankTab.tabId });
 await client.callTool("navigate", { url: `http://127.0.0.1:${HTTP_PORT}/` });
 border = await borderState();
 check("khung cam vẽ lại sau navigate", border === "present", border);
+
+// Hostile page CSS: [aria-hidden="true"] { display: none } is a real
+// in-the-wild pattern, and a blanket `div { transform }` rule turns an
+// unstyled host into a containing block that collapses a `position: fixed`
+// descendant onto its own 0-height box. Neither is malicious — both are
+// plausible page authoring choices the host must survive.
+const hostileStyle = await drivenPage().addStyleTag({
+  content: `[aria-hidden="true"] { display: none !important } div { transform: translateZ(0) }`,
+});
+r = await client.callTool("read_page", {});
+border = await borderState();
+check("khung cam sống sót qua CSS thù địch (display:none trên [aria-hidden])", border === "present", border);
+let rect = await frameRect();
+let rectOk = !!rect
+  && Math.abs(rect.width - rect.clientWidth) <= 5
+  && Math.abs(rect.height - rect.clientHeight) <= 5;
+check(
+  "khung cam không bị co lại thành 0px bởi containing block thù địch (transform)",
+  rectOk,
+  JSON.stringify(rect)
+);
+await hostileStyle.evaluate((el) => el.remove());
+
+// Page tampering: the shadow root has to stay `mode: "open"` (this very test
+// suite reads host.shadowRoot from the main world), so a page script can
+// reach in and delete the frame in one line. Full tamper-proofing is
+// impossible in a DOM the page also controls — the achievable guarantee is
+// that the next tool call heals it rather than silently reusing the gutted
+// host forever.
+/* eslint-disable no-undef -- browser globals, evaluated inside the page by Playwright, not by this Node process */
+await drivenPage().evaluate(() => {
+  const host = document.getElementById("__cc_border");
+  if (host && host.shadowRoot && host.shadowRoot.firstElementChild) {
+    host.shadowRoot.firstElementChild.remove();
+  }
+});
+/* eslint-enable no-undef */
+const tampered = await borderState();
+check("khung cam bên trong bị page JS xoá (chuẩn bị kiểm chứng tự phục hồi)", tampered === "no-frame", tampered);
+r = await client.callTool("read_page", {});
+border = await borderState();
+check("khung cam tự phục hồi ở lần thao tác kế tiếp sau khi bị page JS phá", border === "present", border);
 
 // Prove pngHasOrange itself can detect orange before trusting it to clear
 // the real screenshots below.

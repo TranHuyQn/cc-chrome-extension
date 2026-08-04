@@ -64,9 +64,9 @@ table. Errors thrown in either place surface as `isError` MCP results, not sessi
 page" messages for the tone).
 
 A new handler in `extension/background.js` must get its tab through `resolveTab(params)` (see
-"Security invariants" below) instead of calling `chrome.tabs.get`/`query` itself — that is the one
-place the in-group restriction is enforced, and skipping it silently reopens the hole `close_tab`
-and `switch_tab` had before 3.0.0.
+"Security invariants" below) instead of calling `chrome.tabs.get`/`query` itself. `resolveTab` is a
+thin wrapper around `resolveTabInGroup`, which is the one place the in-group restriction is
+enforced — skipping it silently reopens the hole `close_tab` and `switch_tab` had before 3.0.0.
 
 `resolveTab()` also paints the orange "Claude is driving this tab" frame, so a handler that
 uses it gets the indicator for free and must not paint one itself. The frame removes itself
@@ -136,11 +136,12 @@ the session. Log through `log()` (which is `console.error`) or `process.stderr` 
   purpose. Dynamic tokens are capped by `CC_CHROME_MAX_TOKENS`.
 - The deploy path assumes TLS terminates at Caddy (`deploy/`); port 8787 is
   never exposed directly.
-- Every tool reaches its tab through `resolveTab(params)` in `extension/background.js`, and that is
-  the **only** place the in-group restriction is enforced: a tab id outside the caller's session
-  group is refused, and a call with no tab id resolves to (or opens) a tab inside that group instead
-  of whatever tab the user has active. A new or edited handler must call `resolveTab()` and must
-  never call `chrome.tabs.query`/`get`/`remove`/`update` on a caller-supplied tab id directly — before
+- Every tool reaches its tab through `resolveTab(params)` in `extension/background.js`, which calls
+  `resolveTabInGroup(params)` — that is the **only** place the in-group restriction is enforced: a
+  tab id outside the caller's session group is refused, and a call with no tab id resolves to (or
+  opens) a tab inside that group instead of whatever tab the user has active. A new or edited
+  handler must call `resolveTab()` and must never call `chrome.tabs.query`/`get`/`remove`/`update`
+  on a caller-supplied tab id directly — before
   3.0.0, `close_tab` and `switch_tab` did exactly that, which meant either tool could close or focus
   *any* tab in the browser, not just the caller's own. That bypass is why the rule exists now.
 

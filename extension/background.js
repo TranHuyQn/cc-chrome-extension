@@ -813,17 +813,63 @@ function pageWaitCheck(selector) {
 // Appended to documentElement, not body, so it stays out of read_page,
 // get_page_text and find results. Styles are set property-by-property with
 // "important" and no <style> element is inserted, so a page with a strict
-// style-src CSP is unaffected. The shadow root keeps page CSS from restyling
-// or hiding the frame.
+// style-src CSP is unaffected.
+//
+// The host itself carries the same forced-style treatment as the frame
+// inside it. Without that, ordinary non-malicious page CSS can hurt the
+// signal in the dangerous direction (silently no frame while Claude is
+// driving): a `[aria-hidden="true"] { display: none }` rule is a real
+// in-the-wild pattern and would drop the shadow tree with it, and a blanket
+// `div { transform: ... }` rule would turn the host into a containing block
+// for its `position: fixed` shadow content, collapsing the frame onto the
+// host's own 0-height box. Inline "important" outranks an author stylesheet's
+// "important" regardless of selector specificity, so forcing these
+// properties here closes that off.
+//
+// This is a defense against page CSS only, not against page JavaScript: the
+// shadow root has to stay `mode: "open"` (the e2e test reads
+// `host.shadowRoot` from the main world, and would go blind under `closed`),
+// so a page script can still reach in and delete the frame in one line.
+// `data-cc-frame` on the frame element exists so the reuse check below can
+// tell a gutted or decoy host from a real one and rebuild instead of quietly
+// reusing it — full tamper-proofing is impossible in a DOM the page also
+// controls, so healing on the next paint is the achievable goal, not
+// prevention.
 function pageShowBorder(id, idleMs, color) {
   try {
     let host = document.getElementById(id);
-    if (host && !host.shadowRoot) { host.remove(); host = null; }
+    const intact = !!(
+      host &&
+      host.shadowRoot &&
+      host.shadowRoot.firstElementChild &&
+      host.shadowRoot.firstElementChild.getAttribute("data-cc-frame") === "1"
+    );
+    if (host && !intact) { host.remove(); host = null; }
     if (!host) {
       host = document.createElement("div");
       host.id = id;
       host.setAttribute("aria-hidden", "true");
+      const hostStyle = {
+        display: "block",
+        position: "fixed",
+        top: "0",
+        left: "0",
+        width: "0",
+        height: "0",
+        margin: "0",
+        padding: "0",
+        border: "0",
+        "pointer-events": "none",
+        visibility: "visible",
+        opacity: "1",
+        transform: "none",
+        filter: "none",
+        contain: "none",
+        "z-index": "2147483647",
+      };
+      for (const prop of Object.keys(hostStyle)) host.style.setProperty(prop, hostStyle[prop], "important");
       const frame = document.createElement("div");
+      frame.setAttribute("data-cc-frame", "1");
       const style = {
         position: "fixed",
         top: "0",
