@@ -191,6 +191,7 @@ check("session id reaches the extension", typeof seenSession === "string" && see
 
 r = await clientA.callTool({ name: "navigate", arguments: { url: `http://127.0.0.1:${HTTP_PORT}/` } });
 check("navigate (http mode)", toolText(r).includes(`127.0.0.1:${HTTP_PORT}`), toolText(r));
+const mainTabId = JSON.parse(toolText(r)).tabId;
 
 r = await clientA.callTool({ name: "get_page_text", arguments: {} });
 check("get_page_text (http mode)", toolText(r).includes("Hello VPS Bridge"), toolText(r).slice(0, 200));
@@ -217,6 +218,34 @@ check("bob navigate fails cleanly", r.isError && toolText(r).includes("not conne
 const clientA2 = await mcpConnect(TOKEN_A);
 r = await clientA2.callTool({ name: "get_page_text", arguments: {} });
 check("second session, same token, same browser", toolText(r).includes("Hi TeamMate"), toolText(r).slice(0, 200));
+
+// --- per-session tab groups --------------------------------------------------
+//
+// Placed here, not at the end of the file: the tests below drive the browser
+// through clientA/clientA2, and every section after this one repoints the
+// extension's websocket at a different token or a throwaway server, so alice's
+// session stops being reachable through the MCP server past this point.
+
+const tabA = JSON.parse(toolText(await clientA.callTool({ name: "new_tab", arguments: { url: `http://127.0.0.1:${HTTP_PORT}/` } })));
+const tabA2 = JSON.parse(toolText(await clientA.callTool({ name: "new_tab", arguments: { url: `http://127.0.0.1:${HTTP_PORT}/` } })));
+const groupsSame = await sw.evaluate(async ([a, b]) => {
+  const ta = await chrome.tabs.get(a), tb = await chrome.tabs.get(b);
+  const g = ta.groupId >= 0 ? await chrome.tabGroups.get(ta.groupId) : null;
+  return { a: ta.groupId, b: tb.groupId, title: g ? g.title : null, color: g ? g.color : null };
+}, [tabA.tabId, tabA2.tabId]);
+check("hai tab cùng phiên vào chung một group", groupsSame.a >= 0 && groupsSame.a === groupsSame.b, JSON.stringify(groupsSame));
+check("nhãn group đúng định dạng", /^Claude · [0-9a-f]{4}$/.test(groupsSame.title || ""), String(groupsSame.title));
+check("group màu cam", groupsSame.color === "orange", String(groupsSame.color));
+
+// clientA2 dùng cùng token nhưng khác MCP session — phải ra group khác
+const tabB = JSON.parse(toolText(await clientA2.callTool({ name: "new_tab", arguments: { url: `http://127.0.0.1:${HTTP_PORT}/` } })));
+const otherGroup = await sw.evaluate(async (id) => (await chrome.tabs.get(id)).groupId, tabB.tabId);
+check("phiên khác thì group khác", otherGroup >= 0 && otherGroup !== groupsSame.a, `${otherGroup} vs ${groupsSame.a}`);
+
+// new_tab activates each tab it opens, which stole focus from the original
+// tab that carries the "Hi TeamMate" state the paired-token test below reads
+// back via a tabId-less get_page_text. Restore focus before moving on.
+await clientA.callTool({ name: "switch_tab", arguments: { tabId: mainTabId } });
 
 // --- self-service pairing (the /ccchrome connect flow) ----------------------
 

@@ -31,6 +31,32 @@ const REFUSAL_CODES = new Set([4001, 4002, 4003]);
 const MISSING_TOKEN_REASON =
   "URL thiếu token — server từ xa cần dạng wss://<domain>/ws?token=… (chạy /ccchrome connect để lấy URL)";
 
+const GROUP_COLOR = "orange";
+
+// The group title is the source of truth, not an in-memory map: MV3 kills the
+// service worker at will, and re-deriving the group by querying its title
+// costs one call and cannot go stale.
+function sessionGroupTitle(session) {
+  return `Claude · ${String(session || "nosession").replace(/-/g, "").slice(0, 4)}`;
+}
+
+// Scoped per window on purpose. chrome.tabs.group moves a tab into the group's
+// window, so a window-wide lookup would yank tabs across windows.
+async function sessionGroupId(session, windowId) {
+  const title = sessionGroupTitle(session);
+  const [existing] = await chrome.tabGroups.query({ title, windowId });
+  return existing ? existing.id : null;
+}
+
+async function addTabToSessionGroup(tab, session) {
+  let groupId = await sessionGroupId(session, tab.windowId);
+  groupId = groupId === null
+    ? await chrome.tabs.group({ tabIds: [tab.id] })
+    : await chrome.tabs.group({ tabIds: [tab.id], groupId });
+  await chrome.tabGroups.update(groupId, { title: sessionGroupTitle(session), color: GROUP_COLOR });
+  return groupId;
+}
+
 let ws = null;
 let wsUrl = DEFAULT_WS_URL;
 let reconnectDelay = RECONNECT_MIN_MS;
@@ -866,8 +892,9 @@ const handlers = {
   async new_tab(params) {
     const tab = await chrome.tabs.create({ url: params.url || "about:blank", active: true });
     if (params.url) await waitForTabComplete(tab.id);
+    await addTabToSessionGroup(tab, params.__session);
     const updated = await chrome.tabs.get(tab.id);
-    return { tabId: updated.id, url: updated.url, title: updated.title };
+    return { tabId: updated.id, url: updated.url, title: updated.title, groupId: updated.groupId };
   },
 
   async close_tab(params) {
