@@ -33,6 +33,14 @@ const MISSING_TOKEN_REASON =
 
 const GROUP_COLOR = "orange";
 
+// Orange viewport frame that tells the user Claude is driving this tab.
+// The idle timeout lives in the page (see pageShowBorder), not here: Chrome
+// terminates this service worker at will, and a timer held on this side would
+// leave a permanent ghost frame on the user's page every time that happens.
+const BORDER_ID = "__cc_border";
+const BORDER_IDLE_MS = 2000;
+const BORDER_COLOR = "#E8710A";
+
 // The group title is the source of truth, not an in-memory map: MV3 kills the
 // service worker at will, and re-deriving the group by querying its title
 // costs one call and cannot go stale.
@@ -322,7 +330,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 // in-group restriction enforceable in one place. A tab outside the session's
 // group is refused with a message that says how to grant access, because the
 // fix is a user action in Chrome that Claude cannot perform.
-async function resolveTab(params) {
+async function resolveTabInGroup(params) {
   const session = params.__session;
   const title = sessionGroupTitle(session);
 
@@ -365,6 +373,34 @@ async function resolveTab(params) {
   const created = await chrome.tabs.create({ url: "about:blank", active: false });
   await addTabToSessionGroup(created, session);
   return await chrome.tabs.get(created.id);
+}
+
+// Painting is deliberately not awaited and its rejection is swallowed:
+// chrome:// pages, the PDF viewer and about:blank cannot be injected into, and
+// an indicator failure must never become a tool error.
+function paintBorder(tabId) {
+  chrome.scripting
+    .executeScript({ target: { tabId }, func: pageShowBorder, args: [BORDER_ID, BORDER_IDLE_MS, BORDER_COLOR] })
+    .catch(() => {});
+}
+
+// Awaited by take_screenshot, which must not capture the frame. Not yet called
+// from this task; wired into take_screenshot by the screenshot-suppression
+// task that follows this one.
+// eslint-disable-next-line no-unused-vars
+async function clearBorder(tabId) {
+  await chrome.scripting
+    .executeScript({ target: { tabId }, func: pageHideBorder, args: [BORDER_ID] })
+    .catch(() => {});
+}
+
+// Every tool reaches its tab through here, so this wrapper is the only place
+// the indicator has to be triggered — a new handler gets it by following the
+// existing rule that it must call resolveTab().
+async function resolveTab(params) {
+  const tab = await resolveTabInGroup(params);
+  paintBorder(tab.id);
+  return tab;
 }
 
 function assertScriptableUrl(tab) {
@@ -775,6 +811,62 @@ function pageWaitCheck(selector) {
     const rect = el.getBoundingClientRect();
     return { found: true, visible: rect.width > 0 && rect.height > 0 };
   } catch (e) { return { __cc_err: e.message }; }
+}
+
+// Appended to documentElement, not body, so it stays out of read_page,
+// get_page_text and find results. Styles are set property-by-property with
+// "important" and no <style> element is inserted, so a page with a strict
+// style-src CSP is unaffected. The shadow root keeps page CSS from restyling
+// or hiding the frame.
+function pageShowBorder(id, idleMs, color) {
+  try {
+    let host = document.getElementById(id);
+    if (host && !host.shadowRoot) { host.remove(); host = null; }
+    if (!host) {
+      host = document.createElement("div");
+      host.id = id;
+      host.setAttribute("aria-hidden", "true");
+      const frame = document.createElement("div");
+      const style = {
+        position: "fixed",
+        top: "0",
+        left: "0",
+        right: "0",
+        bottom: "0",
+        border: `3px solid ${color}`,
+        "box-sizing": "border-box",
+        "box-shadow": "inset 0 0 0 1px rgba(0,0,0,0.15)",
+        "pointer-events": "none",
+        margin: "0",
+        padding: "0",
+        "z-index": "2147483647",
+      };
+      for (const prop of Object.keys(style)) frame.style.setProperty(prop, style[prop], "important");
+      host.attachShadow({ mode: "open" }).appendChild(frame);
+      document.documentElement.appendChild(host);
+    }
+    // window here is the isolated world's global, which persists between
+    // executeScript calls on the same frame and is invisible to page scripts.
+    clearTimeout(window.__cc_borderTimer);
+    window.__cc_borderTimer = setTimeout(() => {
+      const el = document.getElementById(id);
+      if (el) el.remove();
+    }, idleMs);
+    return { shown: true };
+  } catch (e) {
+    return { __cc_err: e.message };
+  }
+}
+
+function pageHideBorder(id) {
+  try {
+    clearTimeout(window.__cc_borderTimer);
+    const el = document.getElementById(id);
+    if (el) el.remove();
+    return { hidden: true };
+  } catch (e) {
+    return { __cc_err: e.message };
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -247,6 +247,57 @@ r = await client.callTool("take_screenshot", { fullPage: true });
 img = (r.content || []).find((c) => c.type === "image");
 check("take_screenshot fullPage", img && img.data.length > 1000, `len=${img?.data?.length}`);
 
+// --- orange "Claude is driving this tab" border ---------------------------
+// Observed through Playwright, not through javascript_eval: every tool call
+// repaints the frame, so a tool-based probe could never see it expire.
+const drivenPage = () =>
+  context.pages().find((p) => p.url().startsWith(`http://127.0.0.1:${HTTP_PORT}`)) || null;
+
+async function borderState() {
+  const p = drivenPage();
+  if (!p) return "no-page";
+  /* eslint-disable no-undef -- browser globals, evaluated inside the page by Playwright, not by this Node process */
+  return await p.evaluate(() => {
+    const host = document.getElementById("__cc_border");
+    if (!host) return "absent";
+    if (host.parentElement !== document.documentElement) return "wrong-parent";
+    if (!host.shadowRoot) return "no-shadow";
+    const frame = host.shadowRoot.firstElementChild;
+    if (!frame) return "no-frame";
+    const s = getComputedStyle(frame);
+    return s.borderTopWidth === "3px" && s.position === "fixed" && s.pointerEvents === "none"
+      ? "present"
+      : `bad-style:${s.borderTopWidth}/${s.position}/${s.pointerEvents}`;
+  });
+  /* eslint-enable no-undef */
+}
+
+check("tìm được tab Claude đang lái để quan sát", drivenPage() !== null);
+
+r = await client.callTool("read_page", {});
+let border = await borderState();
+check("khung cam xuất hiện khi Claude thao tác", border === "present", border);
+
+// The frame lives outside <body> so it never shows up in read_page/get_page_text.
+r = await client.callTool("get_page_text", {});
+check("khung cam không lọt vào get_page_text", !toolText(r).includes("__cc_border"), toolText(r).slice(0, 200));
+
+// Nothing must touch this tab during the wait, so the page-side timer fires.
+await sleep(2600);
+border = await borderState();
+check("khung cam tự tắt sau ~2s không thao tác", border === "absent", border);
+
+// A tab where injection is impossible must behave exactly as it did before:
+// same error, no new failure mode from the painter.
+const blankTab = JSON.parse(toolText(await client.callTool("new_tab", {})));
+r = await client.callTool("read_page", { tabId: blankTab.tabId });
+check(
+  "about:blank giữ nguyên thông báo lỗi cũ",
+  r.isError === true && toolText(r).includes("has no page open yet"),
+  toolText(r).slice(0, 200)
+);
+await client.callTool("close_tab", { tabId: blankTab.tabId });
+
 // scroll
 r = await client.callTool("scroll", { direction: "bottom" });
 check("scroll bottom", toolText(r).includes("bottom"), toolText(r));
