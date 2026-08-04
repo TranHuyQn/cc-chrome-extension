@@ -82,6 +82,14 @@ function pickSubprotocol(protocols) {
 // Extension connections
 // ---------------------------------------------------------------------------
 
+// An unparseable or absent version counts as too old: only a version this
+// server can read and confirm to be >= 3.0.0 proves the extension enforces
+// tab-group isolation.
+function isPreIsolationExtension(version) {
+  const major = Number.parseInt(String(version ?? "").split(".")[0], 10);
+  return !Number.isInteger(major) || major < 3;
+}
+
 class ExtensionConnection {
   constructor(socket, token, name) {
     this.socket = socket;
@@ -107,6 +115,17 @@ class ExtensionConnection {
     }
     if (msg.type === "hello") {
       this.extensionInfo = { client: msg.client, version: msg.version, connectedAt: Date.now() };
+      // Per-session tab-group isolation lives entirely in the extension. A
+      // pre-3.0.0 one connects and works perfectly — with no isolation at all,
+      // every tool reaching every tab in that browser. Nothing in the protocol
+      // fails, so the only way this is ever noticed is if the server says it.
+      if (isPreIsolationExtension(msg.version)) {
+        log(
+          `[${this.name}] WARNING: extension version ${msg.version || "unknown"} is older than 3.0.0 — ` +
+          "per-session tab group isolation is NOT enforced, so every tool can reach every tab in that browser. " +
+          "Reinstall the extension (<server>/extension.zip, or the extension/ folder in the repo)."
+        );
+      }
     } else if (msg.type === "ping") {
       try { this.socket.send(JSON.stringify({ type: "pong" })); } catch {}
     } else if (msg.type === "response") {

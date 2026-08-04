@@ -36,8 +36,21 @@ const GROUP_COLOR = "orange";
 // The group title is the source of truth, not an in-memory map: MV3 kills the
 // service worker at will, and re-deriving the group by querying its title
 // costs one call and cannot go stale.
+//
+// A missing session id fails closed. Only a pre-3.0.0 server sends none, which
+// happens during a staged rollout or when a popup still points at an older
+// instance; substituting a constant would put every session on that extension
+// into one shared group and silently delete the isolation this version
+// promises. handleRequest turns this into an ordinary tool error, so Claude
+// sees the remedy instead of a dead service worker.
 function sessionGroupTitle(session) {
-  return `Claude · ${String(session || "nosession").replace(/-/g, "").slice(0, 4)}`;
+  if (!session) {
+    throw new Error(
+      "This MCP server is older than the extension and sends no session id, so tab-group isolation cannot be enforced. " +
+      "Update the server to 3.0.0, or reinstall the matching 2.x extension."
+    );
+  }
+  return `Claude · ${String(session).replace(/-/g, "").slice(0, 4)}`;
 }
 
 // Scoped per window on purpose. chrome.tabs.group moves a tab into the group's
@@ -229,7 +242,6 @@ async function handleRequest(msg) {
     // resolveTab() reads this to find the session's tab group. Injecting it
     // here keeps all 22 handler signatures unchanged.
     params.__session = session;
-    self.__cc_lastSession = session ?? null;
     const result = await handler(params);
     send({ type: "response", id, result: result ?? { ok: true } });
   } catch (err) {
