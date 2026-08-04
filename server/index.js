@@ -228,7 +228,7 @@ function buildMcpServer(getBridge, statusExtra = {}, sessionRef = { id: null }) 
   const call = (method, args, timeoutMs) => getBridge().call(method, args, timeoutMs, sessionRef.id);
 
   const tabIdSchema = z.number().int().optional()
-    .describe("Target tab id (from list_tabs). Defaults to the active tab.");
+    .describe("Target tab id (from list_tabs). The tab must be in this session's own tab group; any other tab is refused. Omit it to use (or open) a tab in that group — it is never the tab the user has in front of them.");
 
   tool(
     "chrome_status",
@@ -368,7 +368,7 @@ function buildMcpServer(getBridge, statusExtra = {}, sessionRef = { id: null }) 
 
   tool(
     "take_screenshot",
-    "Take a PNG screenshot of the current tab (visible viewport by default, or the full page).",
+    "Take a PNG screenshot of a tab in this session's own tab group (visible viewport by default, or the full page). Without tabId it uses (or opens) a tab in that group, not the tab the user is looking at.",
     {
       fullPage: z.boolean().optional().describe("Capture the full scrollable page (default false)"),
       tabId: tabIdSchema,
@@ -421,22 +421,22 @@ function buildMcpServer(getBridge, statusExtra = {}, sessionRef = { id: null }) 
 
   tool(
     "new_tab",
-    "Open a new browser tab, optionally at a URL.",
+    "Open a new browser tab, optionally at a URL. The tab joins this session's own tab group, so every other tool can then work on it.",
     { url: z.string().optional().describe("URL to open (default about:blank)") },
     async (args) => textResult(await call("new_tab", args))
   );
 
   tool(
     "close_tab",
-    "Close a browser tab by id.",
-    { tabId: z.number().int().describe("Tab id to close (from list_tabs)") },
+    "Close a browser tab by id. Only accepts a tab in this session's own tab group — the user's own tabs cannot be closed.",
+    { tabId: z.number().int().describe("Tab id to close (from list_tabs); must be in this session's tab group") },
     async (args) => textResult(await call("close_tab", args))
   );
 
   tool(
     "switch_tab",
-    "Switch to (activate and focus) a tab by id.",
-    { tabId: z.number().int().describe("Tab id to activate (from list_tabs)") },
+    "Switch to (activate and focus) a tab by id. Only accepts a tab in this session's own tab group.",
+    { tabId: z.number().int().describe("Tab id to activate (from list_tabs); must be in this session's tab group") },
     async (args) => textResult(await call("switch_tab", args))
   );
 
