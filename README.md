@@ -129,7 +129,7 @@ tab cá nhân.
 
 Trong lúc Claude thao tác, mép khung nhìn của tab đó ửng lên một vệt cam mờ,
 đậm nhất sát mép rồi loang vào trong và tan hẳn — không có đường viền cứng.
-Vệt này tự biến mất khoảng 2 giây sau khi Claude ngừng đụng vào tab, nên khi
+Vệt này tự biến mất khoảng 10 giây sau khi Claude ngừng đụng vào tab, nên khi
 không thấy khung nghĩa là không có lệnh nào đang chạy trên tab đó. Khung do
 extension vẽ đè lên trang, không phải lỗi hiển thị của website, không nhận chuột
 và không lọt vào ảnh `take_screenshot`. Một số trang extension không chèn được

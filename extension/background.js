@@ -37,8 +37,16 @@ const GROUP_COLOR = "orange";
 // The idle timeout lives in the page (see pageShowBorder), not here: Chrome
 // terminates this service worker at will, and a timer held on this side would
 // leave a permanent ghost frame on the user's page every time that happens.
+//
+// 10s, not 2s: the extension only ever sees individual tool calls, and Claude
+// routinely spends several seconds reading a result and deciding what to do
+// next. A window shorter than that gap makes the frame blink off and on
+// through one continuous working session, which reads as a glitch. The cost
+// is the other direction — the frame outlives the last call by up to 10s — so
+// the frame means "Claude was working here a moment ago", and only its absence
+// is a hard statement.
 const BORDER_ID = "__cc_border";
-const BORDER_IDLE_MS = 2000;
+const BORDER_IDLE_MS = 10000;
 
 // Passed to pageShowBorder as one object because injected functions may not
 // close over anything — every value they use has to arrive as an argument.
