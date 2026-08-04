@@ -130,6 +130,9 @@ tab cá nhân.
 - Tab do `navigate` (không kèm `tabId`) hoặc `new_tab` mở ra sẽ **tự động vào
   nhóm của phiên đó** — không còn chiếm tab đang mở trước mặt bạn như trước
   2.x nữa.
+- Tab đó mở **trong nền, không giành focus của bạn** — Chrome không tự nhảy
+  sang tab hay cửa sổ đó, bạn cứ tiếp tục làm việc trên tab đang xem trong khi
+  Claude thao tác ở tab riêng của nó. Cần xem nó thì gọi `switch_tab`.
 - **Mọi tool chỉ thao tác được trên tab đang nằm trong nhóm của phiên mình.**
   Gọi tool với `tabId` của một tab ngoài nhóm sẽ bị từ chối kèm tên nhóm và
   cách xử lý (kéo tab vào nhóm, hoặc mở tab mới bằng `new_tab`).

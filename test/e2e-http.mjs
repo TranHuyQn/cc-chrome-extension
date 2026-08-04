@@ -269,6 +269,22 @@ check("kéo tab vào nhóm thì thao tác được", !allowed.isError, toolText(
 r = await clientA.callTool({ name: "switch_tab", arguments: { tabId: mainTabId } });
 check("switch_tab tab trong nhóm vẫn được", !r.isError && toolText(r).includes(String(mainTabId)), toolText(r).slice(0, 160));
 
+// new_tab must not steal the user's focus. switch_tab just made mainTabId the
+// active tab in its window, so it stands in for "the tab the user is looking
+// at"; opening another tab in the same group must leave it active and land
+// the new tab in the background.
+const activeBefore = await sw.evaluate(async (id) => (await chrome.tabs.get(id)).active, mainTabId);
+check("tab người dùng đang xem đang active trước khi mở tab mới", activeBefore === true, String(activeBefore));
+const tabQuiet = JSON.parse(toolText(await clientA.callTool({ name: "new_tab", arguments: { url: `http://127.0.0.1:${HTTP_PORT}/` } })));
+const focusAfter = await sw.evaluate(async ([newId, userId]) => {
+  const newTab = await chrome.tabs.get(newId);
+  const userTab = await chrome.tabs.get(userId);
+  return { newActive: newTab.active, userActive: userTab.active };
+}, [tabQuiet.tabId, mainTabId]);
+check("new_tab không cướp focus: tab mới không active", focusAfter.newActive === false, JSON.stringify(focusAfter));
+check("new_tab không cướp focus: tab người dùng vẫn active", focusAfter.userActive === true, JSON.stringify(focusAfter));
+await sw.evaluate(async (id) => { await chrome.tabs.remove(id); }, tabQuiet.tabId);
+
 // Nhiều cửa sổ: new_tab mở ở cửa sổ đang focus, nên lời gọi không kèm tabId
 // phải bám theo cửa sổ đó chứ không quay về nhóm cũ ở cửa sổ đầu tiên (nếu
 // không, Claude đọc nhầm trang mà không có lỗi nào báo).

@@ -334,7 +334,10 @@ async function resolveTab(params) {
     if (tabs.length) return tabs[tabs.length - 1];
   }
 
-  const created = await chrome.tabs.create({ url: "about:blank", active: true });
+  // active: false — this fallback runs on any tabId-less tool call made
+  // before the session has opened anything, so jumping to the front here
+  // would steal the user's focus just as often as new_tab would.
+  const created = await chrome.tabs.create({ url: "about:blank", active: false });
   await addTabToSessionGroup(created, session);
   return await chrome.tabs.get(created.id);
 }
@@ -982,7 +985,9 @@ const handlers = {
   },
 
   async new_tab(params) {
-    const tab = await chrome.tabs.create({ url: params.url || "about:blank", active: true });
+    // active: false — tabs Claude opens must not steal the user's focus.
+    // switch_tab is the tool for actually bringing a tab to the front.
+    const tab = await chrome.tabs.create({ url: params.url || "about:blank", active: false });
     if (params.url) await waitForTabComplete(tab.id);
     await addTabToSessionGroup(tab, params.__session);
     const updated = await chrome.tabs.get(tab.id);
