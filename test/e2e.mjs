@@ -272,6 +272,66 @@ async function borderState() {
   /* eslint-enable no-undef */
 }
 
+// Detects the frame's orange edge inside a PNG by decoding it in the driven
+// page itself — this test has no PNG library, but the browser does. Proves
+// take_screenshot really strips the frame before capturing, rather than just
+// putting it back afterward (which the repaint checks above cannot tell apart
+// from a suppression that never ran).
+async function pngHasOrange(base64) {
+  const p = drivenPage();
+  /* eslint-disable no-undef -- browser globals, evaluated inside the page by Playwright, not by this Node process */
+  return await p.evaluate(async (b64) => {
+    const img = new Image();
+    img.src = `data:image/png;base64,${b64}`;
+    await img.decode();
+    const w = img.naturalWidth;
+    const h = img.naturalHeight;
+    if (!w || !h) return "failed to decode image (0x0)";
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0);
+    const target = [0xe8, 0x71, 0x0a]; // #E8710A
+    const tolerance = 40; // absorbs PNG/compositing rounding, not enough to hide a real frame
+    const rows = [0, 1, 2, h - 1].filter((y) => y >= 0 && y < h);
+    for (const y of rows) {
+      const row = ctx.getImageData(0, y, w, 1).data;
+      for (let x = 0; x < w; x++) {
+        const i = x * 4;
+        if (
+          Math.abs(row[i] - target[0]) <= tolerance &&
+          Math.abs(row[i + 1] - target[1]) <= tolerance &&
+          Math.abs(row[i + 2] - target[2]) <= tolerance
+        ) {
+          return `orange at ${x},${y}`;
+        }
+      }
+    }
+    return "clean";
+  }, base64);
+  /* eslint-enable no-undef */
+}
+
+// Positive control for pngHasOrange: an 8x8 swatch filled with the frame
+// colour, built and PNG-encoded entirely inside the driven page. If the
+// detector ever silently stops detecting orange, this fails loudly and the
+// "clean" checks on real screenshots stop being trustworthy.
+async function orangeSwatchBase64() {
+  const p = drivenPage();
+  /* eslint-disable no-undef -- browser globals, evaluated inside the page by Playwright, not by this Node process */
+  return await p.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 8;
+    canvas.height = 8;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#E8710A";
+    ctx.fillRect(0, 0, 8, 8);
+    return canvas.toDataURL("image/png").split(",")[1];
+  });
+  /* eslint-enable no-undef */
+}
+
 check("tìm được tab Claude đang lái để quan sát", drivenPage() !== null);
 
 r = await client.callTool("read_page", {});
@@ -304,16 +364,31 @@ await client.callTool("navigate", { url: `http://127.0.0.1:${HTTP_PORT}/` });
 border = await borderState();
 check("khung cam vẽ lại sau navigate", border === "present", border);
 
+// Prove pngHasOrange itself can detect orange before trusting it to clear
+// the real screenshots below.
+const swatchBase64 = await orangeSwatchBase64();
+const swatchResult = await pngHasOrange(swatchBase64);
+check("bộ dò màu cam nhận diện được mẫu cam (kiểm tra dương)", swatchResult.startsWith("orange"), swatchResult);
+
 // take_screenshot removes the frame to capture a clean image, then repaints.
 // Seeing it back afterwards is the observable proof the suppression ran: if
-// the handler had not removed it, there would be nothing to repaint.
-await client.callTool("take_screenshot", {});
+// the handler had not removed it, there would be nothing to repaint. But the
+// repaint alone can't tell a real suppression from a no-op clearBorder (both
+// end with the border back), so also decode the captured pixels and check
+// the frame colour is actually absent from the image itself.
+r = await client.callTool("take_screenshot", {});
 border = await borderState();
 check("khung cam vẽ lại sau screenshot (viewport)", border === "present", border);
+img = (r.content || []).find((c) => c.type === "image");
+let pixelResult = img ? await pngHasOrange(img.data) : "no-image";
+check("ảnh chụp màn hình (viewport) không dính khung cam", pixelResult === "clean", pixelResult);
 
-await client.callTool("take_screenshot", { fullPage: true });
+r = await client.callTool("take_screenshot", { fullPage: true });
 border = await borderState();
 check("khung cam vẽ lại sau screenshot (fullPage)", border === "present", border);
+img = (r.content || []).find((c) => c.type === "image");
+pixelResult = img ? await pngHasOrange(img.data) : "no-image";
+check("ảnh chụp màn hình (fullPage) không dính khung cam", pixelResult === "clean", pixelResult);
 
 // scroll
 r = await client.callTool("scroll", { direction: "bottom" });
