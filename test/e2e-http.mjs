@@ -110,6 +110,11 @@ for (let i = 0; i < 40; i++) {
 check("server /health", healthy);
 if (!healthy) process.exit(1);
 
+// /health reports live state (who's connected right now); a cached copy would
+// misreport it, and it's the endpoint used to verify a deploy landed.
+const healthRes = await fetch(`http://127.0.0.1:${MCP_PORT}/health`);
+check("health cache-control forbids storing", healthRes.headers.get("cache-control") === "no-store", healthRes.headers.get("cache-control"));
+
 // --- auth checks -----------------------------------------------------------
 
 let res = await fetch(`http://127.0.0.1:${MCP_PORT}/mcp`, {
@@ -519,9 +524,14 @@ if (res.status === 404) {
   const zipBytes = Buffer.from(await res.arrayBuffer());
   check("download extension.zip", res.status === 200 && zipBytes.subarray(0, 2).toString() === "PK", `status=${res.status} len=${zipBytes.length}`);
   check("zip content-type", res.headers.get("content-type") === "application/zip", res.headers.get("content-type"));
+  // Cloudflare (and other intermediaries) cache static-looking extensions by
+  // default; without no-store a rebuild silently stays invisible behind the
+  // edge cache for up to hours, so this must never be cacheable.
+  check("zip cache-control forbids storing", res.headers.get("cache-control") === "no-store", res.headers.get("cache-control"));
   res = await fetch(`http://127.0.0.1:${MCP_PORT}/extension.crx`);
   const crxBytes = Buffer.from(await res.arrayBuffer());
   check("download extension.crx", res.status === 200 && crxBytes.subarray(0, 4).toString() === "Cr24", `status=${res.status} len=${crxBytes.length}`);
+  check("crx cache-control forbids storing", res.headers.get("cache-control") === "no-store", res.headers.get("cache-control"));
 }
 
 // --- pairing abuse limits ---------------------------------------------------

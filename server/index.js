@@ -634,6 +634,10 @@ async function mainHttp() {
     const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
 
     if (url.pathname === "/health") {
+      // Reports live state (who's connected right now); a cached copy is
+      // actively misleading, and this is the endpoint admins curl to confirm
+      // a deploy landed. Same no-store reasoning as the downloads below.
+      res.setHeader("cache-control", "no-store");
       return json(res, 200, {
         ok: true,
         version: VERSION,
@@ -656,6 +660,11 @@ async function mainHttp() {
         "content-type": url.pathname.endsWith(".crx") ? "application/x-chrome-extension" : "application/zip",
         "content-length": body.length,
         "content-disposition": `attachment; filename="claude-code-chrome-bridge${url.pathname.slice(url.pathname.lastIndexOf("."))}"`,
+        // These change every rebuild and are small, so revalidation buys
+        // nothing — tell every intermediary (including Cloudflare, whose
+        // default cache-by-extension rule would otherwise serve a stale
+        // build for up to 4 hours) to never store a copy.
+        "cache-control": "no-store",
       });
       return res.end(body);
     }

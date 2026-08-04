@@ -365,6 +365,11 @@ cd deploy/cloudflare && docker compose up -d --build
 
 Nếu bản mới đổi giao thức bắt tay (như 1.x → 2.0.0) thì cả team phải tải lại `extension.zip` và Load unpacked đè lên. Nếu chỉ sửa lỗi thì không cần.
 
+**Cloudflare cache và `/extension.zip` / `/extension.crx`**
+Cloudflare mặc định cache các URL có đuôi trông "tĩnh" (`.zip`, `.crx`) ở edge, kể cả khi origin không hề yêu cầu. Từ bản vá này server gửi `cache-control: no-store` trên hai endpoint tải extension và trên `/health`, nên bản build mới truyền tới ngay, không cần đợi cache hết hạn.
+
+> ⚠️ **Một lần duy nhất, ngay sau khi nâng cấp lên bản có patch này**: nếu server từng chạy phiên bản cũ (không gửi `no-store`) và đã có ai tải `extension.zip`/`extension.crx` trước đó, Cloudflare edge có thể đang giữ một bản cache cũ — patch mới không tự xoá cache đã có sẵn từ trước, nó chỉ ngăn cache mới hình thành. Vào [Cloudflare dashboard](https://dash.cloudflare.com) → **Caching → Configuration** → **Purge Everything** (hoặc **Custom Purge** chỉ hai URL `https://<domain>/extension.zip` và `https://<domain>/extension.crx`) để xoá bản cũ. Bỏ qua bước này thì file cũ vẫn được phục vụ cho tới khi tự hết hạn (`Cache-Control: max-age=14400` mặc định của Cloudflare cho đuôi `.zip`, tức tối đa 4 tiếng).
+
 **Backup**: `key.pem` (ID extension) và volume `bridge_data` (token đã cấp).
 
 ```bash
