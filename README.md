@@ -194,7 +194,28 @@ Yêu cầu: domain đã trỏ về IP VPS, mở port 80/443. Không muốn Docke
 
 Sau khi build extension (`npm run build`), server VPS còn phục vụ file cài đặt tại `https://chrome.example.com/extension.zip` và `/extension.crx` (compose đã mount sẵn `dist/`) — thành viên mới chỉ cần một đường link.
 
-### Trên máy mỗi thành viên — cách nhanh: `/ccchrome connect`
+### Trên máy mỗi thành viên — cách nhanh nhất: một lệnh
+
+```bash
+curl -fsSL https://chrome.example.com/install.sh | bash
+```
+
+Lệnh này tải và chạy trực tiếp một script bash từ server — biết vậy trước khi chạy. Muốn xem trước script làm gì thì tách làm hai bước:
+
+```bash
+curl -fsSL https://chrome.example.com/install.sh -o install.sh
+less install.sh        # đọc trước khi chạy
+bash install.sh
+```
+
+Script cài slash command `/ccchrome` vào `~/.claude/commands/`, tải và giải nén extension vào **một thư mục cố định** `~/.cc-chrome-bridge/extension` (cố định để những lần chạy lại giữ nguyên extension ID mà Chrome sinh theo đường dẫn — script có giải thích ngay trong comment), rồi in ra đúng hai việc còn phải làm bằng tay:
+
+1. `chrome://extensions` → **Developer mode** → **Load unpacked** → chọn thư mục vừa giải nén (đã Load unpacked từ đúng thư mục đó rồi thì bấm **Reload**)
+2. Trong Claude Code: `/ccchrome connect https://chrome.example.com` — lệnh sẽ hỏi pairing secret, admin cấp
+
+Script không tự chạy `claude mcp add`, không tự hỏi pairing secret thay bạn, và không tự động điều khiển Chrome — những việc đó cần Developer mode hoặc secret của admin, không tự động hoá được.
+
+### Trên máy mỗi thành viên — từng bước bằng tay, hoặc muốn hiểu `/ccchrome connect` làm gì
 
 Cài slash command một lần:
 

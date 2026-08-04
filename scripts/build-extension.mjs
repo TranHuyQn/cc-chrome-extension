@@ -22,6 +22,7 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const extensionDir = join(root, "extension");
 const distDir = join(root, "dist");
 const keyFile = process.env.KEY_FILE || join(root, "key.pem");
+const commandFile = join(root, ".claude", "commands", "ccchrome.md");
 
 const manifest = JSON.parse(readFileSync(join(extensionDir, "manifest.json"), "utf8"));
 const baseName = `claude-code-chrome-bridge-v${manifest.version}`;
@@ -80,12 +81,23 @@ const crxPath = join(distDir, `${baseName}.crx`);
 writeFileSync(crxPath, crxBuffer);
 copyFileSync(crxPath, join(distDir, "extension.crx"));
 
+// --- slash command (staged for the server to serve at GET /ccchrome.md) -----
+//
+// The Docker image copies only server/*.js; dist/ reaches the container
+// through a read-only bind mount. Staging the command file here, alongside
+// the zip/crx, is what lets the server serve it without any other change to
+// what gets deployed.
+
+const commandDestPath = join(distDir, "ccchrome.md");
+copyFileSync(commandFile, commandDestPath);
+
 // ---------------------------------------------------------------------------
 
 console.log(`
 Built ${manifest.name} v${manifest.version}
   ${relative(root, zipPath)}  (+ dist/extension.zip)
   ${relative(root, crxPath)}  (+ dist/extension.crx)
+  ${relative(root, commandDestPath)}
   Extension ID (stable while key.pem is kept): ${extensionId}
 
 Cài đặt:

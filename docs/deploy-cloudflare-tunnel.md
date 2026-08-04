@@ -313,22 +313,18 @@ curl -sS https://cccx.beelyai.com/health
 
 ## 6. Giai đoạn D — mở cho team
 
-Với mỗi thành viên, gửi đúng bốn thứ:
+Với mỗi thành viên, gửi đúng hai thứ:
 
 1. Domain: `https://cccx.beelyai.com`
 2. Pairing secret — **gửi riêng cho từng người**, đừng đăng lên nhóm chung
-3. Link tải extension: `https://cccx.beelyai.com/extension.zip`
-4. Ba lệnh họ cần chạy:
+
+Rồi họ chỉ cần chạy một lệnh (không cần clone repo):
 
 ```bash
-# một lần, trong repo
-bash scripts/install-command.sh
+curl -fsSL https://cccx.beelyai.com/install.sh | bash
 ```
-```
-# trong Claude Code
-/ccchrome connect https://cccx.beelyai.com
-```
-rồi cài extension và dán URL như bước C3.
+
+Lệnh này tải và chạy một script bash trực tiếp từ server — họ nên biết vậy trước khi chạy; ai muốn đọc trước thì tách làm hai bước (`curl -fsSL .../install.sh -o install.sh`, đọc, rồi `bash install.sh`). Script tự cài slash command `/ccchrome` và tự tải + giải nén extension vào một thư mục cố định, rồi in ra đúng hai việc còn lại phải làm bằng tay: **Load unpacked** trong `chrome://extensions`, và `/ccchrome connect https://cccx.beelyai.com` trong Claude Code — lệnh đó sẽ hỏi pairing secret bạn vừa gửi riêng cho họ.
 
 Kiểm ai đã nối được:
 

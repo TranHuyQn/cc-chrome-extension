@@ -8,7 +8,7 @@
 
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -591,6 +591,71 @@ if (res.status === 404) {
   const crxBytes = Buffer.from(await res.arrayBuffer());
   check("download extension.crx", res.status === 200 && crxBytes.subarray(0, 4).toString() === "Cr24", `status=${res.status} len=${crxBytes.length}`);
   check("crx cache-control forbids storing", res.headers.get("cache-control") === "no-store", res.headers.get("cache-control"));
+
+  // --- /ccchrome.md (staged into dist/ by `npm run build`) ------------------
+
+  res = await fetch(`http://127.0.0.1:${MCP_PORT}/ccchrome.md`);
+  const mdBody = await res.text();
+  check("ccchrome.md status", res.status === 200, `status=${res.status}`);
+  check("ccchrome.md cache-control forbids storing", res.headers.get("cache-control") === "no-store", res.headers.get("cache-control"));
+  check("ccchrome.md content-type is markdown", (res.headers.get("content-type") || "").startsWith("text/markdown"), res.headers.get("content-type"));
+  check(
+    "ccchrome.md body looks like the slash command (frontmatter with description:)",
+    /^---\s*\n[\s\S]*?description:/.test(mdBody),
+    mdBody.slice(0, 80)
+  );
+
+  // --- /install.sh (generated per-request, base URL baked in) ---------------
+
+  res = await fetch(`http://127.0.0.1:${MCP_PORT}/install.sh`);
+  const installBody = await res.text();
+  check("install.sh status", res.status === 200, `status=${res.status}`);
+  check("install.sh cache-control forbids storing", res.headers.get("cache-control") === "no-store", res.headers.get("cache-control"));
+  check("install.sh content-type is a shell script type", (res.headers.get("content-type") || "").includes("shellscript"), res.headers.get("content-type"));
+  check(
+    "install.sh embeds the server's own base URL, not a hardcoded domain",
+    installBody.includes(`http://127.0.0.1:${MCP_PORT}`),
+    "expected the request's own base URL inside the script"
+  );
+  check(
+    "install.sh embeds the fixed extension install path",
+    installBody.includes(".cc-chrome-bridge/extension"),
+    "expected the fixed extraction path inside the script"
+  );
+
+  // --- 404s: both downloads must fail with an actionable message when the
+  // files they serve are missing. CC_CHROME_DIST_DIR is fixed for the life of
+  // this spawned server, so this simulates "not built" by renaming the built
+  // files out of the way for one request, rather than restarting the server.
+  const distCcchrome = join(root, "dist", "ccchrome.md");
+  const distCcchromeHidden = `${distCcchrome}.hidden-for-test`;
+  renameSync(distCcchrome, distCcchromeHidden);
+  try {
+    res = await fetch(`http://127.0.0.1:${MCP_PORT}/ccchrome.md`);
+    const errBody = await res.json();
+    check(
+      "ccchrome.md 404s with an actionable message when dist/ is missing it",
+      res.status === 404 && /npm run build/.test(errBody.error || ""),
+      `status=${res.status} body=${JSON.stringify(errBody)}`
+    );
+  } finally {
+    renameSync(distCcchromeHidden, distCcchrome);
+  }
+
+  const distZip = join(root, "dist", "extension.zip");
+  const distZipHidden = `${distZip}.hidden-for-test`;
+  renameSync(distZip, distZipHidden);
+  try {
+    res = await fetch(`http://127.0.0.1:${MCP_PORT}/install.sh`);
+    const errBody = await res.json();
+    check(
+      "install.sh 404s with an actionable message when dist/ is missing extension.zip",
+      res.status === 404 && /npm run build/.test(errBody.error || ""),
+      `status=${res.status} body=${JSON.stringify(errBody)}`
+    );
+  } finally {
+    renameSync(distZipHidden, distZip);
+  }
 }
 
 // --- pairing abuse limits ---------------------------------------------------

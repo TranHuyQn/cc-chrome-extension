@@ -631,6 +631,102 @@ async function mainStdio() {
 }
 
 // ---------------------------------------------------------------------------
+// GET /install.sh — one-command onboarding
+// ---------------------------------------------------------------------------
+
+// Generates the installer as plain bash text, with `base` (this server's own
+// public origin, from publicOrigin(req)) baked into it — never a hardcoded
+// domain. Kept as a template rather than a separate .sh asset in dist/ so it
+// never drifts out of sync with what this server actually serves at
+// /ccchrome.md and /extension.zip.
+function installScript(base) {
+  return `#!/usr/bin/env bash
+# Claude Code Chrome Bridge — bộ cài đặt một lệnh.
+# Được tải mới mỗi lần từ ${base}/install.sh. Nên đọc trước khi chạy:
+#   curl -fsSL ${base}/install.sh -o install.sh
+#   less install.sh
+#   bash install.sh
+
+BASE="${base}"
+COMMAND_DEST="$HOME/.claude/commands/ccchrome.md"
+# Đường dẫn CỐ ĐỊNH, không đổi giữa các lần chạy lại: Chrome sinh id của một
+# extension "Load unpacked" từ chính đường dẫn thư mục chứa nó. Giải nén lại
+# vào đúng thư mục này ở lần sau giữ nguyên id đó — và giữ luôn mọi cấu hình
+# đã lưu trong extension, kể cả URL server bạn từng dán vào popup. Giải nén
+# sang một thư mục khác sẽ tạo ra MỘT EXTENSION THỨ HAI với cấu hình trống.
+EXTENSION_DIR="$HOME/.cc-chrome-bridge/extension"
+
+echo "Claude Code Chrome Bridge — cài đặt"
+echo "  Server:         $BASE"
+echo "  Slash command:  $COMMAND_DEST"
+echo "  Extension:      $EXTENSION_DIR"
+echo ""
+
+if [ -z "$BASH_VERSION" ]; then
+  echo "Lỗi: script này cần chạy bằng bash (vd: curl -fsSL $BASE/install.sh | bash)." >&2
+  exit 1
+fi
+
+set -euo pipefail
+
+missing=""
+for cmd in curl unzip; do
+  command -v "$cmd" >/dev/null 2>&1 || missing="$missing $cmd"
+done
+if [ -n "$missing" ]; then
+  echo "Lỗi: thiếu lệnh cần thiết:$missing — cài rồi chạy lại." >&2
+  exit 1
+fi
+
+# --- 1. Slash command /ccchrome ---------------------------------------------
+
+mkdir -p "$(dirname "$COMMAND_DEST")"
+tmp_cmd="$(mktemp)"
+curl -fsSL "$BASE/ccchrome.md" -o "$tmp_cmd"
+if [ -f "$COMMAND_DEST" ] && ! cmp -s "$tmp_cmd" "$COMMAND_DEST"; then
+  echo "Đã có /ccchrome cũ ở $COMMAND_DEST, nội dung khác bản mới — ghi đè (lệnh đã đổi giữa các bản)."
+fi
+mv "$tmp_cmd" "$COMMAND_DEST"
+echo "Đã cài slash command: $COMMAND_DEST"
+
+# --- 2. Extension, giải nén vào đường dẫn cố định ở trên ---------------------
+
+mkdir -p "$EXTENSION_DIR"
+tmp_zip="$(mktemp)"
+curl -fsSL "$BASE/extension.zip" -o "$tmp_zip"
+unzip -oq "$tmp_zip" -d "$EXTENSION_DIR"
+rm -f "$tmp_zip"
+
+# --- 3. Xác nhận giải nén đúng -----------------------------------------------
+
+if [ ! -f "$EXTENSION_DIR/manifest.json" ]; then
+  echo "Lỗi: giải nén xong nhưng không thấy manifest.json trong $EXTENSION_DIR" >&2
+  exit 1
+fi
+version="$(grep '"version"' "$EXTENSION_DIR/manifest.json" | head -1 | cut -d'"' -f4)"
+echo "Đã cài extension bản $version vào: $EXTENSION_DIR"
+
+# --- 4. Hai bước còn lại — phải làm bằng tay ---------------------------------
+# Chrome không cho script bật Developer mode hay bấm Load unpacked hộ bạn, và
+# pairing secret chỉ admin của server này mới có — tự động hoá dừng ở đây.
+
+echo ""
+echo "Còn hai bước làm bằng tay:"
+echo ""
+echo "  1. Mở chrome://extensions, bật 'Developer mode', bấm 'Load unpacked',"
+echo "     rồi chọn thư mục:"
+echo "       $EXTENSION_DIR"
+echo "     (đã Load unpacked đúng thư mục này từ trước? bấm 'Reload' thay vì Load unpacked lại)"
+echo ""
+echo "  2. Trong Claude Code, gõ:"
+echo "       /ccchrome connect $BASE"
+echo "     Lệnh sẽ hỏi pairing secret — xin admin của server này cấp secret đó."
+echo ""
+echo "Xong hai bước trên là dùng được."
+`;
+}
+
+// ---------------------------------------------------------------------------
 // http mode (VPS, multi user)
 // ---------------------------------------------------------------------------
 
@@ -702,12 +798,16 @@ async function mainHttp() {
   // otherwise anyone reaching this process directly could steer the URLs handed
   // back by /pair (and printed by /ccchrome connect) at a host of their choice.
   const firstHop = (value) => (value ? String(value).split(",")[0].trim() : "");
-  const publicUrls = (req, token) => {
+  const publicOrigin = (req) => {
     const proto = (TRUST_PROXY && firstHop(req.headers["x-forwarded-proto"])) || "http";
     const host = (TRUST_PROXY && firstHop(req.headers["x-forwarded-host"])) || req.headers.host || `localhost:${PORT}`;
+    return { proto, host, base: `${proto}://${host}` };
+  };
+  const publicUrls = (req, token) => {
+    const { proto, host, base } = publicOrigin(req);
     const wsProto = proto === "https" ? "wss" : "ws";
     return {
-      mcpUrl: `${proto}://${host}/mcp`,
+      mcpUrl: `${base}/mcp`,
       wsUrl: `${wsProto}://${host}/ws?token=${token}`,
     };
   };
@@ -742,12 +842,18 @@ async function mainHttp() {
 
     // --- extension downloads (built by `npm run build` into dist/) ----------
     // Public like the Web Store would be: the package contains no secrets.
+    // dist/ is not baked into the image — the Docker build copies only
+    // server/*.js, and dist/ reaches the container through a read-only bind
+    // mount — so every handler below re-reads CC_CHROME_DIST_DIR per request
+    // rather than resolving it once at startup.
+
+    const distDir = () => process.env.CC_CHROME_DIST_DIR || join(dirname(fileURLToPath(import.meta.url)), "..", "dist");
+    const distNotBuilt = (what) => ({ error: `${what} not built. Run 'npm run build' in the repo and redeploy (dist/ must be available to the server).` });
 
     if (req.method === "GET" && (url.pathname === "/extension.zip" || url.pathname === "/extension.crx")) {
-      const distDir = process.env.CC_CHROME_DIST_DIR || join(dirname(fileURLToPath(import.meta.url)), "..", "dist");
-      const file = join(distDir, url.pathname.slice(1));
+      const file = join(distDir(), url.pathname.slice(1));
       if (!existsSync(file)) {
-        return json(res, 404, { error: "extension package not built. Run 'npm run build' in the repo and redeploy (dist/ must be available to the server)." });
+        return json(res, 404, distNotBuilt("extension package"));
       }
       const body = readFileSync(file);
       res.writeHead(200, {
@@ -758,6 +864,44 @@ async function mainHttp() {
         // nothing — tell every intermediary (including Cloudflare, whose
         // default cache-by-extension rule would otherwise serve a stale
         // build for up to 4 hours) to never store a copy.
+        "cache-control": "no-store",
+      });
+      return res.end(body);
+    }
+
+    // --- onboarding: the /ccchrome slash command, staged into dist/ by
+    // `npm run build` alongside the zip/crx (see scripts/build-extension.mjs).
+
+    if (req.method === "GET" && url.pathname === "/ccchrome.md") {
+      const file = join(distDir(), "ccchrome.md");
+      if (!existsSync(file)) {
+        return json(res, 404, distNotBuilt("ccchrome.md"));
+      }
+      const body = readFileSync(file);
+      res.writeHead(200, {
+        "content-type": "text/markdown; charset=utf-8",
+        "content-length": body.length,
+        "cache-control": "no-store",
+      });
+      return res.end(body);
+    }
+
+    // --- onboarding: one-command installer (`curl <base>/install.sh | bash`).
+    // Generated per-request so it can embed the URL the request actually
+    // arrived on (see publicUrls below) instead of a hardcoded domain — the
+    // same reasoning that governs publicUrls itself.
+
+    if (req.method === "GET" && url.pathname === "/install.sh") {
+      // Refuse to hand out a script guaranteed to fail: it downloads exactly
+      // these two dist/ files further down.
+      if (!existsSync(join(distDir(), "extension.zip")) || !existsSync(join(distDir(), "ccchrome.md"))) {
+        return json(res, 404, distNotBuilt("installer"));
+      }
+      const { base } = publicOrigin(req);
+      const body = installScript(base);
+      res.writeHead(200, {
+        "content-type": "text/x-shellscript; charset=utf-8",
+        "content-length": Buffer.byteLength(body),
         "cache-control": "no-store",
       });
       return res.end(body);
@@ -934,7 +1078,8 @@ async function mainHttp() {
     log(`  Extension:    wss://<domain>/ws?token=<token>  (set in the extension popup)`);
     log(`  Health:       GET /health`);
     log(`  Pairing:      POST /pair, GET /pair/status, DELETE /pair (for /ccchrome connect)`);
-    log(`  Downloads:    GET /extension.zip, GET /extension.crx (if dist/ is built)`);
+    log(`  Downloads:    GET /extension.zip, GET /extension.crx, GET /ccchrome.md (if dist/ is built)`);
+    log(`  Onboarding:   GET /install.sh  (curl -fsSL https://<domain>/install.sh | bash)`);
   });
 }
 
