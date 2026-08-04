@@ -31,7 +31,7 @@ const MODE = process.argv.includes("--http") || process.env.CC_CHROME_MODE === "
 const PORT = Number(process.env.CC_CHROME_PORT || (MODE === "http" ? 8787 : 9876));
 const HOST = process.env.CC_CHROME_HOST || (MODE === "http" ? "0.0.0.0" : "127.0.0.1");
 const REQUEST_TIMEOUT_MS = Number(process.env.CC_CHROME_TIMEOUT_MS || 45000);
-const VERSION = "2.0.0";
+const VERSION = "3.0.0";
 
 // One Chrome tab group per Claude Code session. stdio serves exactly one
 // session per process, so a value minted at startup is that session's identity;
@@ -248,7 +248,7 @@ function buildMcpServer(getBridge, statusExtra = {}, sessionRef = { id: null }) 
 
   tool(
     "navigate",
-    "Navigate the current (or given) tab to a URL, or go back/forward/reload. Waits for the page to finish loading.",
+    "Navigate a tab to a URL, or go back/forward/reload. Without tabId, uses (or opens) a tab in this session's own tab group — it never takes over whatever tab the user has in front of them. Waits for the page to finish loading.",
     {
       url: z.string().optional().describe("URL to open (https:// is assumed if scheme is missing)"),
       action: z.enum(["back", "forward", "reload"]).optional()
@@ -414,7 +414,7 @@ function buildMcpServer(getBridge, statusExtra = {}, sessionRef = { id: null }) 
 
   tool(
     "list_tabs",
-    "List all open browser tabs with their tab ids.",
+    "List the tabs in this session's own tab group, with their tab ids. Does not see tabs outside that group — drag a tab into the group (or use new_tab) to make it visible here.",
     {},
     async () => textResult(await call("list_tabs"))
   );

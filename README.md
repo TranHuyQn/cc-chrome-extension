@@ -2,11 +2,16 @@
 
 Extension thay thế cho **Claude in Chrome** chính thức, dành cho team dùng chung tài khoản Claude **chỉ với Claude Code** (không đăng nhập được claude.ai). Extension gốc bắt buộc đăng nhập claude.ai trong browser; bản bridge này thì **không cần bất kỳ đăng nhập nào** — Claude Code điều khiển Chrome thông qua một MCP server chạy local trên máy bạn.
 
-> **Nâng lên 2.0.0 — bắt buộc cập nhật cả hai phía.** Token giờ đi qua WebSocket
-> subprotocol thay vì query string, nên extension 1.x **không** kết nối được
-> server 2.0.0 và ngược lại. Sau khi deploy server, mọi thành viên phải tải lại
-> `extension.zip` và Load unpacked đè lên bản cũ. URL đã lưu trong popup không
-> cần đổi — extension tự tách token ra khỏi URL.
+> **Nâng lên 3.0.0 — bắt buộc cài lại extension, cả team.** Bản này thêm cách
+> ly theo tab group cho từng phiên Claude Code (chi tiết ở [Nhóm tab theo
+> phiên](#nhóm-tab-theo-phiên) bên dưới). Khác với lần nâng 1.x → 2.0.0 —
+> handshake WebSocket khi đó bị từ chối thẳng nếu lệch bản — lần này extension
+> 2.x vẫn **kết nối được** bình thường với server 3.0.0, không có lỗi nào báo
+> ra: `navigate` không kèm `tabId` lại chiếm tab đang mở trước mặt bạn,
+> `list_tabs` lại liệt kê mọi tab, và không tab nào bị chặn — tức là chạy mà
+> **không có** cách ly, âm thầm mất đúng đảm bảo mà bản 3.0.0 hứa. Phải tải
+> lại `extension.zip` và Load unpacked đè lên bản cũ ở **mọi máy** để có được
+> cách ly thật.
 
 ## Kiến trúc
 
@@ -112,6 +117,33 @@ Kiểm tra kết nối trong Claude Code: gõ `/mcp` → chọn `chrome` → xem
 | Tab/cửa sổ | `list_tabs`, `new_tab`, `close_tab`, `switch_tab`, `resize_window` | Quản lý tab và cửa sổ |
 | Khác | `chrome_status` | Kiểm tra extension đã kết nối chưa |
 
+## Nhóm tab theo phiên
+
+**Nâng cấp:** 3.0.0 bắt buộc cài lại extension cho cả team — xem ghi chú ở
+đầu file, extension cũ ghép server mới vẫn chạy được nhưng không có cách ly.
+
+Kể từ 3.0.0, mỗi phiên Claude Code (mỗi lần chạy `claude`, hoặc mỗi kết nối
+MCP ở chế độ `--http`) có **một tab group riêng** trong Chrome, đặt tên
+`Claude · xxxx` (4 ký tự đầu của session id) và tô màu cam để phân biệt với
+tab cá nhân.
+
+- Tab do `navigate` (không kèm `tabId`) hoặc `new_tab` mở ra sẽ **tự động vào
+  nhóm của phiên đó** — không còn chiếm tab đang mở trước mặt bạn như trước
+  2.x nữa.
+- **Mọi tool chỉ thao tác được trên tab đang nằm trong nhóm của phiên mình.**
+  Gọi tool với `tabId` của một tab ngoài nhóm sẽ bị từ chối kèm tên nhóm và
+  cách xử lý (kéo tab vào nhóm, hoặc mở tab mới bằng `new_tab`).
+- **Kéo tab của bạn vào nhóm chính là cách cấp quyền cho Claude đọc/thao tác
+  trên tab đó** — giống hệt cách extension Claude for Chrome chính thức hoạt
+  động, nhóm là ranh giới những gì Claude nhìn thấy được.
+- `list_tabs` chỉ liệt kê tab trong nhóm của phiên mình, không phải toàn bộ
+  tab đang mở trong Chrome.
+- Chrome không cho tồn tại một tab group rỗng, nên **nhóm chỉ xuất hiện sau
+  khi Claude mở tab đầu tiên** trong phiên đó (qua `navigate` hoặc `new_tab`).
+  Trước đó bạn chưa có nhóm nào để kéo tab vào.
+- Extension cần thêm quyền `tabGroups` (đã có trong `extension/manifest.json`
+  từ 3.0.0) để tạo và quản lý các nhóm này.
+
 ## Triển khai lên VPS cho cả team
 
 Chế độ `--http` cho phép cả team dùng chung **một** server: mỗi thành viên được cấp một token, Claude Code và extension của họ cùng dùng token đó để server ghép cặp đúng người — không ai điều khiển được browser của người khác.
@@ -212,7 +244,7 @@ Một người mở nhiều phiên Claude Code cùng lúc vẫn ổn — tất c
 - **Ở http mode, hàng rào thật là token.** Server bind `0.0.0.0` **có chủ ý** để reverse proxy (Caddy trong `deploy/`) tới được — nghĩa là `/ws` và `/mcp` sẽ tới được từ internet qua proxy đó. Vì vậy hai điều sau là **bắt buộc, không phải khuyến nghị**: (1) TLS phải terminate ở proxy, dùng `wss://`/`https://` — token đi trong subprotocol/header, để plaintext là lộ token trên đường truyền; (2) **đừng bao giờ expose port 8787 trần ra internet** (compose dùng `expose` chứ không `ports`; bản systemd đặt `CC_CHROME_HOST=127.0.0.1`) — 8787 lộ ra ngoài thì ai cũng tự đặt được `X-Forwarded-For` và rate limit của `/pair` mất tác dụng. Token bị lộ thì thu hồi bằng `/ccchrome disconnect` hoặc `DELETE /pair`.
 - **Ở stdio mode không có token nào cả** — hai thứ duy nhất chặn đường là bind `127.0.0.1` (máy khác trong LAN không vào được) và một header có thể giả. Nói thẳng: mô hình đe dọa thực tế ở đây là *"phần mềm khác đang chạy sẵn trên máy bạn"*, và check origin không giải quyết được nó. Biện pháp giảm thiểu thật sự là **dùng một Chrome profile riêng cho automation**, để dù có bị lợi dụng thì cũng không có tab nào đăng nhập tài khoản cá nhân trong đó.
 - `CC_CHROME_EXTENSION_ID=<id>` thu hẹp thêm (chỉ chấp nhận đúng một extension ID) nhưng **không đóng được lỗ trên** — origin vẫn là chuỗi do client tự khai, chỉ là phải đoán đúng thêm một ID. Và pin này **chỉ dùng được khi cả team cài bản `.crx` đã ký** (kéo thả trên Linux, hoặc enterprise policy trên Windows/macOS): cài kiểu **zip + Load unpacked** như hướng dẫn ở trên sinh ID **theo đường dẫn thư mục**, khác nhau trên máy từng người — đặt pin trong trường hợp đó sẽ khoá cả team ra ngoài.
-- Extension có quyền `<all_urls>` + `debugger` (giống extension gốc của Anthropic) — Claude Code sẽ thao tác được trên **mọi trang đang mở, kể cả tab đã đăng nhập**. Khuyến nghị dùng một Chrome profile riêng cho automation nếu không muốn Claude đụng vào tài khoản cá nhân.
+- Extension có quyền `<all_urls>` + `debugger` (giống extension gốc của Anthropic) — nhưng khác với bản gốc, mọi tool bị giới hạn trong tab group của phiên (xem [Nhóm tab theo phiên](#nhóm-tab-theo-phiên)): Claude chỉ thao tác được trên tab **đang nằm trong nhóm đó**, kể cả tab đã đăng nhập, chứ không phải mọi trang đang mở trong Chrome. Kéo một tab vào nhóm là tự tay cấp quyền đó cho nó. Khuyến nghị dùng một Chrome profile riêng cho automation nếu không muốn Claude đụng vào tài khoản cá nhân. Quyền `tabGroups` (thêm từ 3.0.0) chỉ dùng để tạo/quản lý nhóm này, không mở rộng thêm gì Claude thấy được.
 - Khi tool dùng debugger API (screenshot full page, eval, phím, console, network), Chrome hiện thanh thông báo *"... started debugging this browser"* — bình thường, đừng bấm Cancel khi đang chạy.
 
 ## Chạy test
