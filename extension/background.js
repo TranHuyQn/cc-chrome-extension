@@ -384,10 +384,7 @@ function paintBorder(tabId) {
     .catch(() => {});
 }
 
-// Awaited by take_screenshot, which must not capture the frame. Not yet called
-// from this task; wired into take_screenshot by the screenshot-suppression
-// task that follows this one.
-// eslint-disable-next-line no-unused-vars
+// Awaited by take_screenshot, which must not capture the frame.
 async function clearBorder(tabId) {
   await chrome.scripting
     .executeScript({ target: { tabId }, func: pageHideBorder, args: [BORDER_ID] })
@@ -916,6 +913,8 @@ const handlers = {
     }
     await waitForTabComplete(tab.id);
     await sleep(300);
+    // The load replaced the document, taking the frame with it.
+    paintBorder(tab.id);
     const updated = await chrome.tabs.get(tab.id);
     return { tabId: updated.id, url: updated.url, title: updated.title, status: updated.status };
   },
@@ -1011,18 +1010,31 @@ const handlers = {
 
   async take_screenshot(params) {
     const tab = await resolveTab(params);
+    // Screenshots are used to inspect real visual defects (spacing, colour,
+    // overflow). A fake orange edge in every image would corrupt that, so the
+    // frame comes off for the capture and goes straight back on.
     if (params.fullPage) {
       await ensureDebugger(tab.id, ["Page"]);
-      const shot = await cdp(tab.id, "Page.captureScreenshot", {
-        format: "png",
-        captureBeyondViewport: true,
-      });
-      return { mimeType: "image/png", base64: shot.data, fullPage: true };
+      await clearBorder(tab.id);
+      try {
+        const shot = await cdp(tab.id, "Page.captureScreenshot", {
+          format: "png",
+          captureBeyondViewport: true,
+        });
+        return { mimeType: "image/png", base64: shot.data, fullPage: true };
+      } finally {
+        paintBorder(tab.id);
+      }
     }
     await chrome.tabs.update(tab.id, { active: true });
+    await clearBorder(tab.id);
     await sleep(150);
-    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-    return { mimeType: "image/png", base64: dataUrl.split(",", 2)[1], fullPage: false };
+    try {
+      const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+      return { mimeType: "image/png", base64: dataUrl.split(",", 2)[1], fullPage: false };
+    } finally {
+      paintBorder(tab.id);
+    }
   },
 
   async javascript_eval(params) {

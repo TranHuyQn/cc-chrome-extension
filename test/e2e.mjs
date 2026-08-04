@@ -298,6 +298,23 @@ check(
 );
 await client.callTool("close_tab", { tabId: blankTab.tabId });
 
+// Navigation destroys the DOM and the frame with it; an ongoing sequence must
+// get it back.
+await client.callTool("navigate", { url: `http://127.0.0.1:${HTTP_PORT}/` });
+border = await borderState();
+check("khung cam vẽ lại sau navigate", border === "present", border);
+
+// take_screenshot removes the frame to capture a clean image, then repaints.
+// Seeing it back afterwards is the observable proof the suppression ran: if
+// the handler had not removed it, there would be nothing to repaint.
+await client.callTool("take_screenshot", {});
+border = await borderState();
+check("khung cam vẽ lại sau screenshot (viewport)", border === "present", border);
+
+await client.callTool("take_screenshot", { fullPage: true });
+border = await borderState();
+check("khung cam vẽ lại sau screenshot (fullPage)", border === "present", border);
+
 // scroll
 r = await client.callTool("scroll", { direction: "bottom" });
 check("scroll bottom", toolText(r).includes("bottom"), toolText(r));
