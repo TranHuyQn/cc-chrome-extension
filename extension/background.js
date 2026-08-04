@@ -837,14 +837,28 @@ function pageWaitCheck(selector) {
 // prevention.
 function pageShowBorder(id, idleMs, color) {
   try {
-    let host = document.getElementById(id);
-    const intact = !!(
-      host &&
-      host.shadowRoot &&
-      host.shadowRoot.firstElementChild &&
-      host.shadowRoot.firstElementChild.getAttribute("data-cc-frame") === "1"
-    );
-    if (host && !intact) { host.remove(); host = null; }
+    // getElementById would only ever see the FIRST id="__cc_border" in tree
+    // order. A page that plants a decoy earlier in the tree (e.g. as the
+    // first child of <body>, ahead of the real host on documentElement)
+    // would make a getElementById-based rebuild remove the decoy and append
+    // a second real host next to the orphaned original — and the idle timer
+    // below, and pageHideBorder, would then only ever clear one of the two,
+    // leaving a ghost frame behind. Sweeping every match with
+    // querySelectorAll keeps that from happening: every host is inspected,
+    // at most one intact one survives, everything else is removed.
+    let host = null;
+    for (const candidate of document.querySelectorAll("#" + id)) {
+      const intact = !!(
+        candidate.shadowRoot &&
+        candidate.shadowRoot.firstElementChild &&
+        candidate.shadowRoot.firstElementChild.getAttribute("data-cc-frame") === "1"
+      );
+      if (intact && !host) {
+        host = candidate;
+      } else {
+        candidate.remove();
+      }
+    }
     if (!host) {
       host = document.createElement("div");
       host.id = id;
@@ -892,8 +906,9 @@ function pageShowBorder(id, idleMs, color) {
     // executeScript calls on the same frame and is invisible to page scripts.
     clearTimeout(window.__cc_borderTimer);
     window.__cc_borderTimer = setTimeout(() => {
-      const el = document.getElementById(id);
-      if (el) el.remove();
+      // Same reasoning as the sweep above: clear every host with this id,
+      // not just the one getElementById would have found.
+      for (const el of document.querySelectorAll("#" + id)) el.remove();
     }, idleMs);
     return { shown: true };
   } catch (e) {
@@ -904,8 +919,7 @@ function pageShowBorder(id, idleMs, color) {
 function pageHideBorder(id) {
   try {
     clearTimeout(window.__cc_borderTimer);
-    const el = document.getElementById(id);
-    if (el) el.remove();
+    for (const el of document.querySelectorAll("#" + id)) el.remove();
     return { hidden: true };
   } catch (e) {
     return { __cc_err: e.message };

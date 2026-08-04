@@ -369,12 +369,19 @@ r = await client.callTool("read_page", {});
 let border = await borderState();
 check("khung cam xuất hiện khi Claude thao tác", border === "present", border);
 
-// The frame lives in a shadow root outside <body>, so it must never surface in
-// read_page's element/heading dump. Unlike a get_page_text (innerText) check —
-// which could never fail here since element ids structurally never appear in
-// innerText — read_page's dump does include id-bearing element descriptions,
-// so this assertion is actually capable of catching a regression.
-check("khung cam không lọt vào read_page", !toolText(r).includes("__cc_border"), toolText(r).slice(0, 200));
+// The host lives on document.documentElement precisely so it stays out of
+// read_page/get_page_text/find, which all walk <body>. Assert that placement
+// directly from the page, not by grepping tool output for the id string:
+// read_page's element dump is built from tag/type/role/label/href and never
+// emits an id no matter where the host lives, so a text-based check here
+// could never fail — this one can, if the host is ever moved under <body>.
+/* eslint-disable no-undef -- browser globals, evaluated inside the page by Playwright, not by this Node process */
+const hostOutsideBody = await drivenPage().evaluate(() => {
+  const host = document.getElementById("__cc_border");
+  return !!host && !document.body.contains(host);
+});
+/* eslint-enable no-undef */
+check("khung cam nằm ngoài <body>, không lọt vào read_page/get_page_text", hostOutsideBody, String(hostOutsideBody));
 
 // Nothing must touch this tab during the wait, so the page-side timer fires.
 await sleep(2600);
@@ -398,19 +405,87 @@ await client.callTool("navigate", { url: `http://127.0.0.1:${HTTP_PORT}/` });
 border = await borderState();
 check("khung cam vẽ lại sau navigate", border === "present", border);
 
-// Hostile page CSS: [aria-hidden="true"] { display: none } is a real
-// in-the-wild pattern, and a blanket `div { transform }` rule turns an
-// unstyled host into a containing block that collapses a `position: fixed`
-// descendant onto its own 0-height box. Neither is malicious — both are
-// plausible page authoring choices the host must survive.
-const hostileStyle = await drivenPage().addStyleTag({
-  content: `[aria-hidden="true"] { display: none !important } div { transform: translateZ(0) }`,
+// Ghost frame: document.getElementById only ever returns the FIRST element
+// with a given id in tree order. A page that plants a decoy #__cc_border
+// earlier in the tree (inside <body>, ahead of the real host on
+// documentElement) would make a getElementById-based rebuild remove the
+// decoy and leave the real host orphaned next to a fresh second host — and
+// a getElementById-based idle timer / hide would then only ever clear one
+// of the two, leaving the other painted forever.
+/* eslint-disable no-undef -- browser globals, evaluated inside the page by Playwright, not by this Node process */
+await drivenPage().evaluate(() => {
+  const decoy = document.createElement("div");
+  decoy.id = "__cc_border";
+  decoy.attachShadow({ mode: "open" });
+  document.body.insertBefore(decoy, document.body.firstChild);
+});
+/* eslint-enable no-undef */
+r = await client.callTool("read_page", {});
+/* eslint-disable no-undef -- browser globals, evaluated inside the page by Playwright, not by this Node process */
+const ghostCheck = await drivenPage().evaluate(() => {
+  const hosts = document.querySelectorAll("#__cc_border");
+  if (hosts.length !== 1) return { count: hosts.length };
+  const real = hosts[0];
+  const isReal = real.parentElement === document.documentElement
+    && !!real.shadowRoot
+    && !!real.shadowRoot.firstElementChild
+    && real.shadowRoot.firstElementChild.getAttribute("data-cc-frame") === "1";
+  return { count: hosts.length, isReal };
+});
+/* eslint-enable no-undef */
+check(
+  "khung cam chỉ còn đúng 1 host thật sau khi có decoy chen vào <body>",
+  ghostCheck.count === 1 && ghostCheck.isReal === true,
+  JSON.stringify(ghostCheck)
+);
+// Nothing must touch this tab during the wait, so the idle timer fires and
+// must clear every #__cc_border it finds, not just the one a
+// getElementById-based sweep would have seen.
+await sleep(2600);
+/* eslint-disable no-undef -- browser globals, evaluated inside the page by Playwright, not by this Node process */
+const ghostCountAfterIdle = await drivenPage().evaluate(() => document.querySelectorAll("#__cc_border").length);
+/* eslint-enable no-undef */
+check("khung cam ma không sót lại sau khi hết thời gian idle", ghostCountAfterIdle === 0, String(ghostCountAfterIdle));
+
+// Hostile page CSS, tested as two independent attacks so each check can fail
+// for the reason its name actually claims. borderState() alone reads the
+// frame's own computed style, which an ancestor's display:none never
+// touches, so it cannot expose that attack on its own — each attack below
+// gets its own real, independently-injected stylesheet and its own
+// assertion of something that genuinely breaks without the host's forced
+// styling.
+
+// Attack A: [aria-hidden="true"] { display: none } is a real in-the-wild
+// pattern. If the host's own display isn't force-set, the whole shadow
+// subtree stops being rendered, and getClientRects() on the frame goes
+// empty — unlike borderState(), that can actually catch this.
+const hostileDisplayNone = await drivenPage().addStyleTag({
+  content: `[aria-hidden="true"] { display: none !important }`,
 });
 r = await client.callTool("read_page", {});
-border = await borderState();
-check("khung cam sống sót qua CSS thù địch (display:none trên [aria-hidden])", border === "present", border);
-let rect = await frameRect();
-let rectOk = !!rect
+/* eslint-disable no-undef -- browser globals, evaluated inside the page by Playwright, not by this Node process */
+const renderedUnderDisplayNone = await drivenPage().evaluate(() => {
+  const host = document.getElementById("__cc_border");
+  const frame = host && host.shadowRoot && host.shadowRoot.firstElementChild;
+  return !!frame && frame.getClientRects().length > 0;
+});
+/* eslint-enable no-undef */
+check(
+  "khung cam sống sót qua CSS thù địch (display:none trên [aria-hidden])",
+  renderedUnderDisplayNone,
+  String(renderedUnderDisplayNone)
+);
+await hostileDisplayNone.evaluate((el) => el.remove());
+
+// Attack B: a blanket `div { transform }` rule turns an unstyled host into a
+// containing block for its position:fixed shadow content, collapsing the
+// frame onto the host's own 0-height box.
+const hostileTransform = await drivenPage().addStyleTag({
+  content: `div { transform: translateZ(0) }`,
+});
+r = await client.callTool("read_page", {});
+const rect = await frameRect();
+const rectOk = !!rect
   && Math.abs(rect.width - rect.clientWidth) <= 5
   && Math.abs(rect.height - rect.clientHeight) <= 5;
 check(
@@ -418,7 +493,7 @@ check(
   rectOk,
   JSON.stringify(rect)
 );
-await hostileStyle.evaluate((el) => el.remove());
+await hostileTransform.evaluate((el) => el.remove());
 
 // Page tampering: the shadow root has to stay `mode: "open"` (this very test
 // suite reads host.shadowRoot from the main world), so a page script can
@@ -426,6 +501,13 @@ await hostileStyle.evaluate((el) => el.remove());
 // impossible in a DOM the page also controls — the achievable guarantee is
 // that the next tool call heals it rather than silently reusing the gutted
 // host forever.
+//
+// Re-arm the frame with a tool call right before tampering, rather than
+// relying on whatever paint is left over from the checks above: this
+// sequence must not lean on the 2000ms idle window still having time left
+// on it, or a slow/loaded machine makes borderState() read "absent" here
+// instead of the tampered "no-frame" this check needs as its starting point.
+r = await client.callTool("read_page", {});
 /* eslint-disable no-undef -- browser globals, evaluated inside the page by Playwright, not by this Node process */
 await drivenPage().evaluate(() => {
   const host = document.getElementById("__cc_border");
