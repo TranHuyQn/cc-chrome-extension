@@ -94,6 +94,10 @@ const serverProc = spawn("node", [join(root, "server", "index.js"), "--http"], {
     CC_CHROME_STATE_FILE: stateFile,
     CC_CHROME_DIST_DIR: join(root, "dist"),
     CC_CHROME_MAX_TOKENS: "2",
+    // Tool calls now wait out a service-worker restart before failing (see
+    // test/reconnect-grace.test.mjs). The checks below that expect a clean
+    // "not connected" failure would otherwise each sit through the 25s default.
+    CC_CHROME_RECONNECT_GRACE_MS: "500",
   },
   stdio: ["ignore", "inherit", "inherit"],
 });
@@ -514,6 +518,61 @@ check(
   `${retries.length} retries in ${BACKOFF_WINDOW_MS}ms; offsets=${gaps.join(",")}`
 );
 rejectServer.close();
+
+// --- the keepalive alarm actually puts a ping on the wire --------------------
+//
+// Chrome throttles setInterval in a backgrounded service worker down to about
+// one check a minute, so the 20s keepalive interval stops landing inside the
+// 30s window a worker needs to stay considered active; Chrome then kills the
+// worker and the socket closes with 1001. The cc-keepalive alarm is the
+// throttling-proof floor, so its handler must send the ping itself.
+//
+// WHAT THIS PROVES: firing cc-keepalive on an open socket puts a `ping` frame
+// on the wire. WHAT IT DOES NOT PROVE: that this actually saves the worker
+// under real intensive throttling — a test cannot make Chrome throttle on
+// demand. That part is verified by inspection and by the live deployment.
+const KEEPALIVE_PORT = 8934;
+const pings = [];
+const keepaliveServer = new WebSocketServer({ host: "127.0.0.1", port: KEEPALIVE_PORT });
+keepaliveServer.on("connection", (socket) => {
+  socket.on("message", (data) => {
+    let msg;
+    try { msg = JSON.parse(data.toString()); } catch { return; }
+    if (msg.type !== "ping") return;
+    pings.push(Date.now());
+    socket.send(JSON.stringify({ type: "pong" }));
+  });
+});
+await new Promise((r) => keepaliveServer.once("listening", r));
+
+// A loopback URL with no token is the stdio-mode shape, which the extension
+// accepts without a subprotocol.
+await sw.evaluate(async (wsUrl) => {
+  await chrome.storage.local.set({ wsUrl });
+}, `ws://127.0.0.1:${KEEPALIVE_PORT}/ws`);
+
+for (let i = 0; i < 40 && pings.length === 0; i++) await sleep(250);
+check("extension connects to the keepalive probe server", pings.length > 0);
+
+// The 0.5-minute periodic alarm would muddy the measurement, and so would a
+// 20s interval tick — so clear the alarm, sync on the interval by taking the
+// baseline right after a ping, then fire cc-keepalive as a one-shot well
+// inside the remaining ~20s of quiet.
+check(
+  "cc-keepalive alarm is registered at Chrome's 0.5-minute minimum",
+  (await sw.evaluate(async () => (await chrome.alarms.get("cc-keepalive"))?.periodInMinutes)) === 0.5
+);
+await sw.evaluate(async () => { await chrome.alarms.clear("cc-keepalive"); });
+const baseline = pings.length;
+await sw.evaluate(async () => { await chrome.alarms.create("cc-keepalive", { when: Date.now() + 500 }); });
+for (let i = 0; i < 16 && pings.length === baseline; i++) await sleep(250);
+check(
+  "firing cc-keepalive on an open socket sends a ping (survives a throttled setInterval)",
+  pings.length > baseline,
+  `baseline=${baseline} now=${pings.length}`
+);
+await sw.evaluate(async () => { await chrome.alarms.create("cc-keepalive", { periodInMinutes: 0.5 }); });
+keepaliveServer.close();
 
 // --- extension package downloads (requires `npm run build` to have run) -----
 

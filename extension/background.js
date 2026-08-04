@@ -185,6 +185,8 @@ async function connect() {
     // The server answers `ping` with `pong`, so this turns "proven" into a
     // sub-second signal instead of waiting a whole keepalive period.
     send({ type: "ping" });
+    // The fast path only — see the cc-keepalive alarm below for why this timer
+    // is not enough on its own.
     clearInterval(keepaliveTimer);
     keepaliveTimer = setInterval(() => send({ type: "ping" }), KEEPALIVE_MS);
   };
@@ -250,9 +252,32 @@ async function handleRequest(msg) {
 }
 
 // Keep the service worker alive while connected and retry when Chrome wakes us.
+//
+// TWO keepalives on purpose — do not delete either as redundant:
+//
+// * The setInterval in socket.onopen is the fast path. At 20s it beats the
+//   alarm's 30s floor whenever Chrome is in the foreground, and it costs
+//   nothing.
+// * This alarm is the throttling-proof floor. Once Chrome's window has been
+//   hidden for ~5 minutes it applies intensive throttling and checks timers
+//   only about once a minute, so the 20s interval stops landing inside the 30s
+//   window a service worker needs to stay considered active. Chrome then kills
+//   the worker, which closes the websocket with 1001 — measured on the live
+//   deployment as `close=1001, lived=327s, silent_for=47s`. Chrome's own MV3
+//   migration guide says it outright: setTimeout/setInterval "can fail in
+//   service workers because the timers are canceled whenever the service worker
+//   is terminated. You'll need to replace them with alarms."
+//
+// chrome.alarms is not throttled the same way, so sending the ping from here
+// too keeps traffic on the wire when the interval has been throttled into
+// uselessness. 0.5 minutes is Chrome's minimum period — it cannot go lower.
 chrome.alarms.create("cc-keepalive", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "cc-keepalive") connect();
+  if (alarm.name !== "cc-keepalive") return;
+  // An open socket needs a ping, not a reconnect; connect() returns early for
+  // one anyway, so it would otherwise be a wasted wakeup.
+  if (ws && ws.readyState === WebSocket.OPEN) send({ type: "ping" });
+  connect();
 });
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);

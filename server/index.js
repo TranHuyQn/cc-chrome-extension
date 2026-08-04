@@ -31,6 +31,17 @@ const MODE = process.argv.includes("--http") || process.env.CC_CHROME_MODE === "
 const PORT = Number(process.env.CC_CHROME_PORT || (MODE === "http" ? 8787 : 9876));
 const HOST = process.env.CC_CHROME_HOST || (MODE === "http" ? "0.0.0.0" : "127.0.0.1");
 const REQUEST_TIMEOUT_MS = Number(process.env.CC_CHROME_TIMEOUT_MS || 45000);
+// Chrome terminates an extension's service worker once its window has been in
+// the background long enough for intensive throttling to starve the keepalive
+// (close=1001 "going away"). The extension's cc-keepalive alarm revives it
+// within ~30s, so a tool call that lands in that gap is better off waiting than
+// failing. Must stay comfortably below REQUEST_TIMEOUT_MS so a genuine absence
+// still produces the helpful "not connected" error instead of a timeout.
+// A garbage value must not become NaN — setTimeout(NaN) fires immediately, which
+// would silently restore the old fail-fast behaviour. Same guard as
+// CC_CHROME_SESSION_TTL_MS.
+const graceFromEnv = Number(process.env.CC_CHROME_RECONNECT_GRACE_MS);
+const RECONNECT_GRACE_MS = Number.isFinite(graceFromEnv) && graceFromEnv >= 0 ? graceFromEnv : 25000;
 const VERSION = "3.0.0";
 
 // One Chrome tab group per Claude Code session. stdio serves exactly one
@@ -99,14 +110,20 @@ class ExtensionConnection {
     this.nextId = 1;
     this.extensionInfo = null;
     this.isAlive = true;
+    this.openedAt = Date.now();
+    this.lastTrafficAt = Date.now();
 
     socket.on("pong", () => { this.isAlive = true; });
     socket.on("message", (data) => this.onMessage(data));
-    socket.on("close", () => this.onClose());
+    socket.on("close", (code, reason) => this.onClose(code, reason));
     socket.on("error", (err) => log(`[${this.name}] extension socket error:`, err.message));
   }
 
   onMessage(data) {
+    // Any frame counts as traffic. If a socket dies while this was recent, the
+    // keepalive was working and something else killed it; if it dies after a
+    // long silence, the keepalive itself stopped firing.
+    this.lastTrafficAt = Date.now();
     let msg;
     try {
       msg = JSON.parse(data.toString());
@@ -138,8 +155,18 @@ class ExtensionConnection {
     }
   }
 
-  onClose() {
-    log(`[${this.name}] extension disconnected`);
+  onClose(code, reason) {
+    // The close code says who ended it and why: 1000/1001 is the extension
+    // shutting down cleanly, 1006 means no close frame arrived at all — the
+    // socket died under us, which points at the network or a proxy rather than
+    // at either endpoint. Without it a disconnect is unattributable.
+    const lived = Math.round((Date.now() - this.openedAt) / 1000);
+    const quiet = Math.round((Date.now() - this.lastTrafficAt) / 1000);
+    log(
+      `[${this.name}] extension disconnected` +
+      ` (close=${code ?? "?"}${reason && reason.length ? ` "${reason}"` : ""},` +
+      ` lived=${lived}s, silent_for=${quiet}s)`
+    );
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer);
       pending.reject(new Error("Chrome extension disconnected mid-request"));
@@ -167,6 +194,7 @@ class ExtensionConnection {
 class BridgeRegistry {
   constructor() {
     this.connections = new Map(); // token -> ExtensionConnection
+    this.waiters = new Map();     // token -> Set<{resolve, reject, timer}>
     // Detect dead sockets (laptop sleep, network drop) via ws-level ping.
     setInterval(() => {
       for (const conn of this.connections.values()) {
@@ -191,6 +219,17 @@ class BridgeRegistry {
     const conn = new ExtensionConnection(socket, token, name);
     this.connections.set(token, conn);
     log(`[${name}] extension connected`);
+    // Anything parked in require() for this token has been waiting for exactly
+    // this moment — hand it the fresh connection instead of letting it expire.
+    const waiting = this.waiters.get(token);
+    if (waiting && waiting.size) {
+      log(`[${name}] extension back — releasing ${waiting.size} waiting call(s)`);
+      this.waiters.delete(token);
+      for (const waiter of waiting) {
+        clearTimeout(waiter.timer);
+        waiter.resolve(conn);
+      }
+    }
     return conn;
   }
 
@@ -199,19 +238,61 @@ class BridgeRegistry {
     return conn && conn.connected ? conn : null;
   }
 
-  require(token) {
+  notConnectedError() {
+    const where = MODE === "http"
+      ? `Point the extension at this server: click the extension icon in Chrome and set the WebSocket URL to wss://<your-domain>/ws?token=<your-token> (same token as your Claude Code config), then 'Lưu & kết nối lại'.`
+      : `Make sure Chrome is running with the extension installed and its WebSocket URL is ws://127.0.0.1:${PORT} (click the extension icon to check).`;
+    return new Error(
+      "Chrome extension is not connected for this account.\n" +
+      "1. Chrome must be running with the 'Claude Code Chrome Bridge' extension installed (chrome://extensions -> Load unpacked -> extension/ folder).\n" +
+      `2. ${where}`
+    );
+  }
+
+  // Returns the live connection, or waits up to RECONNECT_GRACE_MS for one to
+  // attach before rejecting. Chrome kills a backgrounded extension's service
+  // worker and the cc-keepalive alarm revives it ~30s later; without this wait
+  // every tool call in that window failed instantly, which is precisely what
+  // breaks unattended operation.
+  requireNow(token) {
     const conn = this.get(token);
-    if (!conn) {
-      const where = MODE === "http"
-        ? `Point the extension at this server: click the extension icon in Chrome and set the WebSocket URL to wss://<your-domain>/ws?token=<your-token> (same token as your Claude Code config), then 'Lưu & kết nối lại'.`
-        : `Make sure Chrome is running with the extension installed and its WebSocket URL is ws://127.0.0.1:${PORT} (click the extension icon to check).`;
-      throw new Error(
-        "Chrome extension is not connected for this account.\n" +
-        "1. Chrome must be running with the 'Claude Code Chrome Bridge' extension installed (chrome://extensions -> Load unpacked -> extension/ folder).\n" +
-        `2. ${where}`
-      );
-    }
+    if (!conn) throw this.notConnectedError();
     return conn;
+  }
+
+  require(token, graceMs = RECONNECT_GRACE_MS) {
+    const conn = this.get(token);
+    if (conn) return Promise.resolve(conn);
+    if (!(graceMs > 0)) return Promise.reject(this.notConnectedError());
+
+    log(`Extension not connected; waiting up to ${graceMs}ms for it to reconnect...`);
+    const started = Date.now();
+    return new Promise((resolve, reject) => {
+      let set = this.waiters.get(token);
+      if (!set) {
+        set = new Set();
+        this.waiters.set(token, set);
+      }
+      const waiter = {
+        resolve: (value) => {
+          set.delete(waiter);
+          log(`Extension reconnected after ${Date.now() - started}ms; resuming the waiting call.`);
+          resolve(value);
+        },
+        reject,
+        timer: null,
+      };
+      waiter.timer = setTimeout(() => {
+        // A rejected wait must leave nothing behind: drop the waiter, and drop
+        // the whole set once it empties, so a token that never comes back does
+        // not accumulate an entry per failed call.
+        set.delete(waiter);
+        if (set.size === 0) this.waiters.delete(token);
+        log(`Extension did not reconnect within ${graceMs}ms; failing the call.`);
+        reject(this.notConnectedError());
+      }, graceMs);
+      set.add(waiter);
+    });
   }
 }
 
@@ -225,11 +306,16 @@ const textResult = (obj) => ({
   content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }],
 });
 
-// getBridge: () => ExtensionConnection (throws a helpful error when absent)
+// getBridge: () => Promise<ExtensionConnection> — resolves once the extension
+//   is there, waiting out a service-worker restart, and rejects with a helpful
+//   error if it never comes back.
+// getBridgeNow: () => ExtensionConnection — the same lookup without the wait,
+//   for chrome_status: that is the tool you call to ask whether the extension
+//   is connected, so it must answer now rather than stall for the grace period.
 // sessionRef: { id: string|null }, read at call time rather than passed as a
 // plain string — in http mode the MCP session id doesn't exist yet when this
 // is called and is only assigned later, in onsessioninitialized.
-function buildMcpServer(getBridge, statusExtra = {}, sessionRef = { id: null }) {
+function buildMcpServer(getBridge, getBridgeNow, statusExtra = {}, sessionRef = { id: null }) {
   const server = new McpServer({ name: "claude-chrome", version: VERSION });
 
   // Wraps handlers so extension errors come back as MCP tool errors (isError),
@@ -244,7 +330,8 @@ function buildMcpServer(getBridge, statusExtra = {}, sessionRef = { id: null }) 
     });
   };
 
-  const call = (method, args, timeoutMs) => getBridge().call(method, args, timeoutMs, sessionRef.id);
+  const call = async (method, args, timeoutMs) =>
+    (await getBridge()).call(method, args, timeoutMs, sessionRef.id);
 
   const tabIdSchema = z.number().int().optional()
     .describe("Target tab id (from list_tabs). The tab must be in this session's own tab group; any other tab is refused. Omit it to use (or open) a tab in that group — it is never the tab the user has in front of them.");
@@ -256,7 +343,9 @@ function buildMcpServer(getBridge, statusExtra = {}, sessionRef = { id: null }) 
     async () => {
       let bridge;
       try {
-        bridge = getBridge();
+        // Deliberately the non-waiting lookup: hanging for the reconnect grace
+        // period would make the "is it connected?" tool useless.
+        bridge = getBridgeNow();
       } catch (err) {
         return textResult({ connected: false, hint: err.message, ...statusExtra });
       }
@@ -531,7 +620,12 @@ async function mainStdio() {
     registry.attach(socket, "default", "local");
   });
 
-  const server = buildMcpServer(() => registry.require("default"), { mode: "stdio" }, { id: STDIO_SESSION_ID });
+  const server = buildMcpServer(
+    () => registry.require("default"),
+    () => registry.requireNow("default"),
+    { mode: "stdio" },
+    { id: STDIO_SESSION_ID }
+  );
   await server.connect(new StdioServerTransport());
   log(`MCP server ready (stdio). Waiting for the Chrome extension on ws://127.0.0.1:${PORT} ...`);
 }
@@ -773,7 +867,12 @@ async function mainHttp() {
         if (transport.sessionId) sessions.delete(transport.sessionId);
       };
       const name = tokens.get(token);
-      const server = buildMcpServer(() => registry.require(token), { mode: "http", user: name }, sessionRef);
+      const server = buildMcpServer(
+        () => registry.require(token),
+        () => registry.requireNow(token),
+        { mode: "http", user: name },
+        sessionRef
+      );
       await server.connect(transport);
       await transport.handleRequest(req, res, body);
     } catch (err) {
