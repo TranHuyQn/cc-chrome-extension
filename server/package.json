@@ -1,6 +1,6 @@
 {
   "name": "claude-code-chrome-mcp",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "MCP server that bridges Claude Code to the Claude Code Chrome Bridge extension over a local WebSocket (no claude.ai login required).",
   "type": "module",
   "bin": {
