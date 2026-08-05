@@ -18,7 +18,9 @@
 - **`npm run lint` phải 0 lỗi.** Hook `PostToolUse` trong `.claude/settings.json` lint mọi file `.js`/`.mjs` ngay sau khi ghi — sửa hết những gì nó báo trước khi đi tiếp.
 - **Không sửa `resolveTabInGroup()`** trong `extension/background.js`. Một dòng cũng không.
 - **Chỉ spawn `claude` khi `HOST` là loopback** (`127.0.0.1` / `localhost` / `::1`). Bridge công khai phải từ chối `/panel`.
-- **`attach_tab` chỉ nhận `windowId`, không bao giờ nhận `tabId`.** Nhận `tabId` tuỳ ý là tái tạo đúng lỗ hổng bản 3.0.0 đã vá ở `close_tab`/`switch_tab`.
+- **`attach_tab` không nhận tham số nào từ người gọi.** Extension tự xác định cửa sổ bằng `chrome.windows.getLastFocused({windowTypes:["normal"]})` rồi lấy tab đang active của cửa sổ đó.
+
+  > **Sửa đổi ngày 2026-08-05, sau khi Task 5 đã xong.** Bản đầu của plan cho panel gửi `windowId` và lập luận rằng như thế là an toàn vì không nhận `tabId`. Lập luận đó sai: window id của Chrome là số nguyên nhỏ tăng dần, nên một tiến trình cục bộ có token panel quét được `1..N` và hút tab **đang active của mọi cửa sổ** vào group của nó — thường đó mới là tab đáng giá. Huy chốt bỏ hẳn `windowId` khỏi giao thức. Mọi đoạn code mẫu bên dưới trong Task 5 là bản cũ, đã bị code thật thay thế; đọc `extension/background.js` và `server/index.js` để biết hiện trạng.
 - **`attach_tab` không được đăng ký làm MCP tool** trong `buildMcpServer()`. Nó chỉ tồn tại trên đường panel → server → extension.
 - Tài liệu người dùng (`README.md`, UI panel, `.claude/commands/ccchrome.md`) **tiếng Việt**. Code, comment, commit message **tiếng Anh**.
 - **Trên macOS chạy test trình duyệt phải có `HEADED=1` và để trống `CHROME_PATH`.**
@@ -876,7 +878,7 @@ Trong `package.json` thêm `"test:panel": "node test/panel-auth.test.mjs"` và c
   - `{ type: "start", sessionId: string|null, model: string|null }`
   - `{ type: "prompt", text: string }`
   - `{ type: "stop" }`
-  - `{ type: "attach_tab", windowId: number }` (Task 5 hiện thực đầu extension)
+  - `{ type: "attach_tab" }` — không có trường nào (Task 5 hiện thực đầu extension; xem sửa đổi ở Global Constraints)
 
   Server → panel:
   - `{ type: "hello", panelId, version }`
@@ -1516,9 +1518,10 @@ inputEl.addEventListener("keydown", (event) => {
 
 stopBtn.addEventListener("click", () => send({ type: "stop" }));
 
-attachBtn.addEventListener("click", async () => {
-  const { id } = await chrome.windows.getCurrent();
-  send({ type: "attach_tab", windowId: id });
+attachBtn.addEventListener("click", () => {
+  // No windowId: the extension resolves the focused window itself, so a caller
+  // cannot name one. See the amendment in Global Constraints.
+  send({ type: "attach_tab" });
 });
 
 newBtn.addEventListener("click", async () => {
@@ -1655,10 +1658,14 @@ Thêm hai gạch đầu dòng vào mục đó, tiếng Anh như phần còn lạ
   the team's logged-in account on the host.
 - `attach_tab` in `extension/background.js` is the one sanctioned way a tab
   outside the session group gets in, and it is not an MCP tool — Claude cannot
-  call it, only the user pressing the panel button can. It takes a `windowId`
-  and acts on that window's active tab; it must never accept a caller-supplied
-  `tabId`, which would rebuild the pre-3.0.0 hole with the added twist of
-  granting lasting access rather than a single action.
+  call it, only the user pressing the panel button can. It takes **no caller
+  parameters at all**: the extension resolves the window itself with
+  `chrome.windows.getLastFocused({windowTypes:["normal"]})` and acts on that
+  window's active tab. An earlier revision let the panel name a `windowId`,
+  reasoning that refusing `tabId` was enough. It was not — window ids are small
+  sequential integers, so anything holding the panel token could enumerate them
+  and pull every window's active tab into its own group, which is the pre-3.0.0
+  hole with lasting access instead of a single action.
 ```
 
 - [ ] **Step 7: Bổ sung `.claude/commands/ccchrome.md`**

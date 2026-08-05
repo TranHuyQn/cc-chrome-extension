@@ -159,9 +159,15 @@ Bốn invariant hiện có **không đổi một dòng nào**:
 
 ### Cửa mới duy nhất: handler `attach_tab`
 
-Panel gửi `{type:"attach_tab", windowId}`. Server chuyển thành một bridge request
-`attach_tab` kèm `session` = MCP session id của agent. Extension lấy tab đang active của
-cửa sổ đó và gọi `addTabToSessionGroup()`.
+Panel gửi `{type:"attach_tab"}` — không kèm trường nào. Server chuyển thành một bridge
+request `attach_tab` với `session` = MCP session id của agent. Extension **tự** xác định
+cửa sổ bằng `chrome.windows.getLastFocused({windowTypes:["normal"]})`, lấy tab đang active
+của cửa sổ đó và gọi `addTabToSessionGroup()`.
+
+> **Sửa đổi 2026-08-05.** Bản đầu cho panel gửi `windowId`. Bỏ đi sau khi review chỉ ra:
+> window id của Chrome là số nguyên nhỏ tăng dần, nên bất cứ thứ gì có token panel cũng
+> quét được `1..N` và hút tab đang active của mọi cửa sổ vào group của nó, rồi đọc sạch
+> bằng các tool thông thường. Người gọi không được phép chỉ định cửa sổ.
 
 Đây **không phải** lỗ hổng, mà là phím tắt cho đúng thao tác mà bản 3.0.0 đã coi là hành
 vi cấp quyền hợp lệ: spec `2026-08-04-tab-group-isolation-design.md` ghi rõ "kéo tab vào
@@ -171,7 +177,7 @@ bấm nút.
 Ba điều kiện phải cùng đúng thì `attach_tab` mới chạy:
 
 1. Đến từ socket `/panel` đã qua kiểm tra origin + token.
-2. Có `windowId` do panel cung cấp — panel chỉ tồn tại trong cửa sổ người dùng đang mở.
+2. Cửa sổ do chính extension xác định tại thời điểm xử lý, không do người gọi truyền vào.
 3. Chỉ tác động lên **tab đang active** của cửa sổ đó, không nhận tab id tuỳ ý.
 
 Điều 3 quan trọng: nếu handler nhận `tabId` tuỳ ý thì nó thành đúng cái lỗ mà 3.0.0 đã
