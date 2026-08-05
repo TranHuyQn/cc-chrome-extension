@@ -29,10 +29,20 @@ let reconnectTimer = null;
 let sessionId = null;
 let busy = false;
 let streaming = null; // the element currently receiving deltas
+// Tracks the last detail line logged by setState, so a backoff loop that
+// keeps failing the same way (bridge still down, token still wrong) appends
+// one line, not one line per retry forever.
+let lastStateDetail = null;
 
 function setState(state, detail = "") {
   dotEl.className = `dot ${state}`;
-  if (detail) addMessage("error", detail);
+  if (!detail) {
+    lastStateDetail = null;
+    return;
+  }
+  if (detail === lastStateDetail) return;
+  lastStateDetail = detail;
+  addMessage("error", detail);
 }
 
 function addMessage(kind, text) {
@@ -72,7 +82,6 @@ function scheduleReconnect() {
 async function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   const raw = await loadState();
-  setState("connecting");
 
   let socket;
   try {
@@ -80,9 +89,28 @@ async function connect() {
     parsed.pathname = "/panel";
     const token = parsed.searchParams.get("token");
     parsed.searchParams.delete("token");
-    socket = token
-      ? new WebSocket(parsed.toString(), [`ccchrome.token.${token}`])
-      : new WebSocket(parsed.toString());
+
+    // The stdio bridge's default URL (DEFAULT_WS_URL, ws://127.0.0.1:9876) has
+    // no path routing at all -- `new WebSocketServer({ host, port })` with no
+    // /panel filter -- so dialing /panel there is not refused with 4004; it
+    // lands straight in the extension bridge's own connection handler and
+    // evicts the real extension socket (registry.attach() closes it with 4000
+    // "replaced by new connection"). A token in the URL is the only
+    // client-visible signal that the other end is actually the http bridge
+    // (which does have /panel and does require one), so without one this must
+    // not dial at all -- not even to find out.
+    if (!token) {
+      setState(
+        "disconnected",
+        "Khung chat cần bridge http (có token) chạy trên máy này — mở popup, dán URL dạng ws://127.0.0.1:8787/ws?token=... rồi bấm Lưu & kết nối lại."
+      );
+      reconnectDelay = RECONNECT_MAX_MS;
+      scheduleReconnect();
+      return;
+    }
+
+    setState("connecting");
+    socket = new WebSocket(parsed.toString(), [`ccchrome.token.${token}`]);
   } catch (err) {
     setState("disconnected", String(err));
     scheduleReconnect();
@@ -136,6 +164,17 @@ function handle(msg) {
       sessionId = msg.sessionId;
       chrome.storage.local.set({ panelSessionId: sessionId });
       groupEl.textContent = msg.groupTitle || "";
+      // "Phiên mới" and a model change both send `start` even while a turn is
+      // running; the server disposes that AgentSession, and a disposed
+      // session never emits its own turn_end (see AgentSession.emit's
+      // `disposed` guard in server/agent.js). busy is otherwise only cleared
+      // by turn_end or a socket close, so without this it would stay true
+      // forever and every Enter afterward is silently swallowed by
+      // `if (!text || busy) return`. ready is the server's honest
+      // acknowledgement that a clean session now exists, so it is the right
+      // place to reset both.
+      setBusy(false);
+      streaming = null;
       break;
     case "turn_start":
       setBusy(true);
@@ -154,8 +193,19 @@ function handle(msg) {
       streaming = null;
       break;
     case "tool":
-      addMessage("tool", `⚙ ${msg.name.replace(/^mcp__chrome__/, "")}`);
-      streaming = null;
+      // Does NOT touch `streaming`. When an assistant turn's content blocks
+      // arrive as [tool_use, text] (the [text, tool_use] order was already
+      // handled correctly, since "message" itself always nulls `streaming`
+      // once it finalizes a text block), earlier `delta`s have already built
+      // the streaming element; nulling it here on the intervening `tool`
+      // event orphaned that element and made the following `message` create
+      // a second one with identical text -- the same reply rendered twice.
+      // Leaving `streaming` alone lets `message` reconcile into the element
+      // the deltas actually went into, whichever order the blocks arrive in.
+      // `msg.name` is server-controlled today, but a malformed or future
+      // frame with no name must not throw inside onmessage and silently drop
+      // the whole event.
+      addMessage("tool", `⚙ ${typeof msg.name === "string" ? msg.name.replace(/^mcp__chrome__/, "") : "(không rõ tool)"}`);
       break;
     case "turn_end":
       setBusy(false);
@@ -177,10 +227,12 @@ function handle(msg) {
       break;
     case "attach_tab_result":
       addMessage(msg.ok ? "tool" : "error",
-        msg.ok ? `✓ Đã đưa vào phiên: ${msg.title || msg.url}` : `Không đưa được tab vào phiên: ${msg.error}`);
+        msg.ok
+          ? `✓ Đã đưa vào phiên: ${msg.title || msg.url}`
+          : `Không đưa được tab vào phiên: ${msg.error || "không rõ lý do"}`);
       break;
     case "error":
-      addMessage("error", msg.message);
+      addMessage("error", msg.message || "Lỗi không rõ từ server.");
       break;
   }
 }
@@ -205,12 +257,24 @@ attachBtn.addEventListener("click", () => {
 
 newBtn.addEventListener("click", async () => {
   sessionId = null;
+  // The log is cleared right here, synchronously, before the server has
+  // disposed the old turn -- a `delta` already in flight for it can still
+  // arrive after this click. Without resetting `streaming` too, that late
+  // delta would append into an element no longer attached to `logEl`: no
+  // error, no visible effect, text silently gone. `ready` (see its handler
+  // above) covers the busy/lockup half of disposing a running turn; this
+  // covers the stale-DOM-reference half, which `ready` alone does not fix
+  // since it can arrive before the very last straggling delta does.
+  streaming = null;
   await chrome.storage.local.remove("panelSessionId");
   logEl.textContent = "";
   send({ type: "start", sessionId: null, model: modelEl.value || null });
 });
 
 modelEl.addEventListener("change", () => {
+  // Same stale-reference risk as "Phiên mới" above: a model change also
+  // disposes any running turn server-side.
+  streaming = null;
   chrome.storage.local.set({ panelModel: modelEl.value });
   send({ type: "start", sessionId, model: modelEl.value || null });
 });

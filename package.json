@@ -18,7 +18,7 @@
     "test:panel": "node test/panel-auth.test.mjs",
     "test:panelproto": "node test/panel-protocol.test.mjs",
     "test": "node test/agent-session.test.mjs && node test/ratelimit.test.mjs && node test/build.test.mjs && node test/origin.test.mjs && node test/tabgroups.test.mjs && node test/attach-tab.test.mjs && node test/reconnect-grace.test.mjs && node test/panel-auth.test.mjs && node test/panel-protocol.test.mjs && node test/e2e.mjs && node test/e2e-http.mjs && node test/session-ttl.test.mjs",
-    "verify:sidepanel": "node test/verify-sidepanel.mjs"
+    "verify:sidepanel": "HEADED=1 node test/verify-sidepanel.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
