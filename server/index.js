@@ -44,6 +44,15 @@ const graceFromEnv = Number(process.env.CC_CHROME_RECONNECT_GRACE_MS);
 const RECONNECT_GRACE_MS = Number.isFinite(graceFromEnv) && graceFromEnv >= 0 ? graceFromEnv : 25000;
 const VERSION = "3.3.0";
 
+// The panel spawns `claude` on this host with the team's logged-in account, so
+// it exists only on a bridge nobody else can reach. A public deployment keeps
+// serving tools and refuses the panel outright — see /panel below.
+function isLoopbackHost(host) {
+  const bare = String(host || "").replace(/^\[|\]$/g, "");
+  return bare === "127.0.0.1" || bare === "localhost" || bare === "::1";
+}
+const AGENT_ENABLED = isLoopbackHost(HOST);
+
 // One Chrome tab group per Claude Code session. stdio serves exactly one
 // session per process, so a value minted at startup is that session's identity;
 // http reuses the MCP session id, which already means the same thing.
@@ -1153,14 +1162,41 @@ async function mainHttp() {
     }
   });
 
-  // WebSocket endpoint for extensions: /ws (token carried in Sec-WebSocket-Protocol)
+  // A panel proves itself by receiving a frame, mirroring the rule the extension
+  // already lives by: `open` fires for refusals too, so only a message from the
+  // server is evidence of a live socket.
+  function attachPanel(ws, token) {
+    const panelId = randomUUID();
+    const panel = { id: panelId, ws, token, agent: null, mcpSessionId: null };
+    panels.set(panelId, panel);
+    log(`[panel ${panelId.slice(0, 8)}] connected`);
+
+    ws.on("close", () => {
+      panels.delete(panelId);
+      if (panel.agent) panel.agent.dispose();
+      log(`[panel ${panelId.slice(0, 8)}] disconnected`);
+    });
+    ws.on("error", (err) => log(`[panel ${panelId.slice(0, 8)}] socket error:`, err.message));
+
+    ws.send(JSON.stringify({ type: "hello", panelId, version: VERSION }));
+  }
+
+  // WebSocket endpoints: /ws for the extension bridge, /panel for the side panel
+  // chat. Two servers, one gate — both go through the same origin and token
+  // checks, so there is only ever one auth path to keep honest.
   const wss = new WebSocketServer({ noServer: true, handleProtocols: pickSubprotocol });
+  const panelWss = new WebSocketServer({ noServer: true, handleProtocols: pickSubprotocol });
+  const panels = new Map(); // panelId -> PanelConnection (filled in by /panel below)
+
   httpServer.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
-    if (url.pathname !== "/ws") {
+    const isPanel = url.pathname === "/panel";
+    if (url.pathname !== "/ws" && !isPanel) {
       socket.destroy();
       return;
     }
+
+    const server = isPanel ? panelWss : wss;
 
     // Rejections complete the handshake and then close with a specific code.
     // A browser cannot read the HTTP status of a failed upgrade, so destroying
@@ -1168,8 +1204,15 @@ async function mainHttp() {
     // user would see "server not running" for what is really a config error.
     // A rejected socket is never registered, so it can do nothing meanwhile.
     const reject = (code, reason) => {
-      wss.handleUpgrade(req, socket, head, (ws) => ws.close(code, reason));
+      server.handleUpgrade(req, socket, head, (ws) => ws.close(code, reason));
     };
+
+    // Checked before origin and token on purpose: on a public bridge the panel
+    // does not exist, and saying so is not a credential leak.
+    if (isPanel && !AGENT_ENABLED) {
+      log(`Rejected /panel upgrade: bridge is bound to ${HOST}, not loopback`);
+      return reject(4004, "panel disabled on a non-loopback bridge");
+    }
 
     const origin = req.headers.origin || "";
     if (!originAllowed(origin)) {
@@ -1187,8 +1230,9 @@ async function mainHttp() {
       return reject(4001, "invalid token");
     }
 
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      registry.attach(ws, token, tokens.get(token));
+    server.handleUpgrade(req, socket, head, (ws) => {
+      if (isPanel) attachPanel(ws, token);
+      else registry.attach(ws, token, tokens.get(token));
     });
   });
 
