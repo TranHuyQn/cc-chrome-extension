@@ -28,6 +28,7 @@ import { z } from "zod";
 import { TokenStore } from "./tokens.js";
 import { RateLimiter, clientIp } from "./ratelimit.js";
 import { AgentSession } from "./agent.js";
+import { isLoopbackHost, isLoopbackAddress, forwardedHeadersIn } from "./loopback.js";
 
 const MODE = process.argv.includes("--http") || process.env.CC_CHROME_MODE === "http" ? "http" : "stdio";
 const PORT = Number(process.env.CC_CHROME_PORT || (MODE === "http" ? 8787 : 9876));
@@ -48,12 +49,41 @@ const VERSION = "3.4.0";
 
 // The panel spawns `claude` on this host with the team's logged-in account, so
 // it exists only on a bridge nobody else can reach. A public deployment keeps
-// serving tools and refuses the panel outright — see /panel below.
-function isLoopbackHost(host) {
-  const bare = String(host || "").replace(/^\[|\]$/g, "");
-  return bare === "127.0.0.1" || bare === "localhost" || bare === "::1";
-}
+// serving tools and refuses the panel outright — see panelRefusalReason() and
+// /panel below.
 const AGENT_ENABLED = isLoopbackHost(HOST);
+
+// "Bound to loopback" and "nobody but this machine can reach me" are not the
+// same claim, and this repo ships the counterexample: deploy/chrome-bridge.service
+// sets CC_CHROME_HOST=127.0.0.1 *because* a TLS reverse proxy sits in front of
+// it. A gate that only reads the bind address would call that deployment
+// private and hand the internet a process spawn on the VPS, once per chat turn,
+// under whatever account the host is logged into.
+//
+// So a /panel upgrade has to prove all three, and any one failing is a 4004:
+//   1. the bind address is loopback (kept as defence in depth),
+//   2. the peer that actually arrived is loopback,
+//   3. no X-Forwarded-* header is present — one proves a proxy is in front,
+//      whatever the peer address says (a proxy's own peer address is loopback).
+//
+// Deliberately not overridable by an environment variable. A switch that
+// re-enables this is a switch someone will eventually flip, and this is exactly
+// the setting that must not be reachable by a configuration mistake.
+function panelRefusalReason(req) {
+  if (!AGENT_ENABLED) return `bridge is bound to ${HOST}, not loopback`;
+  const peer = req.socket?.remoteAddress;
+  if (!isLoopbackAddress(peer)) return `upgrade came from ${peer || "an unknown peer"}, not loopback`;
+  const forwarded = forwardedHeadersIn(req.headers);
+  if (forwarded.length) return `upgrade carries ${forwarded.join(", ")}, so a proxy is in front of this bridge`;
+  return null;
+}
+
+// A bare IPv6 host has to be bracketed before it can go in a URL. HOST may
+// already carry brackets (CC_CHROME_HOST="[::1]"), so strip first, then add.
+function hostForUrl(host) {
+  const bare = String(host || "").replace(/^\[|\]$/g, "");
+  return bare.includes(":") ? `[${bare}]` : bare;
+}
 
 // One Chrome tab group per Claude Code session. stdio serves exactly one
 // session per process, so a value minted at startup is that session's identity;
@@ -1252,34 +1282,95 @@ async function mainHttp() {
     ws.send(JSON.stringify({ type: "hello", panelId, version: VERSION }));
   }
 
+  // Both ids a panel may replay are caller-supplied, and one of them reaches
+  // argv: sessionId is handed to `claude --resume`/`--session-id`. spawn() takes
+  // an argv array so there is no shell to inject into, but an arbitrary string
+  // still reaches the CLI's own parser, and a value shaped like a flag is read
+  // as one. Everything the server ever hands a panel is a UUID, so anything
+  // else is a bug or an attempt — refuse it here rather than pass it on.
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const uuidOrNull = (value, field) => {
+    if (value === undefined || value === null || value === "") return null;
+    if (typeof value !== "string" || !UUID_RE.test(value)) {
+      throw new Error(`${field} không hợp lệ (phải là UUID) — bấm "Phiên mới" để bắt đầu lại.`);
+    }
+    return value;
+  };
+
+  // An mcp session id replayed by a panel may only be adopted if nothing live
+  // is using it: an id still bound to an MCP transport, or held by another open
+  // panel, would put two conversations in one tab group and let the newcomer
+  // evict the incumbent's transport.
+  const mcpSessionIdFree = (panel, id) => {
+    if (sessions.has(id)) return false;
+    for (const other of panels.values()) {
+      if (other !== panel && other.mcpSessionId === id) return false;
+    }
+    return true;
+  };
+
   async function handlePanelMessage(panel, msg, send) {
     if (msg.type === "start") {
       if (panel.agent) panel.agent.dispose();
       mkdirSync(PANEL_CWD, { recursive: true });
-      const sessionId = msg.sessionId || randomUUID();
+
+      // Two side panels in two Chrome windows used to load one extension-global
+      // id and both `claude --resume` the same on-disk conversation, interleaving
+      // two chats into one file. The extension now keys its stored ids per
+      // window; this is the backstop for every other way two panels can end up
+      // holding one id — a fresh conversation, and a line saying so, instead of
+      // silent corruption.
+      let sessionId = uuidOrNull(msg.sessionId, "sessionId");
+      const takenOver = Boolean(sessionId) &&
+        [...panels.values()].some((other) => other !== panel && other.agent?.sessionId === sessionId);
+      if (takenOver) sessionId = null;
+      // A panel that reopens replays the id it remembered from `ready`, and for
+      // that id the conversation already exists on disk — the first turn has to
+      // --resume it. Only a server-generated id is genuinely new.
+      const resuming = Boolean(sessionId);
+      if (!sessionId) sessionId = randomUUID();
+
+      // The conversation survives a reconnect through --resume; without this the
+      // tab group did not. mcpSessionId is what sessionGroupTitle() hashes into
+      // the group name, and a freshly minted one after a socket drop or a bridge
+      // restart renames the group — stranding every tab the user attached, with
+      // nothing on screen explaining why. So the panel replays it too.
+      const replayedMcpId = uuidOrNull(msg.mcpSessionId, "mcpSessionId");
+      if (replayedMcpId && replayedMcpId !== panel.mcpSessionId && mcpSessionIdFree(panel, replayedMcpId)) {
+        panel.mcpSessionId = replayedMcpId;
+      }
+
       panel.agent = new AgentSession({
         sessionId,
         model: msg.model || null,
         token: panel.token,
-        mcpUrl: `http://127.0.0.1:${PORT}/mcp?panel=${panel.id}`,
+        // Derived from HOST, not hardcoded: with CC_CHROME_HOST=::1 the panel
+        // opens (::1 is loopback) and a hardcoded 127.0.0.1 would leave every
+        // child unable to reach /mcp at all.
+        mcpUrl: `http://${hostForUrl(HOST)}:${PORT}/mcp?panel=${panel.id}`,
         allowedTools: PANEL_ALLOWED_TOOLS,
         cwd: PANEL_CWD,
         systemPrompt: PANEL_SYSTEM_PROMPT,
-        // A panel that reopens replays the id it remembered from `ready`, and
-        // for that id the conversation already exists on disk — the first turn
-        // has to --resume it. Only a server-generated id is genuinely new.
-        resuming: Boolean(msg.sessionId),
+        resuming,
         onEvent: (event) => send(event),
         log,
       });
       send({
         type: "ready",
         sessionId,
+        // Replayed back on the next `start` — see the tab-group note above.
+        mcpSessionId: panel.mcpSessionId,
         model: msg.model || null,
         // Must match sessionGroupTitle() in extension/background.js character
         // for character — the panel shows the user which tab group is theirs.
         groupTitle: `Claude · ${panel.mcpSessionId.replace(/-/g, "").slice(0, 4)}`,
       });
+      if (takenOver) {
+        send({
+          type: "error",
+          message: "Hội thoại này đang mở ở một khung chat khác — khung chat này bắt đầu một hội thoại mới.",
+        });
+      }
       return;
     }
 
@@ -1344,7 +1435,14 @@ async function mainHttp() {
       // throw for the (now narrow, focus-then-query race) case where the
       // window found by getLastFocused() has no active tab by the time it's
       // queried — kept translated since it can still fire, just rarely.
-      const message = /browser-internal page/.test(err.message)
+      // "only available on a bridge running on this machine" is the extension's
+      // own refusal (assertLoopbackBridge in extension/background.js) when its
+      // saved URL points at a shared bridge. Reachable here only if the URL was
+      // changed while this panel's socket stayed open, but it is the one case
+      // where the fix is a setting the user can see.
+      const message = /only available on a bridge running on this machine/.test(err.message)
+        ? "Extension đang trỏ vào một bridge dùng chung, nên không đưa tab vào phiên được. Mở popup và đổi URL sang bridge chạy trên máy này (ws://127.0.0.1:…)."
+        : /browser-internal page/.test(err.message)
         ? "Không thể thao tác trên trang nội bộ của trình duyệt (chrome://, devtools://...). Hãy chuyển sang một trang bình thường rồi thử lại."
         : /No last-focused window/.test(err.message)
           ? "Không tìm thấy cửa sổ trình duyệt nào đang mở để đưa tab vào phiên."
@@ -1383,11 +1481,15 @@ async function mainHttp() {
       server.handleUpgrade(req, socket, head, (ws) => ws.close(code, reason));
     };
 
-    // Checked before origin and token on purpose: on a public bridge the panel
-    // does not exist, and saying so is not a credential leak.
-    if (isPanel && !AGENT_ENABLED) {
-      log(`Rejected /panel upgrade: bridge is bound to ${HOST}, not loopback`);
-      return reject(4004, "panel disabled on a non-loopback bridge");
+    // Checked before origin and token on purpose: on a bridge anyone else can
+    // reach, the panel does not exist at all, and saying so is not a
+    // credential leak.
+    if (isPanel) {
+      const refusal = panelRefusalReason(req);
+      if (refusal) {
+        log(`Rejected /panel upgrade: ${refusal}`);
+        return reject(4004, "panel needs a bridge only this machine can reach");
+      }
     }
 
     const origin = req.headers.origin || "";

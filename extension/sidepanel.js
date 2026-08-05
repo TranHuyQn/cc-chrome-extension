@@ -11,7 +11,7 @@ const CLOSE_REASONS = {
   4001: "Token sai hoặc đã bị thu hồi — mở popup và dán lại URL.",
   4002: "URL thiếu token — chạy /ccchrome connect để lấy URL đầy đủ.",
   4003: "Origin không hợp lệ.",
-  4004: "Server này không bật khung chat. Khung chat chỉ chạy trên bridge nội bộ (127.0.0.1).",
+  4004: "Server này không bật khung chat. Khung chat chỉ chạy trên bridge của chính máy này — bridge bind loopback, kết nối đến thẳng từ máy này, và không có reverse proxy đứng trước.",
 };
 
 const dotEl = document.getElementById("dot");
@@ -27,6 +27,17 @@ let ws = null;
 let reconnectDelay = RECONNECT_MIN_MS;
 let reconnectTimer = null;
 let sessionId = null;
+// The mcp session id is what the extension hashes into this session's tab group
+// name (sessionGroupTitle in background.js). It used to be minted fresh by the
+// server on every panel connection, so a bridge restart or a dropped socket
+// silently renamed the group and stranded every tab the user had attached —
+// while the conversation itself survived via --resume. Remembering it and
+// replaying it on `start` is what keeps the two together.
+let mcpSessionId = null;
+// Storage key for the two ids above. Per window, not extension-global: a panel
+// in window A and a panel in window B otherwise loaded the same conversation id
+// and both ran `claude --resume` against one on-disk conversation.
+let sessionKey = null;
 let busy = false;
 let streaming = null; // the element currently receiving deltas
 // Tracks the last detail line logged by setState, so a backoff loop that
@@ -63,11 +74,31 @@ function send(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
 
+// A side panel belongs to exactly one window, and chrome.windows.getCurrent()
+// from this page returns that window — so its id is the natural scope for the
+// panel's remembered session. Resolved once and cached: loadState() runs on
+// every connect(), and a lookup that failed mid-session must not silently move
+// this panel onto a different key.
+async function panelSessionKey() {
+  if (sessionKey) return sessionKey;
+  const win = await chrome.windows.getCurrent().catch(() => null);
+  sessionKey = `panelSession.${win?.id ?? "unknown"}`;
+  return sessionKey;
+}
+
 async function loadState() {
-  const stored = await chrome.storage.local.get({ wsUrl: DEFAULT_WS_URL, panelSessionId: null, panelModel: "" });
-  sessionId = stored.panelSessionId;
+  const key = await panelSessionKey();
+  const stored = await chrome.storage.local.get({ wsUrl: DEFAULT_WS_URL, panelModel: "", [key]: null });
+  const saved = stored[key] || {};
+  sessionId = saved.sessionId || null;
+  mcpSessionId = saved.mcpSessionId || null;
   modelEl.value = stored.panelModel || "";
   return stored.wsUrl || DEFAULT_WS_URL;
+}
+
+function saveState() {
+  if (!sessionKey) return;
+  chrome.storage.local.set({ [sessionKey]: { sessionId, mcpSessionId } });
 }
 
 function scheduleReconnect() {
@@ -143,6 +174,11 @@ async function connect() {
     if (ws !== socket) return;
     ws = null;
     setBusy(false);
+    // Same class of bug as the two already fixed on "Phiên mới" and the model
+    // change: leaving a stale element here means the reconnected socket's first
+    // `message` reconciles into a node that is no longer the one being built,
+    // and the text disappears with no error.
+    streaming = null;
     const reason = CLOSE_REASONS[event.code] ?? (proven ? "" : "Không kết nối được — bridge chưa chạy?");
     setState("disconnected", reason);
     if (CLOSE_REASONS[event.code]) reconnectDelay = RECONNECT_MAX_MS;
@@ -158,11 +194,14 @@ async function connect() {
 function handle(msg) {
   switch (msg.type) {
     case "hello":
-      send({ type: "start", sessionId, model: modelEl.value || null });
+      send({ type: "start", sessionId, mcpSessionId, model: modelEl.value || null });
       break;
     case "ready":
       sessionId = msg.sessionId;
-      chrome.storage.local.set({ panelSessionId: sessionId });
+      // The server may have refused the replayed id (another live panel holds
+      // it) and minted its own, so `ready` is the authority for both ids.
+      mcpSessionId = msg.mcpSessionId || mcpSessionId;
+      saveState();
       groupEl.textContent = msg.groupTitle || "";
       // "Phiên mới" and a model change both send `start` even while a turn is
       // running; the server disposes that AgentSession, and a disposed
@@ -266,9 +305,12 @@ newBtn.addEventListener("click", async () => {
   // covers the stale-DOM-reference half, which `ready` alone does not fix
   // since it can arrive before the very last straggling delta does.
   streaming = null;
-  await chrome.storage.local.remove("panelSessionId");
+  // Only the conversation is new. mcpSessionId is kept on purpose: it names the
+  // tab group, so dropping it here would strand the tabs the user attached —
+  // "Phiên mới" clears the chat, not the session's tabs (README says so too).
+  saveState();
   logEl.textContent = "";
-  send({ type: "start", sessionId: null, model: modelEl.value || null });
+  send({ type: "start", sessionId: null, mcpSessionId, model: modelEl.value || null });
 });
 
 modelEl.addEventListener("change", () => {
@@ -276,7 +318,7 @@ modelEl.addEventListener("change", () => {
   // disposes any running turn server-side.
   streaming = null;
   chrome.storage.local.set({ panelModel: modelEl.value });
-  send({ type: "start", sessionId, model: modelEl.value || null });
+  send({ type: "start", sessionId, mcpSessionId, model: modelEl.value || null });
 });
 
 connect();

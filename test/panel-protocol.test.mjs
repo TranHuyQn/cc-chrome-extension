@@ -278,6 +278,91 @@ const after = (await (await fetch(`${BASE}/health`)).json()).mcpSessions;
 check("closing the panel drops its mcp session instead of leaking it until the reaper",
   after === before - 1, `before=${before} after=${after}`);
 
+// --- two panels at once, and the ids a panel replays -------------------------
+//
+// Everything below concerns what a panel is allowed to hand back to the server
+// on `start`. Two ids travel there and both used to be taken on trust:
+//
+//   sessionId    goes to `claude --resume`/`--session-id`, i.e. into argv.
+//                Two side panels in two Chrome windows read one
+//                extension-global storage key and both resumed the SAME
+//                on-disk conversation, interleaving two chats into one file.
+//   mcpSessionId names the tab group (sessionGroupTitle). It was minted fresh
+//                on every panel connection, so a reconnect renamed the group
+//                and stranded every tab the user had attached.
+
+function openPanel() {
+  const socket = new WebSocket(`ws://127.0.0.1:${PORT}/panel`, [`ccchrome.token.${TOKEN}`], {
+    headers: { origin: ORIGIN },
+  });
+  const seen = [];
+  socket.on("message", (data) => seen.push(JSON.parse(data.toString())));
+  return {
+    socket,
+    frames: seen,
+    send: (obj) => socket.send(JSON.stringify(obj)),
+    waitFor: async (predicate, ms = 10000) => {
+      for (let i = 0; i < ms / 50; i++) {
+        const hit = seen.find(predicate);
+        if (hit) return hit;
+        await sleep(50);
+      }
+      return null;
+    },
+  };
+}
+
+const panelA = openPanel();
+await panelA.waitFor((f) => f.type === "hello");
+panelA.send({ type: "start", sessionId: null, model: "sonnet" });
+const readyA = await panelA.waitFor((f) => f.type === "ready");
+check("panel A starts a session of its own", !!readyA?.sessionId, JSON.stringify(readyA));
+
+const panelB = openPanel();
+await panelB.waitFor((f) => f.type === "hello");
+// Exactly what the old extension-global storage key made the second window do.
+panelB.send({ type: "start", sessionId: readyA.sessionId, mcpSessionId: readyA.mcpSessionId, model: "sonnet" });
+const readyB = await panelB.waitFor((f) => f.type === "ready");
+check("a second panel replaying a live conversation id does NOT get that conversation",
+  !!readyB?.sessionId && readyB.sessionId !== readyA.sessionId,
+  `A=${readyA?.sessionId} B=${readyB?.sessionId}`);
+check("and it is told why, instead of two chats silently sharing one file on disk",
+  !!(await panelB.waitFor((f) => f.type === "error", 3000)),
+  JSON.stringify(panelB.frames));
+check("nor does it get the other panel's tab group",
+  !!readyB?.mcpSessionId && readyB.mcpSessionId !== readyA.mcpSessionId,
+  `A=${readyA?.mcpSessionId} B=${readyB?.mcpSessionId}`);
+
+// A malformed id must never reach argv: `claude` parses whatever it is handed,
+// and a value shaped like a flag is read as one.
+panelB.send({ type: "start", sessionId: "--dangerous-flag", model: "sonnet" });
+const badId = await panelB.waitFor((f) => f.type === "error" && /sessionId/.test(f.message || ""), 3000);
+check("a sessionId that is not a UUID is refused before it can reach argv",
+  !!badId, JSON.stringify(panelB.frames));
+
+// --- the reconnect case: the tab group survives ------------------------------
+//
+// `panel` (the first socket in this file) is closed by now, so the id it used
+// is free again — which is exactly the state after a dropped socket or a
+// restarted bridge. Replaying it must put this panel back in the same group.
+
+const panelC = openPanel();
+await panelC.waitFor((f) => f.type === "hello");
+panelC.send({ type: "start", sessionId: null, mcpSessionId: observed, model: "sonnet" });
+const readyC = await panelC.waitFor((f) => f.type === "ready");
+check("a reconnecting panel that replays its mcp session id keeps it",
+  readyC?.mcpSessionId === observed, `${readyC?.mcpSessionId} vs ${observed}`);
+check("so the tab group name is the same one the attached tabs are already in",
+  readyC?.groupTitle === expectedTitle, `${readyC?.groupTitle} vs ${expectedTitle}`);
+check("a panel that replays nothing still gets a group of its own",
+  readyA?.groupTitle !== expectedTitle && readyB?.groupTitle !== expectedTitle,
+  `A=${readyA?.groupTitle} B=${readyB?.groupTitle} replayed=${expectedTitle}`);
+
+try { panelA.socket.close(); } catch { /* already closing */ }
+try { panelB.socket.close(); } catch { /* already closing */ }
+try { panelC.socket.close(); } catch { /* already closing */ }
+await sleep(300);
+
 // --- teardown ----------------------------------------------------------------
 
 try { panel.close(); } catch { /* already closing */ }

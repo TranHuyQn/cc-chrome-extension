@@ -186,6 +186,33 @@ function isLoopbackUrl(parsed) {
   return host === "127.0.0.1" || host === "localhost" || host === "::1";
 }
 
+// attach_tab is the one tool that reaches a tab outside the session's group,
+// and it exists for a button the user presses in the side panel. But `handlers`
+// is dispatched by method name from whatever arrives on /ws, so proving the
+// model cannot reach it says nothing about the *server*: on a shared bridge,
+// whoever controls that process could call attach_tab on every member and pull
+// their currently-focused tab — banking, email — into a group it can then read,
+// with no user action at all.
+//
+// The side panel only works against a bridge on this machine (see
+// panelRefusalReason() in server/index.js), so refusing attach_tab on any other
+// bridge costs nothing legitimate and removes that reach entirely. Read from
+// storage rather than the in-memory `wsUrl` so the guard does not depend on
+// which connection attempt happens to have run last.
+async function assertLoopbackBridge() {
+  const { wsUrl: configured } = await chrome.storage.local.get({ wsUrl: DEFAULT_WS_URL });
+  let parsed = null;
+  try {
+    parsed = new URL(configured);
+  } catch { /* unparseable is not loopback */ }
+  if (!parsed || !isLoopbackUrl(parsed)) {
+    throw new Error(
+      "attach_tab is only available on a bridge running on this machine (127.0.0.1/::1). " +
+      `This extension is configured for ${configured || "(no URL)"}, so the request was refused.`
+    );
+  }
+}
+
 async function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   await loadConfig();
@@ -1258,6 +1285,7 @@ const handlers = {
   // the window the user is actually looking at itself, at the moment the
   // button is pressed, so there is nothing left for a caller to name.
   attach_tab: async (params) => {
+    await assertLoopbackBridge();
     // No `if (!win)` guard here: chrome.windows.getLastFocused() rejects
     // (with "No last-focused window") rather than resolving to a falsy
     // value when nothing matches windowTypes, so a truthiness check on its

@@ -280,6 +280,53 @@ async function run() {
   } else {
     console.log("SKIP  popup-window exclusion checks -- test harness could not create a popup window");
   }
+
+  // --- attach_tab only exists on a bridge running on this machine -------------
+  //
+  // Task 5 proved the *model* cannot reach attach_tab: it is not in the MCP
+  // tool list. That says nothing about the *server*, which dispatches whatever
+  // `method` arrives on /ws straight into `handlers`. On a shared bridge that
+  // meant whoever controlled that process could pull each member's
+  // currently-focused tab — banking, email — into a group it can then read,
+  // with no user action at all. The side panel only ever works against a
+  // loopback bridge (see panelRefusalReason() in server/index.js), so refusing
+  // attach_tab anywhere else costs nothing legitimate.
+  //
+  // The saved URL is what the guard reads, so this drives the real setting the
+  // popup writes rather than a stub.
+
+  const SESSION_REMOTE = "ffff-remote-bridge-session";
+  const winF = await createWindow();
+  await focusWindowAndWait(winF.windowId);
+
+  const setBridgeUrl = async (url) => {
+    await sw.evaluate(async (value) => {
+      if (value === null) await chrome.storage.local.remove("wsUrl");
+      else await chrome.storage.local.set({ wsUrl: value });
+    }, url);
+    await sleep(200);
+  };
+
+  await setBridgeUrl("wss://bridge.example.com/ws?token=sometoken123");
+  const resultRemote = await attachTab(SESSION_REMOTE);
+  check(
+    "attach_tab is refused while the extension is configured for a shared (non-loopback) bridge",
+    resultRemote.ok !== true && /only available on a bridge running on this machine/.test(resultRemote.error || ""),
+    JSON.stringify(resultRemote)
+  );
+  const remoteGroup = await groupOf(winF.tabId);
+  check("the refused tab was not grouped", remoteGroup.groupId === -1, JSON.stringify(remoteGroup));
+
+  // And the guard is about the bridge, not about attach_tab having stopped
+  // working: point it back at a local bridge and the same call succeeds.
+  await setBridgeUrl("ws://127.0.0.1:8787/ws?token=sometoken123");
+  const resultLocal = await attachTab(SESSION_REMOTE);
+  check(
+    "the same call succeeds again once the bridge URL is loopback",
+    resultLocal.ok === true && resultLocal.tabId === winF.tabId,
+    JSON.stringify(resultLocal)
+  );
+  await setBridgeUrl(null);
 }
 
 try {

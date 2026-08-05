@@ -12,6 +12,11 @@ WorkingDirectory=/opt/cc-chrome-extension/server
 Environment=CC_CHROME_MODE=http
 Environment=CC_CHROME_PORT=8787
 Environment=CC_CHROME_HOST=127.0.0.1
+# Lưu ý: bind loopback ở đây KHÔNG bật khung chat side panel. Server chỉ mở
+# /panel khi không ai ngoài chính máy đó tới được — bind loopback, peer là
+# loopback, và request không mang X-Forwarded-*. Bản deploy này có proxy đứng
+# trước nên luôn bị từ chối (mã 4004), đúng như thiết kế: sau /panel là một
+# tiến trình `claude` chạy bằng tài khoản đăng nhập trên chính host này.
 # Server đứng sau reverse proxy (Caddy/nginx) nên IP thật nằm ở X-Forwarded-For.
 #
 # GIẢ ĐỊNH: proxy đứng trước PHẢI là thứ ghi đè hoặc nối thêm X-Forwarded-For.

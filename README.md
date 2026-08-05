@@ -217,11 +217,27 @@ Nói thẳng để khỏi hiểu nhầm:
   `~/.cc-chrome-bridge/panel` (xem mục Vận hành bên dưới), và **sống sót qua
   việc đóng/mở lại khung chat** — mở lại panel là tiếp tục đúng hội thoại cũ,
   không phải bắt đầu mới. Bấm **Phiên mới** mới thực sự bắt đầu một hội thoại
-  trắng; hội thoại cũ vẫn nằm nguyên trên đĩa, không có gì tự dọn.
-- **Chỉ chạy được với bridge http bind loopback** — không hoạt động ở chế độ
-  stdio mặc định, và cũng không hoạt động khi bridge chạy trên VPS/remote (kể
-  cả khi VPS tự bind `127.0.0.1` thì đó là loopback *của VPS*, không phải của
-  máy bạn).
+  trắng; hội thoại cũ vẫn nằm nguyên trên đĩa, không có gì tự dọn. **Nhưng
+  "Phiên mới" không đổi tab group**: nhóm tab gắn với khung chat (theo cửa sổ),
+  không gắn với hội thoại — nên mọi tab bạn đã "đưa vào phiên" trước đó vẫn
+  nằm trong nhóm và hội thoại mới vẫn thao tác được trên chúng. Muốn cắt hẳn
+  thì tự kéo tab ra khỏi nhóm hoặc đóng chúng. Cũng vì thế, mất kết nối rồi
+  nối lại (hay restart bridge) không làm mất nhóm tab: khung chat nhớ và khai
+  báo lại đúng nhóm cũ.
+- **Chỉ chạy được với bridge http chạy trên chính máy bạn** — không hoạt động ở
+  chế độ stdio mặc định. Server từ chối `/panel` (đóng socket với mã 4004) trừ
+  khi **cả ba** điều kiện cùng đúng: (1) bridge bind loopback
+  (`127.0.0.1`/`::1`), (2) kết nối đến từ chính máy đó — địa chỉ peer của
+  socket là loopback, (3) request **không** mang header `X-Forwarded-For`,
+  `X-Forwarded-Proto` hay `X-Forwarded-Host` nào. Có header đó nghĩa là có
+  reverse proxy đứng trước, mà proxy thì đứng ra kết nối hộ người khác — địa
+  chỉ peer lúc đó là của proxy (loopback) chứ không phải của người gọi thật.
+  Đúng cấu hình VPS trong `deploy/` rơi vào trường hợp này: unit systemd đặt
+  `CC_CHROME_HOST=127.0.0.1` **vì** có Caddy/nginx terminate TLS phía trước,
+  nên bridge đó bind loopback nhưng vẫn **không** bật khung chat — và đó là
+  chủ đích, vì sau `/panel` là một tiến trình `claude` chạy trên host bằng tài
+  khoản đang đăng nhập ở đó. Không có biến môi trường nào bật lại được: cái
+  công tắc nào bật được thì sẽ có người bật.
 
 ### Nếu khung chat mở chậm
 

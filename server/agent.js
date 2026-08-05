@@ -141,8 +141,11 @@ export class AgentSession {
       // Only the last non-empty line is kept for the panel. It is the one that
       // names the cause ("No conversation found with session ID: …"), and the
       // panel is a narrow column — the rest would be unreadable there anyway.
+      // Capped: this line is JSON-stringified onto the panel socket and put in
+      // the DOM, and nothing bounds what a child writes to stderr — a stack
+      // trace or a dumped config would otherwise travel in full.
       const lines = chunk.split("\n").map((line) => line.trim()).filter(Boolean);
-      if (lines.length) this.lastStderrLine = lines[lines.length - 1];
+      if (lines.length) this.lastStderrLine = lines[lines.length - 1].slice(0, 500);
     });
 
     child.on("error", (err) => {
@@ -180,6 +183,19 @@ export class AgentSession {
       }
     });
 
+    // A prompt bigger than the OS pipe buffer (64KB on Linux, less on macOS)
+    // cannot be handed over in one write, so the tail of it is still queued when
+    // the child exits — and a child that fails immediately (`--resume` on a
+    // session id the CLI no longer has exits 1 before reading a byte) leaves
+    // that write hitting a closed pipe. Node raises EPIPE on the stdin socket,
+    // and with no `error` listener an EventEmitter error is thrown: the whole
+    // bridge process dies, taking every MCP session with it — for a paste into
+    // a reopened panel, which is the documented common path. The turn's real
+    // outcome is reported by `close` (with the child's own stderr line), so all
+    // this listener has to do is keep the failed write from being fatal.
+    child.stdin.on("error", (err) => {
+      this.log("[claude stdin]", err.message);
+    });
     child.stdin.write(text);
     child.stdin.end();
   }

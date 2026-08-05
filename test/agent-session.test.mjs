@@ -296,6 +296,52 @@ function makeSession(extra = {}) {
     JSON.stringify(events.slice(afterDispose)));
 }
 
+// --- 9. a big prompt to a child that exits first must not kill the process --
+//
+// The path is the documented common one: reopen the panel days later, paste a
+// long document, `claude --resume <gone id>` exits 1 before reading a byte. A
+// prompt larger than the OS pipe buffer cannot be handed over in one write, so
+// the tail is still queued when the pipe closes — EPIPE on child.stdin, and
+// without an `error` listener that is an unhandled EventEmitter error: the
+// whole bridge process dies, taking every Claude Code MCP session with it.
+//
+// Every other case in this file uses test/fake-claude.mjs, which drains stdin
+// on purpose, so none of them can ever see this. This one uses a fake that
+// never reads stdin at all.
+//
+// The assertion is simply that this process is still alive afterwards and got
+// its turn_end: before the fix, the run ends here with an uncaught EPIPE and no
+// summary line at all.
+
+{
+  const fakeNoDrain = join(root, "test", "fake-claude-nodrain.mjs");
+  const events = [];
+  const session = new AgentSession({
+    sessionId: "11111111-2222-3333-4444-555555555555",
+    model: "sonnet",
+    mcpUrl: "http://127.0.0.1:8787/mcp?panel=test",
+    allowedTools: "mcp__chrome",
+    cwd: workdir,
+    resuming: true,
+    claudeBin: process.execPath,
+    claudeArgsPrefix: [fakeNoDrain],
+    onEvent: (event) => events.push(event),
+    log: () => {},
+  });
+  // 4 MB: far past any platform's pipe buffer (64KB on Linux, 16-64KB on
+  // macOS), so the write cannot possibly complete before the child is gone.
+  session.send("x".repeat(4 * 1024 * 1024));
+  for (let i = 0; i < 200 && !events.some((e) => e.type === "turn_end"); i++) await sleep(50);
+
+  const end = events.find((e) => e.type === "turn_end");
+  check("a huge prompt to a fast-failing child does not kill the server process",
+    !!end, JSON.stringify(events.map((e) => e.type)));
+  check("that turn is reported as a failed turn, with the CLI's own reason",
+    end?.ok === false && /No conversation found/.test(end?.error || ""),
+    JSON.stringify(end));
+  session.dispose();
+}
+
 rmSync(workdir, { recursive: true, force: true });
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);
