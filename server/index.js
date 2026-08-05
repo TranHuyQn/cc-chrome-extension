@@ -1316,20 +1316,36 @@ async function mainHttp() {
   // but carries the panel's own MCP session id so the tab lands in the panel's
   // group rather than the terminal session's.
   async function attachPanelTab(panel, windowId) {
-    if (!Number.isInteger(Number(windowId))) {
+    const win = Number(windowId);
+    // Mirrors the guard in extension/background.js's attach_tab handler:
+    // Chrome window ids are always positive, so this also rejects the
+    // WINDOW_ID_CURRENT (-2) / WINDOW_ID_NONE (-1) sentinels, which
+    // chrome.tabs.query still honours and which would otherwise resolve to
+    // some window the caller never actually named.
+    if (!Number.isInteger(win) || win <= 0) {
       return { ok: false, error: "thiếu windowId" };
     }
     try {
       const conn = await registry.require(panel.token);
       const result = await conn.call(
         "attach_tab",
-        { windowId: Number(windowId) },
+        { windowId: win },
         REQUEST_TIMEOUT_MS,
         panel.mcpSessionId
       );
       return { ok: true, title: result.title, url: result.url };
     } catch (err) {
-      return { ok: false, error: err.message };
+      // The extension's error messages here are written for Claude to act on
+      // ("Navigate to a normal web page first."), not for the person reading
+      // the Vietnamese panel UI. Translate the cases a user actually hits;
+      // anything unrecognised passes through unchanged rather than being
+      // papered over with a generic message that would hide a real fault.
+      const message = /browser-internal page/.test(err.message)
+        ? "Không thể thao tác trên trang nội bộ của trình duyệt (chrome://, devtools://...). Hãy chuyển sang một trang bình thường rồi thử lại."
+        : /No active tab in window/.test(err.message)
+          ? "Không tìm thấy tab đang mở trong cửa sổ này."
+          : err.message;
+      return { ok: false, error: message };
     }
   }
 

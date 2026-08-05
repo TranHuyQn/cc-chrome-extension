@@ -126,6 +126,13 @@ function withGroupLock(title, fn) {
   return next;
 }
 
+// Regroups unconditionally: if `tab` already belongs to a different live
+// session's group, chrome.tabs.group() below silently pulls it out of that
+// group and into this one. Both the tab's original session and this one only
+// ever get a tab here through a user-initiated action (new_tab / attach_tab),
+// so a user moving their own tab between two of their own sessions is
+// acceptable — there is no guard against it on purpose, but it is easy to
+// miss on a first read.
 async function addTabToSessionGroup(tab, session) {
   const title = sessionGroupTitle(session);
   return await withGroupLock(title, async () => {
@@ -1247,7 +1254,14 @@ const handlers = {
   // tab in the browser — except this one would also grant permanent access.
   attach_tab: async (params) => {
     const windowId = Number(params.windowId);
-    if (!Number.isInteger(windowId)) {
+    // Chrome window ids are always positive, so this also rejects the
+    // sentinels chrome.tabs.query still honours as real windowIds:
+    // WINDOW_ID_CURRENT (-2) resolves to whatever window this service worker
+    // currently considers "current", and WINDOW_ID_NONE (-1) matches tabs
+    // across windows — either one lets a caller reach a window it never
+    // named, which is exactly the "silently acting on some default window"
+    // this guard exists to prevent.
+    if (!Number.isInteger(windowId) || windowId <= 0) {
       throw new Error("attach_tab requires a numeric windowId");
     }
     const [tab] = await chrome.tabs.query({ active: true, windowId });

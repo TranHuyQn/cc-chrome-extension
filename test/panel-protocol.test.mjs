@@ -228,6 +228,25 @@ const survivor = await fetch(`${BASE}/mcp`, {
 });
 check("the surviving session still answers tools/list", survivor.status === 200, String(survivor.status));
 
+// attach_tab must never be reachable as an MCP tool call — it is the one
+// place this codebase deliberately grants access outside the caller's own
+// tab group, and it exists only on the panel -> attachPanelTab -> extension
+// path, never inside buildMcpServer(). A grep proves that statically; this
+// proves it against the server's own live tools/list response, which is what
+// Claude Code actually sees. MCP tool names can be namespaced by the client
+// (e.g. "mcp__chrome__attach_tab"), so both an exact match and a "...__" +
+// name suffix are checked.
+const survivorBody = await survivor.text();
+const survivorJson = /^data: /m.test(survivorBody)
+  ? JSON.parse(survivorBody.split("\n").find((l) => l.startsWith("data: ")).slice(6))
+  : JSON.parse(survivorBody);
+const toolNames = (survivorJson.result?.tools || []).map((t) => t.name);
+check(
+  "attach_tab is not among the tools/list this MCP session exposes to Claude",
+  toolNames.length > 0 && !toolNames.some((n) => n === "attach_tab" || n.endsWith("__attach_tab")),
+  JSON.stringify(toolNames)
+);
+
 // --- everyone else is unaffected ---------------------------------------------
 
 const plainA = await initialize(`${BASE}/mcp`);

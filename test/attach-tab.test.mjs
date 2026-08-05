@@ -11,6 +11,14 @@
 //   - a browser-internal page (chrome://settings) is refused, not grouped
 //   - a missing or non-numeric windowId is rejected rather than silently
 //     acting on some default window
+//   - Chrome's window-id sentinels (WINDOW_ID_CURRENT = -2, WINDOW_ID_NONE =
+//     -1) are rejected too: chrome.tabs.query() honours both, so a bare
+//     Number.isInteger() guard lets them straight through to "some default
+//     window" — exactly what this handler exists to refuse. Confirmed
+//     against real Chromium: before the `windowId <= 0` guard was added,
+//     `handlers.attach_tab({ windowId: -2 })` returned `{ ok: true, tabId:
+//     ..., groupId: ... }` for the active tab of the *current* window, and
+//     `windowId: -1` did the same.
 //
 // Usage: HEADED=1 node test/attach-tab.test.mjs
 
@@ -98,28 +106,36 @@ check(
   JSON.stringify({ got: grouped1.groupTitle, expected: expectedTitleA })
 );
 
-// --- only the ACTIVE tab moves; a second tab in the same window is untouched -
+// --- only the ACTIVE tab moves, and specifically the active one, not just --
+// --- "whichever tab query() returns first" ----------------------------------
+//
+// firstTabId is deliberately left as the window's first tab AND left
+// inactive, while secondTabId is created after it and made active. A handler
+// that did chrome.tabs.query({ windowId }) and took the first result — rather
+// than filtering on `active: true` — would pass a test where the active tab
+// happens to also be tab index 0. Only activating the *second* tab pins the
+// actual constraint.
 
 const SESSION_B = "bbbb-attach-tab-session";
 const win2 = await sw.evaluate(async (url) => {
   const w = await chrome.windows.create({ url, focused: true });
   return { windowId: w.id, tabId: w.tabs[0].id };
 }, "about:blank");
-const otherTabId = await sw.evaluate(async (windowId) => {
-  const t = await chrome.tabs.create({ windowId, url: "about:blank", active: false });
+const firstTabId = win2.tabId;
+const secondTabId = await sw.evaluate(async (windowId) => {
+  // active: true (the default) — this is the tab attach_tab must pick.
+  const t = await chrome.tabs.create({ windowId, url: "about:blank", active: true });
   return t.id;
 }, win2.windowId);
-// win2.tabId must still be the active one in this window.
-await sw.evaluate(async (id) => { await chrome.tabs.update(id, { active: true }); }, win2.tabId);
 
 const result2 = await attachTab(win2.windowId, SESSION_B);
-check("attach_tab acts on the active tab of the window", result2.ok === true && result2.tabId === win2.tabId, JSON.stringify(result2));
+check("attach_tab acts on the active (second, not first) tab of the window", result2.ok === true && result2.tabId === secondTabId, JSON.stringify(result2));
 
-const otherGroupId = await sw.evaluate(async (id) => (await chrome.tabs.get(id)).groupId, otherTabId);
+const firstGroupId = await sw.evaluate(async (id) => (await chrome.tabs.get(id)).groupId, firstTabId);
 check(
-  "the second, non-active tab in the same window was NOT moved (would fail if tabId support were added)",
-  otherGroupId === -1,
-  String(otherGroupId)
+  "the first tab in the window, which was never active, was NOT moved (would fail if tabId support were added, or if the handler took query()[0])",
+  firstGroupId === -1,
+  String(firstGroupId)
 );
 
 // --- a browser-internal page is refused, not grouped -------------------------
@@ -164,6 +180,37 @@ const noGroupForD = await sw.evaluate(
   await sessionGroupTitleOf(SESSION_D)
 );
 check("no group was silently created for the rejected calls", noGroupForD === 0, String(noGroupForD));
+
+// --- Chrome's window-id sentinels are rejected, not honoured -----------------
+//
+// -2 is WINDOW_ID_CURRENT and -1 is WINDOW_ID_NONE. chrome.tabs.query() still
+// honours both, so a guard that only checks Number.isInteger() lets a caller
+// reach "whatever window Chrome considers current" or an arbitrary window's
+// tab — silently acting on a default window is precisely what a windowId
+// requirement is supposed to prevent. A dedicated window with a known active
+// tab proves the negative: none of these calls may group it.
+
+const SESSION_E = "eeee-attach-tab-session";
+const winE = await sw.evaluate(async (url) => {
+  const w = await chrome.windows.create({ url, focused: true });
+  return { windowId: w.id, tabId: w.tabs[0].id };
+}, "about:blank");
+
+for (const bad of [-2, -1, 0, null]) {
+  const r = await attachTab(bad, SESSION_E);
+  check(
+    `windowId ${JSON.stringify(bad)} is rejected rather than resolving to some other window`,
+    r.ok === false && /numeric windowId/.test(r.error || ""),
+    JSON.stringify(r)
+  );
+}
+
+const winETabGroupId = await sw.evaluate(async (id) => (await chrome.tabs.get(id)).groupId, winE.tabId);
+check(
+  "none of the rejected sentinel/invalid windowIds grouped winE's active tab as a side effect",
+  winETabGroupId === -1,
+  String(winETabGroupId)
+);
 
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 await context.close();
