@@ -243,6 +243,22 @@ check("two such clients get different ids, i.e. ordinary Claude Code is untouche
 const unknown = await initialize(`${BASE}/mcp?panel=deadbeef-0000-0000-0000-000000000000`);
 check("an unknown ?panel= id is refused with 404", unknown.status === 404, String(unknown.status));
 
+// --- a closed panel takes its MCP session with it ----------------------------
+//
+// The panel's session id is one only that panel ever uses, so once the socket
+// is gone nothing can reach the transport again — but it would still sit in the
+// sessions map pinning an McpServer until the 8-hour idle reaper. Open and
+// close the side panel through a working day and that is dozens of them.
+
+const before = (await (await fetch(`${BASE}/health`)).json()).mcpSessions;
+check("the panel's mcp session is live while the panel is open", before >= 1, String(before));
+
+panel.close();
+await sleep(500);
+const after = (await (await fetch(`${BASE}/health`)).json()).mcpSessions;
+check("closing the panel drops its mcp session instead of leaking it until the reaper",
+  after === before - 1, `before=${before} after=${after}`);
+
 // --- teardown ----------------------------------------------------------------
 
 try { panel.close(); } catch { /* already closing */ }

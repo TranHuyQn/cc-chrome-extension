@@ -1159,7 +1159,10 @@ async function mainHttp() {
           // or its entry is silently overwritten and never cleaned up.
           const previous = sessions.get(id);
           if (previous && previous.transport !== transport) {
-            try { previous.transport.close(); } catch { /* already gone */ }
+            // close() is async: a plain try/catch would let a rejection escape
+            // as an unhandled rejection, which Node ≥15 treats as fatal. This
+            // runs on every single turn, so it has to be the safe form.
+            Promise.resolve(previous.transport.close()).catch(() => { /* already gone */ });
           }
           sessions.set(id, { transport, token, lastSeen: Date.now() });
         },
@@ -1218,6 +1221,16 @@ async function mainHttp() {
     ws.on("close", () => {
       panels.delete(panelId);
       if (panel.agent) panel.agent.dispose();
+      // The panel's MCP transport is keyed by an id only this panel ever uses,
+      // so once the panel is gone nothing can reach it again — but it would sit
+      // in `sessions` pinning a transport and an McpServer until the 8-hour
+      // idle reaper. Open and close the side panel through a working day and
+      // that is dozens of them.
+      const session = sessions.get(panel.mcpSessionId);
+      if (session) {
+        sessions.delete(panel.mcpSessionId);
+        Promise.resolve(session.transport.close()).catch(() => { /* already gone */ });
+      }
       log(`[panel ${panelId.slice(0, 8)}] disconnected`);
     });
     ws.on("error", (err) => log(`[panel ${panelId.slice(0, 8)}] socket error:`, err.message));
@@ -1252,6 +1265,10 @@ async function mainHttp() {
         allowedTools: PANEL_ALLOWED_TOOLS,
         cwd: PANEL_CWD,
         systemPrompt: PANEL_SYSTEM_PROMPT,
+        // A panel that reopens replays the id it remembered from `ready`, and
+        // for that id the conversation already exists on disk — the first turn
+        // has to --resume it. Only a server-generated id is genuinely new.
+        resuming: Boolean(msg.sessionId),
         onEvent: (event) => send(event),
         log,
       });

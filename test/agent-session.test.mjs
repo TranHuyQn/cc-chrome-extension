@@ -98,6 +98,40 @@ function makeSession(extra = {}) {
   session.dispose();
 }
 
+// --- 3b. a handed-over session id resumes on the very first turn -------------
+//
+// The panel persists the id from `ready` and replays it when it reopens. That
+// conversation already exists on disk, so turn one must --resume it; passing
+// --session-id an already-used uuid is rejected by the CLI.
+
+{
+  const argvFile = join(workdir, "argv-resume.json");
+  const events = [];
+  const session = new AgentSession({
+    sessionId: "99999999-8888-7777-6666-555555555555",
+    model: "sonnet",
+    mcpUrl: "http://127.0.0.1:8787/mcp?panel=test",
+    allowedTools: "mcp__chrome",
+    cwd: workdir,
+    resuming: true,
+    claudeBin: process.execPath,
+    claudeArgsPrefix: [fakeClaude],
+    env: { CC_FAKE_FIXTURE: fixture, CC_FAKE_ARGV: argvFile },
+    onEvent: (event) => events.push(event),
+    log: () => {},
+  });
+  session.send("lượt đầu sau khi mở lại panel");
+  for (let i = 0; i < 100 && !events.some((e) => e.type === "turn_end"); i++) await sleep(50);
+
+  const argv = JSON.parse(readFileSync(argvFile, "utf8"));
+  check("resuming:true makes the FIRST turn a --resume, not a --session-id",
+    argv.includes("--resume") &&
+    argv[argv.indexOf("--resume") + 1] === "99999999-8888-7777-6666-555555555555" &&
+    !argv.includes("--session-id"),
+    argv.join(" "));
+  session.dispose();
+}
+
 // --- 4. stop() actually kills the child -------------------------------------
 
 {
@@ -182,6 +216,44 @@ function makeSession(extra = {}) {
     events.some((e) => e.type === "delta" && e.text === "ch"),
     JSON.stringify(events));
   session.dispose();
+}
+
+// --- 8. a disposed session emits nothing, ever ------------------------------
+//
+// dispose() SIGKILLs the child, but the kill is asynchronous and the stdout
+// listener stays attached, so lines already buffered keep arriving and keep
+// translating. The panel's start-while-busy path disposes the old session and
+// immediately sends `ready` down the SAME open socket, so a late delta or
+// message would be rendered as the new conversation's first output. Marking the
+// turn `finished` is not enough — that only silences turn_end.
+
+{
+  const { session, events } = makeSession({ env: { CC_FAKE_DELAY_MS: "80" } });
+  session.send("lượt sẽ bị vứt bỏ");
+  for (let i = 0; i < 60 && events.length < 2; i++) await sleep(50);
+  check("the doomed turn was actually mid-stream when disposed", events.length >= 2,
+    JSON.stringify(events.map((e) => e.type)));
+
+  session.dispose();
+  const afterDispose = events.length;
+  await sleep(600); // several fixture lines' worth of delay
+
+  check("no event escapes a disposed session", events.length === afterDispose,
+    JSON.stringify(events.slice(afterDispose)));
+
+  // The check above passes even with the `disposed` gate removed: with this
+  // fake, SIGKILL lands before any further line is written, so it only proves
+  // the kill works. The leak is about stdout that was ALREADY in the pipe when
+  // dispose() ran — the listener is still attached and still translates it. Feed
+  // exactly that, with no timing to lose, so the gate is what is under test.
+  const strayLine = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "text", text: "câu của lượt đã bị vứt" }] },
+  });
+  session.onStdout(strayLine + "\n");
+  check("a line still buffered from the killed child emits nothing",
+    events.length === afterDispose,
+    JSON.stringify(events.slice(afterDispose)));
 }
 
 rmSync(workdir, { recursive: true, force: true });

@@ -21,6 +21,10 @@ export class AgentSession {
     allowedTools,
     cwd,
     systemPrompt = null,
+    // True when sessionId names a conversation the CLI already has on disk, so
+    // the very first turn must --resume instead of --session-id. A panel that
+    // reopens and replays a remembered id is exactly this case.
+    resuming = false,
     claudeBin = "claude",
     claudeArgsPrefix = [],
     env = {},
@@ -43,18 +47,31 @@ export class AgentSession {
     this.child = null;
     this.buffer = "";
     // A turn that has already started must --resume; the very first one has no
-    // conversation to resume into and would fail.
-    this.started = false;
+    // conversation to resume into and would fail. A caller that hands over an
+    // id from an earlier panel seeds this true, because for that id the
+    // conversation does exist and --session-id would be rejected as taken.
+    this.started = resuming;
     this.stopping = false;
     // Node fires both `error` and `close` for a spawn that fails outright
     // (e.g. ENOENT on claudeBin) — this guard makes sure only the first of
     // the two exit paths for a turn emits its turn_end, so callers never see
     // two end-of-turn events for one send().
     this.finished = false;
+    // SIGKILL is asynchronous and the stdout listener stays attached, so a
+    // killed child's already-buffered lines still arrive and still translate.
+    // On the start-while-busy path the panel socket is very much open — it just
+    // received `ready` — so an ungated late delta would be rendered as the new
+    // conversation's first words. Nothing may leave a disposed session.
+    this.disposed = false;
   }
 
   get busy() {
     return this.child !== null;
+  }
+
+  emit(event) {
+    if (this.disposed) return;
+    this.onEvent(event);
   }
 
   // NOTE on exposure: this JSON string (Bearer token included) is passed as
@@ -104,7 +121,7 @@ export class AgentSession {
     this.stopping = false;
     this.finished = false;
     this.buffer = "";
-    this.onEvent({ type: "turn_start" });
+    this.emit({ type: "turn_start" });
 
     const child = spawn(this.claudeBin, this.buildArgs(), {
       cwd: this.cwd,
@@ -126,7 +143,7 @@ export class AgentSession {
       // first of the two may emit turn_end.
       if (this.finished) return;
       this.finished = true;
-      this.onEvent({ type: "turn_end", ok: false, error: err.message });
+      this.emit({ type: "turn_end", ok: false, error: err.message });
     });
 
     child.on("close", (code) => {
@@ -134,11 +151,11 @@ export class AgentSession {
       if (this.finished) return;
       this.finished = true;
       if (this.stopping) {
-        this.onEvent({ type: "turn_end", ok: false, error: "đã dừng theo yêu cầu" });
+        this.emit({ type: "turn_end", ok: false, error: "đã dừng theo yêu cầu" });
       } else if (code === 0) {
-        this.onEvent({ type: "turn_end", ok: true });
+        this.emit({ type: "turn_end", ok: true });
       } else {
-        this.onEvent({ type: "turn_end", ok: false, error: `claude thoát với mã ${code}` });
+        this.emit({ type: "turn_end", ok: false, error: `claude thoát với mã ${code}` });
       }
     });
 
@@ -172,16 +189,16 @@ export class AgentSession {
     if (event.type === "stream_event") {
       const delta = event.event?.delta;
       if (delta?.type === "text_delta" && delta.text) {
-        this.onEvent({ type: "delta", text: delta.text });
+        this.emit({ type: "delta", text: delta.text });
       }
       return;
     }
     if (event.type === "assistant") {
       for (const block of event.message?.content || []) {
         if (block.type === "text" && block.text) {
-          this.onEvent({ type: "message", text: block.text });
+          this.emit({ type: "message", text: block.text });
         } else if (block.type === "tool_use" && block.name) {
-          this.onEvent({ type: "tool", name: block.name });
+          this.emit({ type: "tool", name: block.name });
         }
         // Any other content block type (e.g. "thinking", or something newer
         // than this probe) carries nothing the panel renders — skip silently
@@ -210,6 +227,10 @@ export class AgentSession {
     // `close` handler still fires after this returns, and it must not emit
     // a turn_end into a session the caller has already torn down.
     this.finished = true;
+    // `finished` only silences turn_end. Buffered stdout keeps arriving and
+    // still translates into delta/message/tool events, which on the
+    // start-while-busy path would land in the *new* conversation.
+    this.disposed = true;
     if (this.child) this.child.kill("SIGKILL");
     this.child = null;
   }
