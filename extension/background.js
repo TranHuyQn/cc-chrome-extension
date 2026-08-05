@@ -1237,6 +1237,26 @@ const handlers = {
     return { tabId: tab.id, url: tab.url, title: tab.title };
   },
 
+  // The one deliberate way a tab outside the session group gets in. It is not a
+  // relaxation of the in-group rule: 3.0.0 already treats dragging a tab into
+  // the group as the user granting access, and this does that drag for them
+  // when they press the button in the side panel.
+  //
+  // It takes a windowId and never a tabId. A caller-supplied tabId would rebuild
+  // exactly the hole that close_tab and switch_tab had before 3.0.0 — reach any
+  // tab in the browser — except this one would also grant permanent access.
+  attach_tab: async (params) => {
+    const windowId = Number(params.windowId);
+    if (!Number.isInteger(windowId)) {
+      throw new Error("attach_tab requires a numeric windowId");
+    }
+    const [tab] = await chrome.tabs.query({ active: true, windowId });
+    if (!tab) throw new Error(`No active tab in window ${windowId}`);
+    assertScriptableUrl(tab);
+    const groupId = await addTabToSessionGroup(tab, params.__session);
+    return { ok: true, tabId: tab.id, groupId, title: tab.title, url: tab.url };
+  },
+
   async scroll(params) {
     const tab = await resolveTab(params);
     return await execInTab(tab, pageScroll, [

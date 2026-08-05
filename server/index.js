@@ -1312,10 +1312,25 @@ async function mainHttp() {
     }
   }
 
-  // Task 5 implements this for real; until then say so instead of throwing a
-  // ReferenceError at the panel.
-  async function attachPanelTab(_panel, _windowId) {
-    return { ok: false, error: "chưa hiện thực" };
+  // Reaches the extension over the bridge socket the same way a tool call does,
+  // but carries the panel's own MCP session id so the tab lands in the panel's
+  // group rather than the terminal session's.
+  async function attachPanelTab(panel, windowId) {
+    if (!Number.isInteger(Number(windowId))) {
+      return { ok: false, error: "thiếu windowId" };
+    }
+    try {
+      const conn = await registry.require(panel.token);
+      const result = await conn.call(
+        "attach_tab",
+        { windowId: Number(windowId) },
+        REQUEST_TIMEOUT_MS,
+        panel.mcpSessionId
+      );
+      return { ok: true, title: result.title, url: result.url };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
   }
 
   // WebSocket endpoints: /ws for the extension bridge, /panel for the side panel
