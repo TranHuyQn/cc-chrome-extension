@@ -44,12 +44,23 @@ export class AgentSession {
     // conversation to resume into and would fail.
     this.started = false;
     this.stopping = false;
+    // Node fires both `error` and `close` for a spawn that fails outright
+    // (e.g. ENOENT on claudeBin) — this guard makes sure only the first of
+    // the two exit paths for a turn emits its turn_end, so callers never see
+    // two end-of-turn events for one send().
+    this.finished = false;
   }
 
   get busy() {
     return this.child !== null;
   }
 
+  // NOTE on exposure: this JSON string (Bearer token included) is passed as
+  // an --mcp-config argv value, so it is visible in `ps`/`/proc/<pid>/cmdline`
+  // to any other local user on the same machine as the bridge server for the
+  // lifetime of the child process. That is a deliberate tradeoff carried over
+  // from the probe, not an oversight — see the task-2 fix-round report for
+  // the file-based-config alternative this was weighed against.
   mcpConfig() {
     return JSON.stringify({
       mcpServers: {
@@ -88,6 +99,7 @@ export class AgentSession {
   send(text) {
     if (this.child) throw new Error("A turn is already running; stop it first.");
     this.stopping = false;
+    this.finished = false;
     this.buffer = "";
     this.onEvent({ type: "turn_start" });
 
@@ -106,11 +118,18 @@ export class AgentSession {
 
     child.on("error", (err) => {
       this.child = null;
+      // A spawn-time failure (e.g. ENOENT on claudeBin) fires `error` and
+      // Node still fires `close` afterwards for the same child — only the
+      // first of the two may emit turn_end.
+      if (this.finished) return;
+      this.finished = true;
       this.onEvent({ type: "turn_end", ok: false, error: err.message });
     });
 
     child.on("close", (code) => {
       this.child = null;
+      if (this.finished) return;
+      this.finished = true;
       if (this.stopping) {
         this.onEvent({ type: "turn_end", ok: false, error: "đã dừng theo yêu cầu" });
       } else if (code === 0) {
@@ -184,6 +203,10 @@ export class AgentSession {
 
   dispose() {
     this.stopping = true;
+    // Mark this turn finished up front: SIGKILL is asynchronous, so the
+    // `close` handler still fires after this returns, and it must not emit
+    // a turn_end into a session the caller has already torn down.
+    this.finished = true;
     if (this.child) this.child.kill("SIGKILL");
     this.child = null;
   }

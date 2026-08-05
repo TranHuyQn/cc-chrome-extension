@@ -115,6 +115,75 @@ function makeSession(extra = {}) {
   session.dispose();
 }
 
+// --- 5. a spawn failure emits exactly one turn_end --------------------------
+//
+// Node fires both `error` and `close` for a child that never actually spawned
+// (e.g. ENOENT on claudeBin). Assert the count, not just the last event —
+// checking only the tail would let a duplicate turn_end slip back in unseen.
+
+{
+  const events = [];
+  const session = new AgentSession({
+    sessionId: "11111111-2222-3333-4444-555555555555",
+    model: "sonnet",
+    mcpUrl: "http://127.0.0.1:8787/mcp?panel=test",
+    allowedTools: "mcp__chrome",
+    cwd: workdir,
+    claudeBin: "/nonexistent/binary/does-not-exist-xyz",
+    onEvent: (event) => events.push(event),
+    log: () => {},
+  });
+  session.send("xin chào");
+  for (let i = 0; i < 100 && !events.some((e) => e.type === "turn_end"); i++) await sleep(50);
+  await sleep(100); // give a stray second close()/error() a chance to arrive
+
+  const turnEnds = events.filter((e) => e.type === "turn_end");
+  check("exactly one turn_end after a spawn failure", turnEnds.length === 1, JSON.stringify(turnEnds));
+  check("that turn_end reports failure", turnEnds[0]?.ok === false, JSON.stringify(turnEnds[0]));
+  session.dispose();
+}
+
+// --- 6. the stopping flag resets so the following turn can still succeed ----
+
+{
+  const { session, events } = makeSession({ env: { CC_FAKE_DELAY_MS: "200" } });
+  session.send("lượt bị dừng");
+  await sleep(300);
+  session.stop();
+  for (let i = 0; i < 100 && !events.some((e) => e.type === "turn_end"); i++) await sleep(50);
+  check("stopped turn ends with ok:false", events.at(-1)?.type === "turn_end" && events.at(-1)?.ok === false,
+    JSON.stringify(events.at(-1)));
+
+  session.send("lượt sau khi dừng");
+  for (let i = 0; i < 100 && events.filter((e) => e.type === "turn_end").length < 2; i++) await sleep(50);
+  check("the turn after a stop reports ok:true", events.at(-1)?.type === "turn_end" && events.at(-1)?.ok === true,
+    JSON.stringify(events.at(-1)));
+  session.dispose();
+}
+
+// --- 7. a real content_block_delta line becomes a delta event ---------------
+//
+// test/fixtures/claude-stream-delta.ndjson is not invented: every line is
+// quoted verbatim in .superpowers/sdd/2026-08-05-sidepanel-chat/task-1-report.md
+// (the `stream_event`/`content_block_*` rows of the type table), captured from
+// a real `claude -p --include-partial-messages` run. The committed turn
+// fixture (claude-stream.ndjson) has no stream_event lines because that
+// particular probe run did not pass --include-partial-messages, so this
+// second, narrower fixture is the only way to exercise the delta path against
+// genuine captured data instead of an invented shape.
+
+{
+  const deltaFixture = join(root, "test", "fixtures", "claude-stream-delta.ndjson");
+  const { session, events } = makeSession({ env: { CC_FAKE_FIXTURE: deltaFixture } });
+  session.send("xin chào");
+  for (let i = 0; i < 100 && !events.some((e) => e.type === "turn_end"); i++) await sleep(50);
+
+  check("a real content_block_delta line becomes a delta event",
+    events.some((e) => e.type === "delta" && e.text === "ch"),
+    JSON.stringify(events));
+  session.dispose();
+}
+
 rmSync(workdir, { recursive: true, force: true });
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);
