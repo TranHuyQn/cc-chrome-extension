@@ -212,9 +212,12 @@ Nói thẳng để khỏi hiểu nhầm:
   bấm **Đưa tab này vào phiên** ngay trong khung chat.
 - **Agent trong panel không đọc/ghi được file nào trên máy** — chạy với
   `--tools ""`, chỉ có đúng các tool điều khiển trình duyệt (`mcp__chrome`).
-- **Lịch sử hội thoại nằm ở tiến trình `claude` được spawn ra, không phải
-  trên server** — server không lưu gì cả, đóng khung chat là mất lịch sử
-  phiên đó.
+- **Server không lưu nội dung hội thoại nào cả** — nhưng lịch sử vẫn tồn tại
+  trên chính máy này, trong file phiên của CLI `claude` dưới
+  `~/.cc-chrome-bridge/panel` (xem mục Vận hành bên dưới), và **sống sót qua
+  việc đóng/mở lại khung chat** — mở lại panel là tiếp tục đúng hội thoại cũ,
+  không phải bắt đầu mới. Bấm **Phiên mới** mới thực sự bắt đầu một hội thoại
+  trắng; hội thoại cũ vẫn nằm nguyên trên đĩa, không có gì tự dọn.
 - **Chỉ chạy được với bridge http bind loopback** — không hoạt động ở chế độ
   stdio mặc định, và cũng không hoạt động khi bridge chạy trên VPS/remote (kể
   cả khi VPS tự bind `127.0.0.1` thì đó là loopback *của VPS*, không phải của
@@ -371,7 +374,7 @@ Một người mở nhiều phiên Claude Code cùng lúc vẫn ổn — tất c
 | `CC_CHROME_MAX_TOKENS` | `100` | Trần số token động, chặn việc biến secret bị lộ thành máy phát token. Chạm trần thì `/pair` trả **503** (chờ không hết — admin phải thu hồi bớt hoặc nâng trần), khác với 429 của rate limit. Giá trị không phải số dương sẽ bị bỏ qua kèm log cảnh báo. |
 | `CC_CHROME_SESSION_TTL_MS` | `28800000` (8 tiếng) | Session MCP không hoạt động quá lâu sẽ bị đóng và dọn. |
 | `CC_CHROME_RECONNECT_GRACE_MS` | `25000` | Khi extension chưa kết nối, mỗi lệnh sẽ **chờ** ngần này rồi mới báo lỗi. Chrome huỷ service worker của extension khi cửa sổ Chrome nằm ở nền (đóng socket với mã 1001), alarm bật lại trong khoảng 30 giây — nhờ khoảng chờ này lệnh chỉ bị chậm thay vì hỏng. Phải nhỏ hơn `CC_CHROME_TIMEOUT_MS`. |
-| `CC_CHROME_PANEL_TOOLS` | `mcp__chrome` | Danh sách tool (cú pháp `--tools` của Claude Code) mà agent trong khung chat side panel được phép dùng. Chỉ có tác dụng khi khung chat bật (xem [Khung chat](#khung-chat-side-panel)). |
+| `CC_CHROME_PANEL_TOOLS` | `mcp__chrome` | Danh sách MCP tool (truyền thẳng vào cờ `--allowedTools` của Claude Code) mà agent trong khung chat side panel được phép gọi. Không liên quan đến cờ `--tools` — cờ đó bị khóa cứng về `""` để tắt hết tool dựng sẵn (đọc/ghi file...), biến này chỉ chọn trong số các MCP tool còn lại (mặc định chỉ nhóm `mcp__chrome`), không mở lại quyền file. Chỉ có tác dụng khi khung chat bật (xem [Khung chat](#khung-chat-side-panel)). |
 | `CC_CHROME_EXTENSION_ID` | — | Chỉ chấp nhận đúng một extension ID. **Chỉ dùng được khi mọi người cài bản `.crx` đã ký** (ID in ra khi `npm run build`, do `key.pem` quyết định): cài kiểu zip + **Load unpacked** sinh ID theo đường dẫn, khác nhau trên từng máy — đặt biến này khi đó sẽ khoá cả team ra ngoài. Không đặt thì chấp nhận mọi `chrome-extension://`. Xem thêm [Lưu ý bảo mật](#lưu-ý-bảo-mật): pin này thu hẹp chứ không đóng được lỗ origin giả. |
 
 Đổi port ở phía extension: bấm icon extension → sửa "Địa chỉ MCP server" → **Lưu & kết nối lại**.
