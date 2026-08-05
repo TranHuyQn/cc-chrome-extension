@@ -31,7 +31,7 @@ requires --verbose`. Task 2 must always pass `--verbose` alongside
 | `stream_event` | `content_block_stop` | Streaming: current block finished. | 1 per block |
 | `stream_event` | `message_delta` | Streaming: top-level message metadata update (e.g. `stop_reason`, usage). | 1 per assistant turn |
 | `stream_event` | `message_stop` | Streaming: assistant message fully complete. | 1 per assistant turn |
-| `assistant` | — | A **complete** assistant message (same content whether or not `--include-partial-messages` was used) — `message.content[]` holds `text` and/or `tool_use` blocks. This is the one to render chat bubbles from; `stream_event` is only needed for live token streaming. | 1+ per turn |
+| `assistant` | — | A **complete** assistant message (same content whether or not `--include-partial-messages` was used) — `message.content[]` holds one or more content blocks; see the block-type table below for exactly which. This is the one to render chat bubbles from; `stream_event` is only needed for live token streaming. | 1+ per turn |
 | `user` | — | Synthetic user-role message carrying `tool_result` content back to the model after a tool call — not a real user turn, do not render as one. | 1 per tool call |
 | `rate_limit_event` | — | Account rate-limit status snapshot (`rateLimitType`, `resetsAt`, etc.). Not conversational; can be ignored/logged. | 1+ |
 | `result` | `success` (or error subtype) | Final summary of the whole `claude -p` invocation: `result` (final text), `is_error`, `duration_ms`, `total_cost_usd`, `usage`, `permission_denials`. Always the last line. | 1 |
@@ -40,13 +40,43 @@ Real one-line examples of each `type` are quoted verbatim in
 `task-1-report.md` (section "NDJSON type table"), taken from the actual probe
 runs (`/tmp/probe-a.ndjson`, and the committed `test/fixtures/claude-stream.ndjson`).
 
-**Important caveat for Task 2/3**: because the probing account has global
-hooks configured (Superpowers, claude-mem) in `~/.claude/settings.json`, every
-headless invocation emits a burst of `system:hook_started`/`hook_response`
-events and one hook injects several KB of `additionalContext` text into the
-session before the first real assistant turn. The panel's translator must
-tolerate/ignore unknown `system` subtypes rather than assuming `init` is
-always the first line.
+### `assistant.message.content[]` block types
+
+Derived mechanically, not from memory: parsed every `assistant` line in the
+committed `test/fixtures/claude-stream.ndjson` (`node -e` + `JSON.parse` per
+line) and collected the distinct `content[].type` values across all of them.
+The fixture has exactly 3 `assistant` lines (fixture lines 14, 15, 18), one
+content block each:
+
+| `content[].type` | Count in fixture | What it is | What the panel UI should do |
+|---|---|---|---|
+| `thinking` | 1 | Extended-thinking block. In this run it was `{"type":"thinking","thinking":"","signature":"Es..."}` — an **empty** `thinking` string plus an opaque `signature` (redacted/encrypted reasoning trace, not human-readable text). | Ignore for chat rendering (nothing readable to show); at most render as a collapsed "thinking…" indicator if the panel wants one. Never treat `signature` as displayable text. |
+| `tool_use` | 1 | `{"type":"tool_use","id":"toolu_...","name":"mcp__chrome__chrome_status","input":{...}}` — a tool call the model is making. | Render as tool-activity UI (e.g. "Calling chrome_status…"), not as a chat bubble. Pair with the matching `tool_result` in the following `user` line via `tool_use_id`/`id`. |
+| `text` | 1 | `{"type":"text","text":"..."}` — plain assistant reply text (also used for the model's final answer that echoes tool output back in prose). | Render as a normal assistant chat bubble. |
+
+**This list is only what appeared in one committed fixture, not an exhaustive
+enumeration of every block type the API can emit.** Task 2's translator must
+not hard-fail on an unrecognized `content[].type` — fall back to ignoring or
+generically logging it rather than throwing, since other block types (e.g.
+`redacted_thinking`, `server_tool_use`) are known to exist in the wider API
+surface and simply didn't happen to appear in this one probe run.
+
+### Known CLI/environment behaviours Task 2 must handle
+
+- **`--verbose` is mandatory.** On CLI 2.1.197, `-p`/`--print` combined with
+  `--output-format stream-json` fails immediately (exit 1, no NDJSON output
+  at all) unless `--verbose` is also passed. Exact stderr text:
+  `Error: When using --print, --output-format=stream-json requires --verbose`.
+  Task 2 must always pass `--verbose` alongside `--output-format stream-json`.
+- **Global SessionStart hooks inject `system` noise.** Because the probing
+  account has global hooks configured (Superpowers, claude-mem) in
+  `~/.claude/settings.json`, every headless invocation emits a burst of
+  `system:hook_started`/`hook_response` events and one hook injects several KB
+  of `additionalContext` text into the session before the first real
+  assistant turn. The panel's translator must tolerate/ignore unknown
+  `system` subtypes rather than assuming `system:init` is always the first
+  line — a different machine (with no such hooks, or different ones) will
+  produce a different number and shape of leading `system` lines.
 
 ## 3. `--resume` context retention
 
