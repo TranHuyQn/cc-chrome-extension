@@ -256,12 +256,23 @@ async function run() {
   // --- F1: "ready" mid-turn must clear busy, or the panel locks up forever ----
   // Both "Phiên mới" and a model change send `start` even while a turn is
   // running; the server disposes that AgentSession, and a disposed session
-  // never emits its own turn_end. Reproduced directly via handle() -- no
-  // tokens needed, and no live turn actually has to be running, since the
-  // point is entirely about what a `ready` arriving while busy=true does.
+  // never emits its own turn_end. Reproduced directly via handle(). This
+  // section deliberately points wsUrl at an unreachable address before
+  // opening the page (restored right after), instead of the real bridge: an
+  // earlier version of this test kept the real connection, and pressing
+  // Enter with real text on an actually-OPEN socket sent a real `prompt` to
+  // the real bridge -- an unawaited, unbudgeted live claude turn on every run
+  // of an opt-in script whose whole point is to avoid exactly that. The
+  // fix/lockup being tested here is pure DOM/JS state (`busy`, the Enter
+  // handler's guard, the stop button), so a live connection was never
+  // actually needed -- `send()` silently no-ops with no `ws` open, which is
+  // precisely what lets the Enter-key path still be exercised for free.
+  await sw.evaluate(async (wsUrl) => {
+    await chrome.storage.local.set({ wsUrl });
+  }, "ws://127.0.0.1:1/panel?token=f1-unreachable-dead-endpoint");
   const f1Page = await context.newPage();
   await f1Page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
-  await f1Page.waitForSelector("#dot.connected", { timeout: 15000 });
+  await f1Page.waitForSelector("#input", { timeout: 15000 }); // page loaded; no live connection needed or wanted here
   /* eslint-disable no-undef -- window.handle is a page global, evaluated by Playwright inside the page, not by this Node process */
   await f1Page.evaluate(() => { handle({ type: "turn_start" }); });
   /* eslint-enable no-undef */
@@ -277,18 +288,21 @@ async function run() {
   // The real proof, not just the button's own visual state: pre-fix, `busy`
   // stayed true forever and the Enter handler's `if (!text || busy) return`
   // silently swallowed every subsequent prompt. Confirm one actually gets
-  // through after the reset.
+  // through after the reset -- safely, since `ws` above is never OPEN (dead
+  // endpoint), so `send()` is a guaranteed no-op and nothing is dispatched to
+  // any real server no matter what happens here.
   await f1Page.fill("#input", "F1 kiểm tra: gõ được sau khi ready đến giữa lượt");
   await f1Page.press("#input", "Enter");
   const userMsgCountAfterReady = await f1Page.$$eval(".msg.user", (els) => els.length);
-  check("F1: a prompt typed after that reset is not silently swallowed by a stuck busy flag", userMsgCountAfterReady === 1, `count=${userMsgCountAfterReady}`);
+  check("F1: a prompt typed after that reset is not silently swallowed by a stuck busy flag (no live turn spent)", userMsgCountAfterReady === 1, `count=${userMsgCountAfterReady}`);
 
   // --- late-delta-after-"Phiên mới" small fix ----------------------------------
   // "Phiên mới" clears the log synchronously, before the server has disposed
   // the old turn -- a `delta` already in flight for it can still arrive after
   // the click. Without resetting `streaming` too, that late delta appends
   // into an element no longer attached to #log: no error, no visible effect,
-  // text silently gone.
+  // text silently gone. Also still on the dead endpoint, so the real "start"
+  // this click sends is likewise a no-op.
   /* eslint-disable no-undef */
   await f1Page.evaluate(() => {
     handle({ type: "turn_start" });
@@ -301,6 +315,20 @@ async function run() {
   /* eslint-enable no-undef */
   const logAfterLateDelta = await f1Page.textContent("#log");
   check("small fix: a late delta after 'Phiên mới' does not silently vanish into a detached node", logAfterLateDelta.includes("late-fragment"), logAfterLateDelta);
+
+  // Restore the real bridge URL for every page opened below, and clear the
+  // bogus `panelSessionId: "f1-test-session"` the synthetic "ready" above
+  // wrote to the real chrome.storage.local -- a later page's real `start`
+  // would otherwise replay that nonexistent conversation id as
+  // `resuming: true`. Harmless only as long as no later page actually sends
+  // a real prompt; clearing it here removes that landmine outright rather
+  // than relying on that staying true.
+  await sw.evaluate(async (wsUrl) => {
+    await chrome.storage.local.set({ wsUrl });
+  }, `ws://127.0.0.1:${MCP_PORT}/ws?token=${TOKEN}`);
+  await sw.evaluate(async () => {
+    await chrome.storage.local.remove(["panelSessionId"]);
+  });
 
   // --- F6: [tool_use, text] block ordering must not duplicate the bubble ------
   // The live turn above happened not to hit this, because Claude ordered its
