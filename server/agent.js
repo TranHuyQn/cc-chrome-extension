@@ -20,6 +20,7 @@ export class AgentSession {
     mcpUrl,
     allowedTools,
     cwd,
+    systemPrompt = null,
     claudeBin = "claude",
     claudeArgsPrefix = [],
     env = {},
@@ -32,6 +33,7 @@ export class AgentSession {
     this.mcpUrl = mcpUrl;
     this.allowedTools = allowedTools;
     this.cwd = cwd;
+    this.systemPrompt = systemPrompt;
     this.claudeBin = claudeBin;
     this.claudeArgsPrefix = claudeArgsPrefix;
     this.env = env;
@@ -91,6 +93,7 @@ export class AgentSession {
       "--allowedTools", this.allowedTools,
     ];
     if (this.model) args.push("--model", this.model);
+    if (this.systemPrompt) args.push("--append-system-prompt", this.systemPrompt);
     if (this.started) args.push("--resume", this.sessionId);
     else args.push("--session-id", this.sessionId);
     return args;

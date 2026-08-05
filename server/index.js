@@ -20,12 +20,14 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { WebSocketServer } from "ws";
 import { createServer } from "node:http";
 import { randomUUID, randomBytes, timingSafeEqual } from "node:crypto";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { TokenStore } from "./tokens.js";
 import { RateLimiter, clientIp } from "./ratelimit.js";
+import { AgentSession } from "./agent.js";
 
 const MODE = process.argv.includes("--http") || process.env.CC_CHROME_MODE === "http" ? "http" : "stdio";
 const PORT = Number(process.env.CC_CHROME_PORT || (MODE === "http" ? 8787 : 9876));
@@ -1137,10 +1139,28 @@ async function mainHttp() {
       // New session (initialize request).
       const body = await readBody(req);
       const sessionRef = { id: null };
+      // A panel keeps one MCP session id for its whole life even though it
+      // spawns a fresh `claude` per turn. The id decides the tab group name, so
+      // letting each turn generate its own would hand every turn a brand new
+      // group and lock Claude out of the tabs it opened a moment earlier.
+      const panelId = url.searchParams.get("panel");
+      const panel = panelId ? panels.get(panelId) : null;
+      if (panelId && !panel) {
+        return json(res, 404, { error: "unknown panel id" });
+      }
+      if (panel && panel.token !== token) {
+        return json(res, 403, { error: "panel belongs to a different token" });
+      }
       const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: randomUUID,
+        sessionIdGenerator: () => (panel ? panel.mcpSessionId : randomUUID()),
         onsessioninitialized: (id) => {
           sessionRef.id = id;
+          // The previous turn's transport still holds this id. Close it first,
+          // or its entry is silently overwritten and never cleaned up.
+          const previous = sessions.get(id);
+          if (previous && previous.transport !== transport) {
+            try { previous.transport.close(); } catch { /* already gone */ }
+          }
           sessions.set(id, { transport, token, lastSeen: Date.now() });
         },
       });
@@ -1162,14 +1182,38 @@ async function mainHttp() {
     }
   });
 
+  const PANEL_CWD = join(homedir(), ".cc-chrome-bridge", "panel");
+  // Everything under here is derived from the design's tool-set decision: the
+  // agent gets the chrome MCP tools and nothing else.
+  const PANEL_ALLOWED_TOOLS = process.env.CC_CHROME_PANEL_TOOLS || "mcp__chrome";
+  const PANEL_SYSTEM_PROMPT =
+    "Bạn là trợ lý duyệt web chạy trong khung chat bên cạnh trình duyệt Chrome của người dùng. " +
+    "Bạn chỉ có các tool điều khiển trình duyệt, không đọc/ghi được file trên máy. " +
+    "Bạn chỉ thao tác được trên các tab nằm trong tab group của phiên này; " +
+    "muốn làm việc trên một trang người dùng đang mở, hãy bảo họ bấm nút \"Đưa tab này vào phiên\". " +
+    "Trả lời ngắn gọn bằng tiếng Việt.";
+
   // A panel proves itself by receiving a frame, mirroring the rule the extension
   // already lives by: `open` fires for refusals too, so only a message from the
   // server is evidence of a live socket.
   function attachPanel(ws, token) {
     const panelId = randomUUID();
-    const panel = { id: panelId, ws, token, agent: null, mcpSessionId: null };
+    const panel = {
+      id: panelId,
+      ws,
+      token,
+      agent: null,
+      // Chosen here, handed to the MCP transport when the child initializes.
+      mcpSessionId: randomUUID(),
+    };
     panels.set(panelId, panel);
     log(`[panel ${panelId.slice(0, 8)}] connected`);
+
+    // AgentSession.onEvent can still fire just after dispose(), by which point
+    // the socket may already be gone — a send must never throw there.
+    const send = (obj) => {
+      if (ws.readyState === 1) ws.send(JSON.stringify(obj));
+    };
 
     ws.on("close", () => {
       panels.delete(panelId);
@@ -1178,7 +1222,76 @@ async function mainHttp() {
     });
     ws.on("error", (err) => log(`[panel ${panelId.slice(0, 8)}] socket error:`, err.message));
 
+    ws.on("message", async (data) => {
+      let msg;
+      try {
+        msg = JSON.parse(data.toString());
+      } catch {
+        return;
+      }
+      try {
+        await handlePanelMessage(panel, msg, send);
+      } catch (err) {
+        send({ type: "error", message: err.message });
+      }
+    });
+
     ws.send(JSON.stringify({ type: "hello", panelId, version: VERSION }));
+  }
+
+  async function handlePanelMessage(panel, msg, send) {
+    if (msg.type === "start") {
+      if (panel.agent) panel.agent.dispose();
+      mkdirSync(PANEL_CWD, { recursive: true });
+      const sessionId = msg.sessionId || randomUUID();
+      panel.agent = new AgentSession({
+        sessionId,
+        model: msg.model || null,
+        token: panel.token,
+        mcpUrl: `http://127.0.0.1:${PORT}/mcp?panel=${panel.id}`,
+        allowedTools: PANEL_ALLOWED_TOOLS,
+        cwd: PANEL_CWD,
+        systemPrompt: PANEL_SYSTEM_PROMPT,
+        onEvent: (event) => send(event),
+        log,
+      });
+      send({
+        type: "ready",
+        sessionId,
+        model: msg.model || null,
+        // Must match sessionGroupTitle() in extension/background.js character
+        // for character — the panel shows the user which tab group is theirs.
+        groupTitle: `Claude · ${panel.mcpSessionId.replace(/-/g, "").slice(0, 4)}`,
+      });
+      return;
+    }
+
+    if (!panel.agent) throw new Error("Chưa khởi tạo phiên — gửi 'start' trước.");
+
+    if (msg.type === "prompt") {
+      const text = String(msg.text || "").trim();
+      if (!text) return;
+      if (panel.agent.busy) throw new Error("Claude đang chạy — bấm dừng trước đã.");
+      panel.agent.send(text);
+      return;
+    }
+
+    if (msg.type === "stop") {
+      panel.agent.stop();
+      return;
+    }
+
+    if (msg.type === "attach_tab") {
+      const result = await attachPanelTab(panel, msg.windowId);
+      send({ type: "attach_tab_result", ...result });
+      return;
+    }
+  }
+
+  // Task 5 implements this for real; until then say so instead of throwing a
+  // ReferenceError at the panel.
+  async function attachPanelTab(_panel, _windowId) {
+    return { ok: false, error: "chưa hiện thực" };
   }
 
   // WebSocket endpoints: /ws for the extension bridge, /panel for the side panel
