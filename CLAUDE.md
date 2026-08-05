@@ -144,6 +144,58 @@ the session. Log through `log()` (which is `console.error`) or `process.stderr` 
   on a caller-supplied tab id directly — before
   3.0.0, `close_tab` and `switch_tab` did exactly that, which meant either tool could close or focus
   *any* tab in the browser, not just the caller's own. That bypass is why the rule exists now.
+- The side panel gets its own `/panel` websocket rather than sharing `/ws`,
+  because `registry.attach()` closes the previous connection on token collision
+  and the panel would evict the service worker's bridge. It reuses the same
+  origin check, the same `Sec-WebSocket-Protocol` token, and the same refusal
+  codes, plus 4004 for a bridge that is not bound to loopback. `/panel` and the
+  `AgentSession` spawn behind it exist **only** when `HOST` is loopback — a
+  public bridge that spawned `claude` would let anyone holding a valid token run
+  the team's logged-in account on the host.
+- The panel's MCP Bearer token travels in the spawned `claude` child's argv
+  (inside `--mcp-config`, built by `AgentSession.mcpConfig()` in
+  `server/agent.js`), so it is readable via `ps`/`/proc/<pid>/cmdline` by any
+  other local user on the same machine, for the child's lifetime. Stated the
+  same way the `Origin` caveat above is stated, not omitted: this is a
+  deliberate tradeoff, not an oversight. The panel already requires a loopback
+  bridge, so the exposure is same-machine only, and that machine already holds
+  the token in `~/.ccchrome.json` and `chrome.storage`.
+- Known limitation, not a fixed one: a hand-typed
+  `ws://127.0.0.1:9876/ws?token=anything` still dials `/panel` on the stdio
+  bridge and evicts the extension's own connection. The stdio bridge
+  (`DEFAULT_WS_URL`, port 9876) has no path routing at all, so `/panel` lands
+  in the same connection handler as `/ws` and `registry.attach()` treats it as
+  a replacement connection (closes the old one with 4000). The panel's guard
+  in `extension/sidepanel.js` keys only on the token's presence in the saved
+  URL, not on which bridge is actually on the other end, and the stdio bridge
+  ignores both path and token. No documented flow produces that URL.
+- `attach_tab` in `extension/background.js` is the one sanctioned way a tab
+  outside the session group gets in, and it is not an MCP tool — Claude cannot
+  call it, only the user pressing the panel button can. It takes **no caller
+  parameters at all**: the extension resolves the window itself with
+  `chrome.windows.getLastFocused({windowTypes:["normal"]})` and acts on that
+  window's active tab. An earlier revision let the panel name a `windowId`,
+  reasoning that refusing `tabId` was enough. It was not — window ids are small
+  sequential integers, so anything holding the panel token could enumerate them
+  and pull every window's active tab into its own group, which is the pre-3.0.0
+  hole with lasting access instead of a single action.
+
+## Side panel chat operational notes
+
+- `~/.cc-chrome-bridge/panel` (`PANEL_CWD` in `server/index.js`) is the working
+  directory every spawned `claude` child runs in, so it accumulates that CLI's
+  own session history over time. Nothing in this repo prunes it.
+- `test/panel-protocol.test.mjs` runs a real bridge with `CC_CHROME_HOST=127.0.0.1`,
+  so it creates `~/.cc-chrome-bridge/panel` on the machine running the test as
+  a side effect, and it binds a fixed port (8793) rather than an ephemeral
+  one — a second run, or another suite already holding that port, fails to
+  start rather than picking a different one.
+- `npm run verify:sidepanel` is deliberately **not** part of `npm test`: it
+  spawns the real `claude` CLI for live chat turns (no fixture stand-in), so it
+  spends real API usage on whatever account the machine is logged into and is
+  not deterministic enough for CI. Run it by hand — `HEADED=1` is already baked
+  into the npm script — when you need to verify the actual side-panel UI
+  end-to-end.
 
 ## Conventions
 

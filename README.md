@@ -172,6 +172,71 @@ không phải theo cửa sổ: Claude không đọc/không bấm được tab ng
 vẫn có thể làm cửa sổ chứa chúng đổi kích thước. Muốn tách hẳn thì để nhóm của
 Claude ở một cửa sổ riêng.
 
+## Khung chat (side panel)
+
+Từ 3.4.0, extension có một khung chat nhúng ngay trong Chrome (side panel) —
+gõ thẳng vào đó thay vì phải mở terminal chạy `claude`. Mỗi lượt chat, server
+chạy một tiến trình `claude` mới (headless, `--tools ""`, chỉ có tool
+`mcp__chrome`) rồi stream kết quả về khung chat qua một WebSocket riêng
+(`/panel`, tách khỏi `/ws` mà extension dùng).
+
+### Bật khung chat
+
+Khung chat **chỉ bật khi bridge chạy chế độ `--http` và bind đúng
+`127.0.0.1`** — đây là chủ đích chứ không phải giới hạn tạm thời, xem [Lưu ý
+bảo mật](#lưu-ý-bảo-mật). Chạy local:
+
+```bash
+CC_CHROME_TOKENS="<token>=<tên>" CC_CHROME_HOST=127.0.0.1 node server/index.js --http
+```
+
+Dán URL `ws://127.0.0.1:8787/ws?token=<token>` vào popup extension như bình
+thường ("Địa chỉ MCP server" → **Lưu & kết nối lại**). Sau đó bấm icon
+extension → **Mở khung chat**.
+
+> **Đừng tự ghép URL kiểu `ws://127.0.0.1:9876/ws?token=...` trỏ vào server
+> stdio (port mặc định 9876)** rồi nghĩ thêm `token` vào là bật được khung
+> chat. Server stdio không định tuyến theo path, nên request `/panel` đó vẫn
+> lọt vào đúng chỗ xử lý `/ws` và **đá văng kết nối extension đang chạy
+> thật** (bị coi là một kết nối thay thế). Không hướng dẫn nào ở đây tạo ra
+> URL đó — nếu extension tự nhiên mất kết nối sau khi thử tay một URL lạ, đây
+> là lý do.
+
+### Khung chat không làm được gì
+
+Nói thẳng để khỏi hiểu nhầm:
+
+- **Claude không tự thấy tab bạn đang xem.** Nó chỉ thao tác được trên tab
+  nằm trong tab group riêng của phiên panel (như mọi phiên khác — xem [Nhóm
+  tab theo phiên](#nhóm-tab-theo-phiên)). Muốn nó làm việc trên trang đang mở,
+  bấm **Đưa tab này vào phiên** ngay trong khung chat.
+- **Agent trong panel không đọc/ghi được file nào trên máy** — chạy với
+  `--tools ""`, chỉ có đúng các tool điều khiển trình duyệt (`mcp__chrome`).
+- **Lịch sử hội thoại nằm ở tiến trình `claude` được spawn ra, không phải
+  trên server** — server không lưu gì cả, đóng khung chat là mất lịch sử
+  phiên đó.
+- **Chỉ chạy được với bridge http bind loopback** — không hoạt động ở chế độ
+  stdio mặc định, và cũng không hoạt động khi bridge chạy trên VPS/remote (kể
+  cả khi VPS tự bind `127.0.0.1` thì đó là loopback *của VPS*, không phải của
+  máy bạn).
+
+### Nếu khung chat mở chậm
+
+Mỗi lượt chat spawn một tiến trình `claude` mới — nếu máy chạy server có cấu
+hình `SessionStart` hook (ví dụ qua các plugin), hook đó chạy lại **mỗi lượt
+chat**, không chỉ một lần lúc khởi động. Trên máy phát triển tính năng này,
+việc đó cộng thêm độ trễ khởi động rõ rệt cho từng lượt trả lời — không phải
+lỗi mạng hay lỗi model, mà là chi phí cố hữu của kiến trúc spawn-mỗi-lượt.
+
+### Vận hành
+
+`~/.cc-chrome-bridge/panel` là thư mục làm việc của mọi tiến trình `claude`
+được spawn cho khung chat, nên nó tích lũy lịch sử phiên của CLI theo thời
+gian — hiện chưa có gì tự dọn, tự xóa bằng tay nếu thấy phình to.
+
+Biến môi trường riêng cho khung chat: `CC_CHROME_PANEL_TOOLS` — xem bảng
+[Cấu hình](#cấu-hình).
+
 ## Triển khai lên VPS cho cả team
 
 Chế độ `--http` cho phép cả team dùng chung **một** server: mỗi thành viên được cấp một token, Claude Code và extension của họ cùng dùng token đó để server ghép cặp đúng người — không ai điều khiển được browser của người khác.
@@ -306,6 +371,7 @@ Một người mở nhiều phiên Claude Code cùng lúc vẫn ổn — tất c
 | `CC_CHROME_MAX_TOKENS` | `100` | Trần số token động, chặn việc biến secret bị lộ thành máy phát token. Chạm trần thì `/pair` trả **503** (chờ không hết — admin phải thu hồi bớt hoặc nâng trần), khác với 429 của rate limit. Giá trị không phải số dương sẽ bị bỏ qua kèm log cảnh báo. |
 | `CC_CHROME_SESSION_TTL_MS` | `28800000` (8 tiếng) | Session MCP không hoạt động quá lâu sẽ bị đóng và dọn. |
 | `CC_CHROME_RECONNECT_GRACE_MS` | `25000` | Khi extension chưa kết nối, mỗi lệnh sẽ **chờ** ngần này rồi mới báo lỗi. Chrome huỷ service worker của extension khi cửa sổ Chrome nằm ở nền (đóng socket với mã 1001), alarm bật lại trong khoảng 30 giây — nhờ khoảng chờ này lệnh chỉ bị chậm thay vì hỏng. Phải nhỏ hơn `CC_CHROME_TIMEOUT_MS`. |
+| `CC_CHROME_PANEL_TOOLS` | `mcp__chrome` | Danh sách tool (cú pháp `--tools` của Claude Code) mà agent trong khung chat side panel được phép dùng. Chỉ có tác dụng khi khung chat bật (xem [Khung chat](#khung-chat-side-panel)). |
 | `CC_CHROME_EXTENSION_ID` | — | Chỉ chấp nhận đúng một extension ID. **Chỉ dùng được khi mọi người cài bản `.crx` đã ký** (ID in ra khi `npm run build`, do `key.pem` quyết định): cài kiểu zip + **Load unpacked** sinh ID theo đường dẫn, khác nhau trên từng máy — đặt biến này khi đó sẽ khoá cả team ra ngoài. Không đặt thì chấp nhận mọi `chrome-extension://`. Xem thêm [Lưu ý bảo mật](#lưu-ý-bảo-mật): pin này thu hẹp chứ không đóng được lỗ origin giả. |
 
 Đổi port ở phía extension: bấm icon extension → sửa "Địa chỉ MCP server" → **Lưu & kết nối lại**.
@@ -318,6 +384,7 @@ Một người mở nhiều phiên Claude Code cùng lúc vẫn ổn — tất c
 - `CC_CHROME_EXTENSION_ID=<id>` thu hẹp thêm (chỉ chấp nhận đúng một extension ID) nhưng **không đóng được lỗ trên** — origin vẫn là chuỗi do client tự khai, chỉ là phải đoán đúng thêm một ID. Và pin này **chỉ dùng được khi cả team cài bản `.crx` đã ký** (kéo thả trên Linux, hoặc enterprise policy trên Windows/macOS): cài kiểu **zip + Load unpacked** như hướng dẫn ở trên sinh ID **theo đường dẫn thư mục**, khác nhau trên máy từng người — đặt pin trong trường hợp đó sẽ khoá cả team ra ngoài.
 - Extension có quyền `<all_urls>` + `debugger` (giống extension gốc của Anthropic) — nhưng khác với bản gốc, mọi tool bị giới hạn trong tab group của phiên (xem [Nhóm tab theo phiên](#nhóm-tab-theo-phiên)): Claude chỉ thao tác được trên tab **đang nằm trong nhóm đó**, kể cả tab đã đăng nhập, chứ không phải mọi trang đang mở trong Chrome. Kéo một tab vào nhóm là tự tay cấp quyền đó cho nó. Khuyến nghị dùng một Chrome profile riêng cho automation nếu không muốn Claude đụng vào tài khoản cá nhân. Quyền `tabGroups` (thêm từ 3.0.0) chỉ dùng để tạo/quản lý nhóm này, không mở rộng thêm gì Claude thấy được.
 - Khi tool dùng debugger API (screenshot full page, eval, phím, console, network), Chrome hiện thanh thông báo *"... started debugging this browser"* — bình thường, đừng bấm Cancel khi đang chạy.
+- **Token MCP của khung chat nằm trong argv của tiến trình `claude` được spawn.** Mỗi lượt chat, server dựng chuỗi `--mcp-config '{"mcpServers":{"chrome":{...,"headers":{"Authorization":"Bearer <token>"}}}}'` rồi truyền thẳng vào dòng lệnh con — nghĩa là bất kỳ user local nào khác trên máy chạy bridge cũng đọc được token đó bằng `ps` hoặc `/proc/<pid>/cmdline` trong suốt vòng đời tiến trình. Đây là đánh đổi có chủ ý, không phải sơ suất bỏ sót. Rủi ro chỉ phát sinh khi máy đó đã có user local khác — và máy đó vốn đã giữ sẵn token này trong `~/.ccchrome.json` và `chrome.storage` của extension rồi, nên không mở thêm mặt trận rủi ro mới.
 
 ## Chạy test
 
