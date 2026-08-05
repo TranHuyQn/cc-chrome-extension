@@ -1266,6 +1266,13 @@ async function mainHttp() {
       return;
     }
 
+    // Checked before the agent-state guard so an unrecognised type always names
+    // itself: silence here would send whoever writes the panel UI hunting for a
+    // bug in the agent when the real fault is a typo in the frame they sent.
+    if (msg.type !== "prompt" && msg.type !== "stop" && msg.type !== "attach_tab") {
+      throw new Error(`Không hiểu lệnh '${String(msg.type)}' từ panel.`);
+    }
+
     if (!panel.agent) throw new Error("Chưa khởi tạo phiên — gửi 'start' trước.");
 
     if (msg.type === "prompt") {
