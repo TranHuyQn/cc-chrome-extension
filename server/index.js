@@ -1311,6 +1311,16 @@ async function mainHttp() {
 
   async function handlePanelMessage(panel, msg, send) {
     if (msg.type === "start") {
+      // Validate both replayed ids before touching any existing agent state.
+      // Validating after dispose() let a malformed frame tear down a live agent
+      // and only then throw, leaving panel.agent pointing at the disposed
+      // AgentSession — the `if (!panel.agent)` guard further down never fires,
+      // so the next `prompt` spawns a real `claude` child whose events are all
+      // swallowed by AgentSession.emit()'s `this.disposed` check. The panel
+      // looks frozen and a paid turn is consumed for nothing.
+      let sessionId = uuidOrNull(msg.sessionId, "sessionId");
+      const replayedMcpId = uuidOrNull(msg.mcpSessionId, "mcpSessionId");
+
       if (panel.agent) panel.agent.dispose();
       mkdirSync(PANEL_CWD, { recursive: true });
 
@@ -1320,7 +1330,6 @@ async function mainHttp() {
       // window; this is the backstop for every other way two panels can end up
       // holding one id — a fresh conversation, and a line saying so, instead of
       // silent corruption.
-      let sessionId = uuidOrNull(msg.sessionId, "sessionId");
       const takenOver = Boolean(sessionId) &&
         [...panels.values()].some((other) => other !== panel && other.agent?.sessionId === sessionId);
       if (takenOver) sessionId = null;
@@ -1335,7 +1344,6 @@ async function mainHttp() {
       // the group name, and a freshly minted one after a socket drop or a bridge
       // restart renames the group — stranding every tab the user attached, with
       // nothing on screen explaining why. So the panel replays it too.
-      const replayedMcpId = uuidOrNull(msg.mcpSessionId, "mcpSessionId");
       if (replayedMcpId && replayedMcpId !== panel.mcpSessionId && mcpSessionIdFree(panel, replayedMcpId)) {
         panel.mcpSessionId = replayedMcpId;
       }

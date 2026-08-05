@@ -88,8 +88,26 @@ async function run() {
   // polls chrome.windows.getLastFocused() to assert against real state rather
   // than trusting the update call's own promise resolution — focus changes in
   // a real browser are asynchronous and this is what the handler itself reads.
+  //
+  // This can only ever RAISE a window that is already at least as recent as
+  // the current last-focused one. On a machine where the Chromium app is not
+  // the frontmost OS application, chrome.windows.update(id, { focused: true })
+  // cannot raise an *older* window back to last-focused — Chrome silently
+  // no-ops the OS-level part of the request — so callers must never use this
+  // to jump back to a window created earlier than the current one. Use
+  // waitForLastFocused() (below) after creating a window instead; creation
+  // reliably wins last-focused regardless of OS-level app focus.
   async function focusWindowAndWait(windowId) {
     await sw.evaluate(async (id) => { await chrome.windows.update(id, { focused: true }); }, windowId);
+    return waitForLastFocused(windowId);
+  }
+
+  // Polls chrome.windows.getLastFocused() without issuing a windows.update()
+  // call — used right after chrome.windows.create({ focused: true }), which
+  // this test harness has confirmed reliably wins last-focused on this
+  // platform even when the terminal (not Chromium) holds OS-level focus,
+  // unlike re-focusing an older window through the update() path above.
+  async function waitForLastFocused(windowId) {
     for (let i = 0; i < 40; i++) {
       const lastFocused = await sw.evaluate(async () => (await chrome.windows.getLastFocused()).id);
       if (lastFocused === windowId) return true;
@@ -120,44 +138,55 @@ async function run() {
 
   // --- attach_tab follows FOCUS, not a fixed or first window -----------------
   //
-  // The core constraint the whole redesign exists to prove: switching which
-  // window is focused switches which window's tab attach_tab acts on. A
-  // handler that ignored focus (a caller-supplied id, or windows.getAll()[0])
-  // would either always act on the same window or act on the wrong one here.
+  // The core constraint the whole redesign exists to prove: which window is
+  // last-focused determines which window's tab attach_tab acts on. A handler
+  // that ignored focus (a caller-supplied id, or windows.getAll()[0]) would
+  // either always act on the same window or act on the wrong one here.
+  //
+  // This is driven by CREATION order, not by re-focusing an older window with
+  // chrome.windows.update(): on a machine where the Chromium app is not the
+  // frontmost OS application, that update() cannot raise an *older* window
+  // back to last-focused, and chrome.windows.getLastFocused() then degrades
+  // to simply the most recently created window — which made this section
+  // fail merely because a terminal, not Chromium, held OS focus, regardless
+  // of whether attach_tab itself was correct. Window creation does not have
+  // that problem: it reliably wins last-focused on this platform even then.
+  // So window B is created strictly after window A and never re-focused back
+  // to A — B's later creation is what proves attach_tab tracks focus rather
+  // than always picking the first window it ever saw.
 
   const SESSION_FOCUS = "aaaa-focus-follows-session";
   const winA = await createWindow();
-  const winB = await createWindow();
-
-  const focusedA = await focusWindowAndWait(winA.windowId);
-  check("test harness can focus window A", focusedA);
+  const focusedA = await waitForLastFocused(winA.windowId);
+  check("window A is last-focused right after creation", focusedA);
 
   const resultA = await attachTab(SESSION_FOCUS);
-  check("attach_tab (A focused) reports ok and A's active tab id", resultA.ok === true && resultA.tabId === winA.tabId, JSON.stringify(resultA));
+  check("attach_tab (A just created) reports ok and A's active tab id", resultA.ok === true && resultA.tabId === winA.tabId, JSON.stringify(resultA));
 
-  const [groupAAfterA, groupBAfterA] = await Promise.all([groupOf(winA.tabId), groupOf(winB.tabId)]);
-  check(
-    "with A focused: A's active tab moved and B's active tab did not",
-    groupAAfterA.groupId >= 0 && groupBAfterA.groupId === -1,
-    JSON.stringify({ groupAAfterA, groupBAfterA })
-  );
+  const groupAAfterA = await groupOf(winA.tabId);
+  check("A's active tab was moved into a group", groupAAfterA.groupId >= 0, JSON.stringify(groupAAfterA));
 
-  const focusedB = await focusWindowAndWait(winB.windowId);
-  check("test harness can focus window B", focusedB);
+  const winB = await createWindow();
+  const focusedB = await waitForLastFocused(winB.windowId);
+  check("window B is last-focused right after creation, ahead of A", focusedB);
 
   const resultB = await attachTab(SESSION_FOCUS);
-  check("attach_tab (B focused) reports ok and B's active tab id", resultB.ok === true && resultB.tabId === winB.tabId, JSON.stringify(resultB));
+  check(
+    "attach_tab (B just created) reports ok and B's active tab id, not A's",
+    resultB.ok === true && resultB.tabId === winB.tabId,
+    JSON.stringify(resultB)
+  );
 
   const [groupAAfterB, groupBAfterB] = await Promise.all([groupOf(winA.tabId), groupOf(winB.tabId)]);
   check(
-    "with B focused (the reverse): B's active tab moved too, and A's earlier grouping was left untouched",
+    "with B now last-focused: B's active tab moved too, and A's earlier grouping was left untouched",
     groupBAfterB.groupId >= 0 && groupAAfterB.groupId === groupAAfterA.groupId,
     JSON.stringify({ groupAAfterA, groupAAfterB, groupBAfterB })
   );
 
   const expectedTitleFocus = await sessionGroupTitleOf(SESSION_FOCUS);
   check(
-    "both tabs, attached from different focused windows in the same session, land in the one group sessionGroupTitle() names",
+    "both tabs, attached from windows created in sequence in the same session, land in the one group sessionGroupTitle() names",
     groupAAfterB.title === expectedTitleFocus && groupBAfterB.title === expectedTitleFocus,
     JSON.stringify({ groupAAfterB, groupBAfterB, expectedTitleFocus })
   );

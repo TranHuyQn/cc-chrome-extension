@@ -340,6 +340,20 @@ const badId = await panelB.waitFor((f) => f.type === "error" && /sessionId/.test
 check("a sessionId that is not a UUID is refused before it can reach argv",
   !!badId, JSON.stringify(panelB.frames));
 
+// This is the exact frame shape that used to dispose panelB's live agent
+// (the one from its earlier successful `start` above) before uuidOrNull()
+// ever ran, so the throw happened too late to stop it: panel.agent was left
+// pointing at a disposed AgentSession, `if (!panel.agent)` never caught it,
+// and the next `prompt` spawned a real `claude` child whose turn_start /
+// delta / turn_end were all swallowed by AgentSession.emit()'s `this.disposed`
+// guard — a paid turn consumed with nothing shown for it. Checking for the
+// error frame alone (above) would not have caught that: the fix is proven
+// only by showing the panel still works afterwards.
+panelB.send({ type: "prompt", text: "vẫn dùng được sau khi start hỏng" });
+const turnStartAfterBadStart = await panelB.waitFor((f) => f.type === "turn_start", 5000);
+check("the panel is still usable after a rejected start: the prompt reaches the still-live agent and turn_start arrives",
+  !!turnStartAfterBadStart, JSON.stringify(panelB.frames));
+
 // --- the reconnect case: the tab group survives ------------------------------
 //
 // `panel` (the first socket in this file) is closed by now, so the id it used
