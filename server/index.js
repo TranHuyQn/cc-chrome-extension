@@ -1306,7 +1306,7 @@ async function mainHttp() {
     }
 
     if (msg.type === "attach_tab") {
-      const result = await attachPanelTab(panel, msg.windowId);
+      const result = await attachPanelTab(panel);
       send({ type: "attach_tab_result", ...result });
       return;
     }
@@ -1315,24 +1315,18 @@ async function mainHttp() {
   // Reaches the extension over the bridge socket the same way a tool call does,
   // but carries the panel's own MCP session id so the tab lands in the panel's
   // group rather than the terminal session's.
-  async function attachPanelTab(panel, windowId) {
-    const win = Number(windowId);
-    // Mirrors the guard in extension/background.js's attach_tab handler:
-    // Chrome window ids are always positive, so this also rejects the
-    // WINDOW_ID_CURRENT (-2) / WINDOW_ID_NONE (-1) sentinels, which
-    // chrome.tabs.query still honours and which would otherwise resolve to
-    // some window the caller never actually named.
-    if (!Number.isInteger(win) || win <= 0) {
-      return { ok: false, error: "thiếu windowId" };
-    }
+  //
+  // Takes no windowId: an earlier version accepted one from the panel and
+  // validated it, but Chrome window ids are small sequential integers — a
+  // local process holding the panel token could enumerate 1..N and pull an
+  // arbitrary window's active tab into its group, not just the one the user
+  // meant to share. The fix is that the extension itself derives the
+  // focused window at handling time (see attach_tab in
+  // extension/background.js), so there is no parameter here to validate.
+  async function attachPanelTab(panel) {
     try {
       const conn = await registry.require(panel.token);
-      const result = await conn.call(
-        "attach_tab",
-        { windowId: win },
-        REQUEST_TIMEOUT_MS,
-        panel.mcpSessionId
-      );
+      const result = await conn.call("attach_tab", {}, REQUEST_TIMEOUT_MS, panel.mcpSessionId);
       return { ok: true, title: result.title, url: result.url };
     } catch (err) {
       // The extension's error messages here are written for Claude to act on

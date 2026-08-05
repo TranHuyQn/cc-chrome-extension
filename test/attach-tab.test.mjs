@@ -2,23 +2,26 @@
 // in (see the comment on `attach_tab` in extension/background.js and on
 // `attachPanelTab` in server/index.js). Getting its constraints wrong is the
 // worst possible outcome for this codebase, so this proves them against real
-// chrome.tabGroups/chrome.tabs state rather than the handler's return value:
+// chrome.tabGroups/chrome.tabs/chrome.windows state rather than the
+// handler's return value:
 //
-//   - the ACTIVE tab of a given windowId is pulled into the session's group,
-//     under the exact title sessionGroupTitle() derives for that session id
-//   - a second, non-active tab in the same window is left alone — this is
-//     what catches someone later adding tabId support to the handler
+//   - attach_tab takes NO parameters. An earlier version accepted a
+//     caller-supplied windowId, guarded against non-numeric values and
+//     Chrome's window-id sentinels — but Chrome window ids are small
+//     sequential integers, so a local process holding the panel token could
+//     enumerate 1..N and pull an *arbitrary* window's active tab into its
+//     group regardless of any guard on the value. The fix was removing the
+//     parameter, not tightening its validation: the extension derives the
+//     focused window itself, at handling time.
+//   - the active tab of the FOCUSED window is pulled into the session's
+//     group; switching focus between two windows and calling again acts on
+//     the newly focused window's tab, never the other one — this is the
+//     assertion that would fail if a caller-supplied id or windows.getAll()[0]
+//     ever crept back in
+//   - within that focused window, it is specifically the active tab, not
+//     just the first tab in tab-strip order
 //   - a browser-internal page (chrome://settings) is refused, not grouped
-//   - a missing or non-numeric windowId is rejected rather than silently
-//     acting on some default window
-//   - Chrome's window-id sentinels (WINDOW_ID_CURRENT = -2, WINDOW_ID_NONE =
-//     -1) are rejected too: chrome.tabs.query() honours both, so a bare
-//     Number.isInteger() guard lets them straight through to "some default
-//     window" — exactly what this handler exists to refuse. Confirmed
-//     against real Chromium: before the `windowId <= 0` guard was added,
-//     `handlers.attach_tab({ windowId: -2 })` returned `{ ok: true, tabId:
-//     ..., groupId: ... }` for the active tab of the *current* window, and
-//     `windowId: -1` did the same.
+//   - a focused popup window is never acted on (windowTypes: ["normal"])
 //
 // Usage: HEADED=1 node test/attach-tab.test.mjs
 
@@ -59,55 +62,101 @@ if (!sw) sw = await context.waitForEvent("serviceworker", { timeout: 15000 });
 
 // Calling handlers.attach_tab directly (not through handleRequest) skips the
 // error->response translation handleRequest normally does, so wrap it the
-// same way here: a throw becomes { ok: false, error }.
-const attachTab = async (windowId, session) =>
-  await sw.evaluate(
-    async ([win, sess]) => {
-      try {
-        return await handlers.attach_tab({ windowId: win, __session: sess });
-      } catch (e) {
-        return { ok: false, error: e.message };
-      }
-    },
-    [windowId, session]
-  );
+// same way here: a throw becomes { ok: false, error }. No windowId is ever
+// passed — the handler takes none.
+const attachTab = async (session) =>
+  await sw.evaluate(async (sess) => {
+    try {
+      return await handlers.attach_tab({ __session: sess });
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  }, session);
 
 const sessionGroupTitleOf = async (session) => await sw.evaluate((s) => sessionGroupTitle(s), session);
 
 /* eslint-enable no-undef */
 
-// --- the active tab of a given window gets pulled into the session's group --
+// chrome.windows.update() returns once the change is applied, but this still
+// polls chrome.windows.getLastFocused() to assert against real state rather
+// than trusting the update call's own promise resolution — focus changes in
+// a real browser are asynchronous and this is what the handler itself reads.
+async function focusWindowAndWait(windowId) {
+  await sw.evaluate(async (id) => { await chrome.windows.update(id, { focused: true }); }, windowId);
+  for (let i = 0; i < 40; i++) {
+    const lastFocused = await sw.evaluate(async () => (await chrome.windows.getLastFocused()).id);
+    if (lastFocused === windowId) return true;
+    await sleep(50);
+  }
+  return false;
+}
 
-// sessionGroupTitle() derives the title from only the first 4 characters left
-// after stripping dashes, so these must differ in their LEADING characters —
-// a shared "attach-tab-session-" prefix would collapse every one of them into
-// the same tab group title and silently defeat the isolation these checks
-// are meant to prove.
-const SESSION_A = "aaaa-attach-tab-session";
-const expectedTitleA = await sessionGroupTitleOf(SESSION_A);
+const createWindow = async (url = "about:blank", extra = {}) =>
+  await sw.evaluate(async ([u, opts]) => {
+    const w = await chrome.windows.create({ url: u, focused: true, ...opts });
+    return { windowId: w.id, tabId: w.tabs[0].id, type: w.type };
+  }, [url, extra]);
 
-const win1 = await sw.evaluate(async (url) => {
-  const w = await chrome.windows.create({ url, focused: true });
-  return { windowId: w.id, tabId: w.tabs[0].id };
-}, "about:blank");
+// --- attach_tab follows FOCUS, not a fixed or first window -------------------
+//
+// The core constraint the whole redesign exists to prove: switching which
+// window is focused switches which window's tab attach_tab acts on. A
+// handler that ignored focus (a caller-supplied id, or windows.getAll()[0])
+// would either always act on the same window or act on the wrong one here.
 
-const result1 = await attachTab(win1.windowId, SESSION_A);
-check("attach_tab reports ok and the active tab's id", result1.ok === true && result1.tabId === win1.tabId, JSON.stringify(result1));
+const SESSION_FOCUS = "aaaa-focus-follows-session";
+const winA = await createWindow();
+const winB = await createWindow();
 
-const grouped1 = await sw.evaluate(async (id) => {
-  const t = await chrome.tabs.get(id);
-  const g = t.groupId >= 0 ? await chrome.tabGroups.get(t.groupId) : null;
-  return { groupId: t.groupId, groupTitle: g ? g.title : null };
-}, win1.tabId);
-check("real chrome.tabGroups state: the tab is actually grouped", grouped1.groupId >= 0, JSON.stringify(grouped1));
+const focusedA = await focusWindowAndWait(winA.windowId);
+check("test harness can focus window A", focusedA);
+
+const resultA = await attachTab(SESSION_FOCUS);
+check("attach_tab (A focused) reports ok and A's active tab id", resultA.ok === true && resultA.tabId === winA.tabId, JSON.stringify(resultA));
+
+const afterA = await sw.evaluate(async ([a, b]) => {
+  const ta = await chrome.tabs.get(a);
+  const tb = await chrome.tabs.get(b);
+  return { aGroup: ta.groupId, bGroup: tb.groupId };
+}, [winA.tabId, winB.tabId]);
 check(
-  "the group's title is exactly what sessionGroupTitle() derives for this session id",
-  grouped1.groupTitle === expectedTitleA,
-  JSON.stringify({ got: grouped1.groupTitle, expected: expectedTitleA })
+  "with A focused: A's active tab moved and B's active tab did not",
+  afterA.aGroup >= 0 && afterA.bGroup === -1,
+  JSON.stringify(afterA)
 );
 
-// --- only the ACTIVE tab moves, and specifically the active one, not just --
-// --- "whichever tab query() returns first" ----------------------------------
+const focusedB = await focusWindowAndWait(winB.windowId);
+check("test harness can focus window B", focusedB);
+
+const resultB = await attachTab(SESSION_FOCUS);
+check("attach_tab (B focused) reports ok and B's active tab id", resultB.ok === true && resultB.tabId === winB.tabId, JSON.stringify(resultB));
+
+const afterB = await sw.evaluate(async ([a, b]) => {
+  const ta = await chrome.tabs.get(a);
+  const tb = await chrome.tabs.get(b);
+  return { aGroup: ta.groupId, bGroup: tb.groupId };
+}, [winA.tabId, winB.tabId]);
+check(
+  "with B focused (the reverse): B's active tab moved too, and A's earlier grouping was left untouched",
+  afterB.bGroup >= 0 && afterB.aGroup === afterA.aGroup,
+  JSON.stringify({ afterA, afterB })
+);
+
+const expectedTitleFocus = await sessionGroupTitleOf(SESSION_FOCUS);
+const focusGroupTitles = await sw.evaluate(async ([a, b]) => {
+  const ta = await chrome.tabs.get(a);
+  const tb = await chrome.tabs.get(b);
+  const ga = await chrome.tabGroups.get(ta.groupId);
+  const gb = await chrome.tabGroups.get(tb.groupId);
+  return { aTitle: ga.title, bTitle: gb.title };
+}, [winA.tabId, winB.tabId]);
+check(
+  "both tabs, attached from different focused windows in the same session, land in the one group sessionGroupTitle() names",
+  focusGroupTitles.aTitle === expectedTitleFocus && focusGroupTitles.bTitle === expectedTitleFocus,
+  JSON.stringify({ focusGroupTitles, expectedTitleFocus })
+);
+
+// --- within the focused window: the ACTIVE tab, not just the first tab ------
 //
 // firstTabId is deliberately left as the window's first tab AND left
 // inactive, while secondTabId is created after it and made active. A handler
@@ -116,101 +165,106 @@ check(
 // happens to also be tab index 0. Only activating the *second* tab pins the
 // actual constraint.
 
-const SESSION_B = "bbbb-attach-tab-session";
-const win2 = await sw.evaluate(async (url) => {
-  const w = await chrome.windows.create({ url, focused: true });
-  return { windowId: w.id, tabId: w.tabs[0].id };
-}, "about:blank");
-const firstTabId = win2.tabId;
+const SESSION_ACTIVE = "bbbb-active-not-first-session";
+const winC = await createWindow();
+await focusWindowAndWait(winC.windowId);
+const firstTabId = winC.tabId;
 const secondTabId = await sw.evaluate(async (windowId) => {
   // active: true (the default) — this is the tab attach_tab must pick.
   const t = await chrome.tabs.create({ windowId, url: "about:blank", active: true });
   return t.id;
-}, win2.windowId);
+}, winC.windowId);
 
-const result2 = await attachTab(win2.windowId, SESSION_B);
-check("attach_tab acts on the active (second, not first) tab of the window", result2.ok === true && result2.tabId === secondTabId, JSON.stringify(result2));
+const resultActive = await attachTab(SESSION_ACTIVE);
+check(
+  "attach_tab acts on the active (second, not first) tab of the focused window",
+  resultActive.ok === true && resultActive.tabId === secondTabId,
+  JSON.stringify(resultActive)
+);
 
 const firstGroupId = await sw.evaluate(async (id) => (await chrome.tabs.get(id)).groupId, firstTabId);
 check(
-  "the first tab in the window, which was never active, was NOT moved (would fail if tabId support were added, or if the handler took query()[0])",
+  "the first tab in the window, which was never active, was NOT moved",
   firstGroupId === -1,
   String(firstGroupId)
 );
 
 // --- a browser-internal page is refused, not grouped -------------------------
 
-const SESSION_C = "cccc-attach-tab-session";
-const win3 = await sw.evaluate(async (url) => {
-  const w = await chrome.windows.create({ url, focused: true });
-  return { windowId: w.id, tabId: w.tabs[0].id };
-}, "chrome://settings/");
+const SESSION_INTERNAL = "cccc-browser-internal-session";
+const winD = await createWindow("chrome://settings/");
+await focusWindowAndWait(winD.windowId);
 await sleep(500);
 
-const result3 = await attachTab(win3.windowId, SESSION_C);
+const resultInternal = await attachTab(SESSION_INTERNAL);
 check(
   "a chrome:// page is refused rather than grouped",
-  result3.ok === false && /browser-internal page/.test(result3.error || ""),
-  JSON.stringify(result3)
+  resultInternal.ok === false && /browser-internal page/.test(resultInternal.error || ""),
+  JSON.stringify(resultInternal)
 );
-const settingsGroupId = await sw.evaluate(async (id) => (await chrome.tabs.get(id)).groupId, win3.tabId);
+const settingsGroupId = await sw.evaluate(async (id) => (await chrome.tabs.get(id)).groupId, winD.tabId);
 check("the refused chrome:// tab stayed ungrouped", settingsGroupId === -1, String(settingsGroupId));
 
-// --- a missing or non-numeric windowId is rejected, not defaulted -----------
-
-const SESSION_D = "dddd-attach-tab-session";
-
-const resultMissing = await attachTab(undefined, SESSION_D);
-check(
-  "a missing windowId is rejected with an error",
-  resultMissing.ok === false && /numeric windowId/.test(resultMissing.error || ""),
-  JSON.stringify(resultMissing)
-);
-
-const resultNonNumeric = await attachTab("not-a-window", SESSION_D);
-check(
-  "a non-numeric windowId is rejected with an error",
-  resultNonNumeric.ok === false && /numeric windowId/.test(resultNonNumeric.error || ""),
-  JSON.stringify(resultNonNumeric)
-);
-
-// Neither bad call should have created the group or grouped any tab under it.
-const noGroupForD = await sw.evaluate(
-  async (title) => (await chrome.tabGroups.query({ title })).length,
-  await sessionGroupTitleOf(SESSION_D)
-);
-check("no group was silently created for the rejected calls", noGroupForD === 0, String(noGroupForD));
-
-// --- Chrome's window-id sentinels are rejected, not honoured -----------------
+// --- a focused popup window is never acted on --------------------------------
 //
-// -2 is WINDOW_ID_CURRENT and -1 is WINDOW_ID_NONE. chrome.tabs.query() still
-// honours both, so a guard that only checks Number.isInteger() lets a caller
-// reach "whatever window Chrome considers current" or an arbitrary window's
-// tab — silently acting on a default window is precisely what a windowId
-// requirement is supposed to prevent. A dedicated window with a known active
-// tab proves the negative: none of these calls may group it.
+// windowTypes: ["normal"] on the chrome.windows.getLastFocused() call inside
+// attach_tab means a devtools window or a popup cannot be selected even while
+// focused. chrome.windows.create({ type: "popup" }) is a plain extension API
+// call (not a Playwright-level browser window), so the test harness can
+// exercise this directly.
+//
+// The popup is deliberately given a chrome:// page (not about:blank) so the
+// discriminator runs through the REAL deployed handler instead of a
+// standalone call to the same Chrome API the handler happens to use (which
+// would pass even if windowTypes were silently dropped from
+// extension/background.js, since it doesn't touch that file's code at all):
+// if getLastFocused() ever picked the popup instead of skipping it,
+// assertScriptableUrl would throw its distinct "browser-internal page"
+// message. Any other outcome proves resolution landed on some other window.
+//
+// (Grouping winE's tab is not asserted to succeed here: while writing this
+// case, a bare chrome.tabs.group() call on a backgrounded NORMAL window was
+// observed to fail with Chrome's own "Grouping is not supported by tabs in
+// this window." whenever a popup-type window currently holds OS focus — a
+// real Chrome restriction unrelated to attach_tab, reproduced with no
+// extension code involved. It fires for the correctly-resolved window too,
+// so asserting end-to-end success would make this case fail for a reason
+// that has nothing to do with whether the popup itself got selected.)
 
-const SESSION_E = "eeee-attach-tab-session";
-const winE = await sw.evaluate(async (url) => {
-  const w = await chrome.windows.create({ url, focused: true });
-  return { windowId: w.id, tabId: w.tabs[0].id };
-}, "about:blank");
+const SESSION_POPUP = "eeee-popup-session";
+const winE = await createWindow();
+await focusWindowAndWait(winE.windowId);
 
-for (const bad of [-2, -1, 0, null]) {
-  const r = await attachTab(bad, SESSION_E);
+const popup = await createWindow("chrome://settings/", { type: "popup" });
+check("test harness can create a popup window", popup.type === "popup", JSON.stringify(popup));
+
+if (popup.type === "popup") {
+  const focusedPopup = await focusWindowAndWait(popup.windowId);
+  check("test harness can focus the popup window", focusedPopup);
+  await sleep(500); // let chrome://settings/ actually finish loading in the popup
+
+  const resultPopup = await attachTab(SESSION_POPUP);
   check(
-    `windowId ${JSON.stringify(bad)} is rejected rather than resolving to some other window`,
-    r.ok === false && /numeric windowId/.test(r.error || ""),
-    JSON.stringify(r)
+    "attach_tab, called while the popup is focused, does not resolve to the popup's own chrome:// tab " +
+    "(a dropped windowTypes filter would surface as a 'browser-internal page' refusal here)",
+    !/browser-internal page/.test(resultPopup.error || ""),
+    JSON.stringify(resultPopup)
   );
-}
+  check(
+    "attach_tab never returns the popup's own tab id",
+    resultPopup.tabId !== popup.tabId,
+    JSON.stringify(resultPopup)
+  );
 
-const winETabGroupId = await sw.evaluate(async (id) => (await chrome.tabs.get(id)).groupId, winE.tabId);
-check(
-  "none of the rejected sentinel/invalid windowIds grouped winE's active tab as a side effect",
-  winETabGroupId === -1,
-  String(winETabGroupId)
-);
+  const popupTabGroupId = await sw.evaluate(async (id) => (await chrome.tabs.get(id)).groupId, popup.tabId);
+  check(
+    "the focused popup's own tab was NOT grouped as a side effect",
+    popupTabGroupId === -1,
+    String(popupTabGroupId)
+  );
+} else {
+  console.log("SKIP  popup-window exclusion checks -- test harness could not create a popup window");
+}
 
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 await context.close();

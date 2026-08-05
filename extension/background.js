@@ -1249,23 +1249,19 @@ const handlers = {
   // the group as the user granting access, and this does that drag for them
   // when they press the button in the side panel.
   //
-  // It takes a windowId and never a tabId. A caller-supplied tabId would rebuild
-  // exactly the hole that close_tab and switch_tab had before 3.0.0 — reach any
-  // tab in the browser — except this one would also grant permanent access.
+  // It takes no parameters at all — never a windowId, and never a tabId. An
+  // earlier version accepted a caller-supplied windowId; Chrome window ids
+  // are small sequential integers, so a local process holding the panel
+  // token could enumerate 1..N and pull an *arbitrary* window's active tab
+  // into its group, not just the one the user meant to share. The fix is not
+  // a stricter validator, it is removing the parameter: the extension finds
+  // the window the user is actually looking at itself, at the moment the
+  // button is pressed, so there is nothing left for a caller to name.
   attach_tab: async (params) => {
-    const windowId = Number(params.windowId);
-    // Chrome window ids are always positive, so this also rejects the
-    // sentinels chrome.tabs.query still honours as real windowIds:
-    // WINDOW_ID_CURRENT (-2) resolves to whatever window this service worker
-    // currently considers "current", and WINDOW_ID_NONE (-1) matches tabs
-    // across windows — either one lets a caller reach a window it never
-    // named, which is exactly the "silently acting on some default window"
-    // this guard exists to prevent.
-    if (!Number.isInteger(windowId) || windowId <= 0) {
-      throw new Error("attach_tab requires a numeric windowId");
-    }
-    const [tab] = await chrome.tabs.query({ active: true, windowId });
-    if (!tab) throw new Error(`No active tab in window ${windowId}`);
+    const win = await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
+    if (!win) throw new Error("No focused browser window");
+    const [tab] = await chrome.tabs.query({ active: true, windowId: win.id });
+    if (!tab) throw new Error(`No active tab in window ${win.id}`);
     assertScriptableUrl(tab);
     const groupId = await addTabToSessionGroup(tab, params.__session);
     return { ok: true, tabId: tab.id, groupId, title: tab.title, url: tab.url };
