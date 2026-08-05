@@ -218,6 +218,46 @@ function makeSession(extra = {}) {
   session.dispose();
 }
 
+// --- 7b. a failing turn carries the CLI's own explanation -------------------
+//
+// The exit code alone reads identically for a dead session id, a crash, a bad
+// model name and an auth failure. The one sentence that tells them apart is the
+// CLI's last stderr line, and it used to reach only the server log — so the
+// panel could never say "phiên cũ không còn" instead of "exit 1".
+
+{
+  const stderrText = "Some earlier warning\n\nNo conversation found with session ID: 12345678-dead-beef-0000-000000000000";
+  const { session, events } = makeSession({
+    env: { CC_FAKE_STDERR: stderrText, CC_FAKE_EXIT: "1" },
+  });
+  session.send("mở lại một phiên đã mất");
+  for (let i = 0; i < 100 && !events.some((e) => e.type === "turn_end"); i++) await sleep(50);
+
+  const end = events.at(-1);
+  check("a non-zero exit still reports the exit code",
+    end?.type === "turn_end" && end.ok === false && end.error.includes("mã 1"),
+    JSON.stringify(end));
+  check("turn_end.error carries the CLI's last stderr line verbatim",
+    end?.error?.includes("No conversation found with session ID: 12345678-dead-beef-0000-000000000000"),
+    JSON.stringify(end));
+  check("only the LAST non-empty stderr line travels, not the whole buffer",
+    end?.error?.includes("Some earlier warning") === false,
+    JSON.stringify(end));
+  session.dispose();
+}
+
+// --- 7c. a clean turn is unchanged ------------------------------------------
+
+{
+  const { session, events } = makeSession({ env: { CC_FAKE_STDERR: "noise on a successful run" } });
+  session.send("lượt bình thường");
+  for (let i = 0; i < 100 && !events.some((e) => e.type === "turn_end"); i++) await sleep(50);
+  check("a successful turn_end still carries no error",
+    events.at(-1)?.ok === true && events.at(-1)?.error === undefined,
+    JSON.stringify(events.at(-1)));
+  session.dispose();
+}
+
 // --- 8. a disposed session emits nothing, ever ------------------------------
 //
 // dispose() SIGKILLs the child, but the kill is asynchronous and the stdout

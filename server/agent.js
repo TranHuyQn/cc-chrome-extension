@@ -121,6 +121,7 @@ export class AgentSession {
     this.stopping = false;
     this.finished = false;
     this.buffer = "";
+    this.lastStderrLine = null;
     this.emit({ type: "turn_start" });
 
     const child = spawn(this.claudeBin, this.buildArgs(), {
@@ -134,7 +135,15 @@ export class AgentSession {
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => this.onStdout(chunk));
     child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk) => this.log("[claude stderr]", chunk.trimEnd()));
+    child.stderr.on("data", (chunk) => {
+      // The full trace belongs in the server log, as before.
+      this.log("[claude stderr]", chunk.trimEnd());
+      // Only the last non-empty line is kept for the panel. It is the one that
+      // names the cause ("No conversation found with session ID: …"), and the
+      // panel is a narrow column — the rest would be unreadable there anyway.
+      const lines = chunk.split("\n").map((line) => line.trim()).filter(Boolean);
+      if (lines.length) this.lastStderrLine = lines[lines.length - 1];
+    });
 
     child.on("error", (err) => {
       this.child = null;
@@ -155,7 +164,19 @@ export class AgentSession {
       } else if (code === 0) {
         this.emit({ type: "turn_end", ok: true });
       } else {
-        this.emit({ type: "turn_end", ok: false, error: `claude thoát với mã ${code}` });
+        // The exit code alone reads the same for a dead session id, a crash, a
+        // bad model name and an auth failure. The CLI's own last line is what
+        // tells them apart, so it travels with the code instead of living only
+        // in the server log. Passed through verbatim and unclassified on
+        // purpose: deciding that "No conversation found" deserves a particular
+        // button is the panel's call, and a classifier here would be a second
+        // place to keep in sync with the CLI's wording.
+        const cause = this.lastStderrLine;
+        this.emit({
+          type: "turn_end",
+          ok: false,
+          error: cause ? `claude thoát với mã ${code}: ${cause}` : `claude thoát với mã ${code}`,
+        });
       }
     });
 
