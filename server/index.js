@@ -1334,11 +1334,25 @@ async function mainHttp() {
       // the Vietnamese panel UI. Translate the cases a user actually hits;
       // anything unrecognised passes through unchanged rather than being
       // papered over with a generic message that would hide a real fault.
+      //
+      // "No last-focused window" is Chrome's own rejection text from
+      // chrome.windows.getLastFocused({windowTypes:["normal"]}) when no
+      // normal window matches (e.g. only devtools/popup windows are open).
+      // "Grouping is not supported by tabs in this window." is Chrome's own
+      // text from chrome.tabs.group() for windows that structurally cannot
+      // hold a tab group. "No active tab in window" is attach_tab's own
+      // throw for the (now narrow, focus-then-query race) case where the
+      // window found by getLastFocused() has no active tab by the time it's
+      // queried — kept translated since it can still fire, just rarely.
       const message = /browser-internal page/.test(err.message)
         ? "Không thể thao tác trên trang nội bộ của trình duyệt (chrome://, devtools://...). Hãy chuyển sang một trang bình thường rồi thử lại."
-        : /No active tab in window/.test(err.message)
-          ? "Không tìm thấy tab đang mở trong cửa sổ này."
-          : err.message;
+        : /No last-focused window/.test(err.message)
+          ? "Không tìm thấy cửa sổ trình duyệt nào đang mở để đưa tab vào phiên."
+          : /Grouping is not supported by tabs in this window/.test(err.message)
+            ? "Không thể nhóm tab ở cửa sổ này. Hãy thử lại từ một cửa sổ trình duyệt bình thường."
+            : /No active tab in window/.test(err.message)
+              ? "Không tìm thấy tab đang mở trong cửa sổ này."
+              : err.message;
       return { ok: false, error: message };
     }
   }

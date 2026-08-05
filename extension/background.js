@@ -1258,8 +1258,12 @@ const handlers = {
   // the window the user is actually looking at itself, at the moment the
   // button is pressed, so there is nothing left for a caller to name.
   attach_tab: async (params) => {
+    // No `if (!win)` guard here: chrome.windows.getLastFocused() rejects
+    // (with "No last-focused window") rather than resolving to a falsy
+    // value when nothing matches windowTypes, so a truthiness check on its
+    // result can never fire — dead code that lies to the next reader about
+    // there being a recoverable case here.
     const win = await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
-    if (!win) throw new Error("No focused browser window");
     const [tab] = await chrome.tabs.query({ active: true, windowId: win.id });
     if (!tab) throw new Error(`No active tab in window ${win.id}`);
     assertScriptableUrl(tab);
