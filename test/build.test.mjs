@@ -5,7 +5,7 @@
 // Usage: npm install && npm install in test/, then: node test/build.test.mjs
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -93,6 +93,27 @@ check("running version matches build", version === manifest.version, version);
 await context.close();
 rmSync(unpackDir, { recursive: true, force: true });
 rmSync(userDataDir, { recursive: true, force: true });
+
+// --- release tarball --------------------------------------------------------
+
+execFileSync("node", [join(root, "scripts", "build-release.mjs")], { stdio: "inherit" });
+const tarPath = join(root, "dist", "cc-chrome-bridge.tar.gz");
+check("release tarball exists", existsSync(tarPath));
+
+const listing = execFileSync("tar", ["-tzf", tarPath], { encoding: "utf8" });
+for (const required of [
+  "server/index.js",
+  "server/agent.js",
+  "server/node_modules/ws/package.json",
+  "extension/manifest.json",
+  "extension/sidepanel.html",
+  "install.sh",
+  "uninstall.sh",
+  "service-unit.sh",
+  "ccchrome.md",
+]) {
+  check(`tarball contains ${required}`, listing.includes(required), listing.slice(0, 500));
+}
 
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build-extension.mjs",
+    "build:release": "node scripts/build-release.mjs",
     "lint": "eslint .",
     "test:build": "node test/build.test.mjs",
     "test:origin": "node test/origin.test.mjs",
