@@ -1142,6 +1142,12 @@ const handlers = {
   async press_key(params) {
     if (!params.key) throw new Error("key is required");
     const tab = await resolveTab(params);
+    // Same fix as javascript_eval: this reaches chrome.debugger, so execInTab's
+    // guard never applied to it. Injecting keystrokes into a privileged page has
+    // no legitimate use — into this extension's own options UI it means Tab and
+    // Enter onto "Lưu & kết nối lại", repointing the bridge at an arbitrary
+    // endpoint, and that setting persists in chrome.storage.
+    assertScriptableUrl(tab);
     await ensureDebugger(tab.id);
     const known = CDP_KEYS[params.key];
     const single = params.key.length === 1;
@@ -1173,6 +1179,9 @@ const handlers = {
   async type_text(params) {
     if (params.text === undefined) throw new Error("text is required");
     const tab = await resolveTab(params);
+    // See press_key: typing into a browser-internal page is the other half of
+    // repointing this extension's own "Địa chỉ MCP server" field.
+    assertScriptableUrl(tab);
     await ensureDebugger(tab.id);
     await cdp(tab.id, "Input.insertText", { text: String(params.text) });
     return { typed: String(params.text).slice(0, 80) };
@@ -1180,6 +1189,15 @@ const handlers = {
 
   async take_screenshot(params) {
     const tab = await resolveTab(params);
+    // The missing assertScriptableUrl here is a decision, not an oversight, and
+    // adding one "for consistency" with press_key/type_text/javascript_eval
+    // would be a regression in usefulness for no security gain. Those three
+    // MUTATE a privileged page — injecting keystrokes or script into this
+    // extension's own options UI repoints the bridge persistently, and there is
+    // no legitimate use for it. Capturing pixels mutates nothing, and
+    // screenshotting an internal page is sometimes genuinely useful when
+    // diagnosing. Same debugger reach, deliberately different rule.
+    //
     // Screenshots are used to inspect real visual defects (spacing, colour,
     // overflow). A fake orange edge in every image would corrupt that, so the
     // frame comes off for the capture and goes straight back on.

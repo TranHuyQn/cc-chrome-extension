@@ -130,7 +130,51 @@ async function run() {
     } catch (e) { return { ok: false, error: e.message }; }
   }, extensionId);
 
+  // --- guard 3: the other two debugger tools that MUTATE the page -----------
+  // press_key and type_text reach chrome.debugger exactly the way
+  // javascript_eval did, so execInTab's guard never applied to them either.
+  // Concretely: type_text into this extension's own "Địa chỉ MCP server" field
+  // plus press_key Tab/Enter onto "Lưu & kết nối lại" repoints the bridge at an
+  // arbitrary WebSocket endpoint, and that setting persists in chrome.storage —
+  // a durable compromise, not a one-shot read.
+  //
+  // The tab is still parked on the extension page from guard 2 above, put there
+  // with chrome.tabs.update inside the service worker, so none of this depends
+  // on navigate or new_tab having a guard.
+
+  const pressed = await sw.evaluate(async ([session, tid]) => {
+    try {
+      return { ok: true, value: await handlers.press_key({ tabId: tid, key: "Enter", __session: session }) };
+    } catch (e) { return { ok: false, error: e.message }; }
+  }, [SESSION, tabId]);
+
+  const typed = await sw.evaluate(async ([session, tid]) => {
+    try {
+      return { ok: true, value: await handlers.type_text({ tabId: tid, text: "ws://attacker.example/ws", __session: session }) };
+    } catch (e) { return { ok: false, error: e.message }; }
+  }, [SESSION, tabId]);
+
+  // take_screenshot deliberately has NO such guard, and this asserts the
+  // decision rather than the absence of code: capturing pixels mutates nothing
+  // and screenshotting an internal page is genuinely useful when diagnosing,
+  // whereas injecting keystrokes into one has no legitimate use. Someone will
+  // eventually notice the inconsistency and "fix" it — this check is what tells
+  // them it was chosen.
+  const shot = await sw.evaluate(async ([session, tid]) => {
+    try {
+      return { ok: true, value: await handlers.take_screenshot({ tabId: tid, __session: session }) };
+    } catch (e) { return { ok: false, error: e.message }; }
+  }, [SESSION, tabId]);
+
   /* eslint-enable no-undef */
+
+  check("press_key is refused on an extension page",
+    pressed.ok === false && /browser-internal page/.test(pressed.error || ""), JSON.stringify(pressed));
+  check("type_text is refused on an extension page",
+    typed.ok === false && /browser-internal page/.test(typed.error || ""), JSON.stringify(typed));
+  check("take_screenshot on the same page still SUCCEEDS (deliberate asymmetry, not an oversight)",
+    shot.ok === true && typeof shot.value?.base64 === "string" && shot.value.base64.length > 0,
+    JSON.stringify({ ok: shot.ok, error: shot.error, base64Length: shot.value?.base64?.length }));
 
   check("a tab navigating to an extension page is not scriptable (pendingUrl, not just url)",
     pendingCase.ok === false && /browser-internal page/.test(pendingCase.error || ""),
