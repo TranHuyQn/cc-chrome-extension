@@ -92,6 +92,26 @@ Chạy không cần VPS (server stdio trên máy này):
 3. `claude mcp add --scope user chrome -- node <đường-dẫn-tuyệt-đối>/server/index.js`
 4. Nhắc: mở Chrome với extension đã cài (Load unpacked), URL mặc định `ws://127.0.0.1:9876` là dùng được ngay; khởi động lại phiên `claude` để thấy tools.
 
+### Muốn dùng khung chat (side panel)?
+
+Khung chat trong extension **chỉ hoạt động khi bridge chạy chế độ `--http` và
+bind đúng `127.0.0.1`** — chế độ stdio ở trên (mục 1-4) không bật được nó, dù
+vẫn chạy bình thường cho các tool khác. Nếu người dùng nói muốn thử khung
+chat, chạy thêm nhánh này thay vì (hoặc cùng với) mục 3:
+
+1. Sinh một token bất kỳ (khuyên `openssl rand -hex 16`), rồi chạy:
+   ```bash
+   CC_CHROME_TOKENS="<token>=<tên>" CC_CHROME_HOST=127.0.0.1 node <đường-dẫn-tuyệt-đối>/server/index.js --http
+   ```
+2. Dán URL sau vào popup extension ("Địa chỉ MCP server" → **Lưu & kết nối
+   lại**):
+   ```
+   ws://127.0.0.1:8787/ws?token=<token>
+   ```
+3. Bấm icon extension → **Mở khung chat**. Nhắc người dùng: khung chat không
+   liên quan gì tới việc đăng ký MCP server ở mục 3 phía trên — nó chạy độc
+   lập, gõ thẳng trong panel chứ không qua Claude Code.
+
 ## Lưu ý chung
 
 - Luôn dùng đúng URL/token đã lưu, đừng tự bịa.

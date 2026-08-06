@@ -144,6 +144,117 @@ the session. Log through `log()` (which is `console.error`) or `process.stderr` 
   on a caller-supplied tab id directly — before
   3.0.0, `close_tab` and `switch_tab` did exactly that, which meant either tool could close or focus
   *any* tab in the browser, not just the caller's own. That bypass is why the rule exists now.
+- The side panel gets its own `/panel` websocket rather than sharing `/ws`,
+  because `registry.attach()` closes the previous connection on token collision
+  and the panel would evict the service worker's bridge. It reuses the same
+  origin check, the same `Sec-WebSocket-Protocol` token, and the same refusal
+  codes, plus 4004 of its own. `/panel` and the `AgentSession` spawn behind it
+  exist **only** when nobody but this machine can reach the bridge, and that is
+  three conditions, not one (`panelRefusalReason()` in `server/index.js`, backed
+  by `server/loopback.js`): `HOST` is loopback, **and** `req.socket.remoteAddress`
+  is loopback (IPv4-mapped `::ffff:127.0.0.1` included), **and** the upgrade
+  carries no `X-Forwarded-For`/`-Proto`/`-Host`. A `HOST`-only check is not
+  enough and this repo ships the counterexample: `deploy/chrome-bridge.service`
+  sets `CC_CHROME_HOST=127.0.0.1` *because* a TLS reverse proxy sits in front of
+  it, so a bind-address gate would declare that VPS private and let anyone with
+  a token spawn `claude` on it under the host's logged-in account. A proxy's own
+  peer address is loopback too, which is why the forwarded headers are checked
+  by presence. Deliberately **not** overridable by an env var — a switch that
+  re-enables this is a switch someone will flip. `/ws` is unaffected: the
+  extension bridge is *meant* to work through a proxy.
+- The panel's MCP Bearer token travels in the spawned `claude` child's argv
+  (inside `--mcp-config`, built by `AgentSession.mcpConfig()` in
+  `server/agent.js`), so it is readable via `ps`/`/proc/<pid>/cmdline` by any
+  other local user on the same machine, for the child's lifetime. Stated the
+  same way the `Origin` caveat above is stated, not omitted: this is a
+  deliberate tradeoff, not an oversight. The panel already requires a loopback
+  bridge, so the exposure is same-machine only, and that machine already holds
+  the token in `~/.ccchrome.json` and `chrome.storage`.
+- Known limitation, not a fixed one: a hand-typed
+  `ws://127.0.0.1:9876/ws?token=anything` still dials `/panel` on the stdio
+  bridge and evicts the extension's own connection. The stdio bridge
+  (`DEFAULT_WS_URL`, port 9876) has no path routing at all, so `/panel` lands
+  in the same connection handler as `/ws` and `registry.attach()` treats it as
+  a replacement connection (closes the old one with 4000). The panel's guard
+  in `extension/sidepanel.js` keys only on the token's presence in the saved
+  URL, not on which bridge is actually on the other end, and the stdio bridge
+  ignores both path and token. No documented flow produces that URL.
+- `attach_tab` in `extension/background.js` is the one sanctioned way a tab
+  outside the session group gets in. It is not an MCP tool, so **Claude** cannot
+  call it — but that is the only boundary that claim covers: `handleRequest`
+  dispatches whatever `method` arrives on `/ws` straight into `handlers`, so the
+  **bridge server** can call it whether or not a user pressed anything. On a
+  shared bridge that meant whoever controls that process could pull every
+  member's currently-focused tab into a group and read it. The guard is
+  `assertLoopbackBridge()`: the handler refuses unless the extension's own saved
+  bridge URL is loopback, which costs nothing legitimate because the panel only
+  works against a loopback bridge anyway. It takes **no caller
+  parameters at all**: the extension resolves the window itself with
+  `chrome.windows.getLastFocused({windowTypes:["normal"]})` and acts on that
+  window's active tab. An earlier revision let the panel name a `windowId`,
+  reasoning that refusing `tabId` was enough. It was not — window ids are small
+  sequential integers, so anything holding the panel token could enumerate them
+  and pull every window's active tab into its own group, which is the pre-3.0.0
+  hole with lasting access instead of a single action.
+
+- A panel replays **two** ids on `start`, and both are caller-supplied:
+  `sessionId` (reaches argv as `claude --resume`, so it is validated against a
+  UUID shape before it can get there) and `mcpSessionId` (names the tab group).
+  The second exists because the conversation survives a reconnect via `--resume`
+  while the tab group did not: a freshly minted id renamed the group and
+  stranded every tab the user had attached. Either id is refused and replaced
+  with a fresh one when something live already holds it — another open panel for
+  `sessionId`, an open panel or a live MCP session for `mcpSessionId` — which is
+  the backstop for two panels ending up with one id. The extension keys its
+  stored ids per window (`panelSession.<windowId>` in `chrome.storage.local`)
+  for the same reason: one extension-global key made two windows resume one
+  conversation.
+- **Known hole, verified in a real browser, not fixed here:**
+  `chrome.debugger.attach` succeeds on this extension's *own*
+  `chrome-extension://<id>/sidepanel.html` and `popup.html`, and `javascript_eval`
+  never calls `assertScriptableUrl` (only `execInTab` does), nor does `navigate`.
+  So a model can `navigate` a tab already in its own group to the extension's own
+  page and then `javascript_eval` there — that code runs in the extension's
+  privileged realm with `chrome.tabs.*`, which defeats `resolveTabInGroup`
+  entirely (confirmed end-to-end: `chrome.tabs.query({})` returned every tab in
+  the browser). Chrome blocks attach on `chrome://` but not on
+  `chrome-extension://`. Pre-existing, predates the side panel branch, and needs
+  its own decision (deny `chrome-extension://` in `javascript_eval`, or refuse to
+  `navigate` there at all).
+
+## Side panel chat operational notes
+
+- `AgentSession.buildArgs()` in `server/agent.js` passes `--setting-sources
+  project` to every spawned `claude` child. This is load-bearing, not
+  redundant with `--strict-mcp-config`: user-level settings
+  (`~/.claude/settings.json`) can carry `enabledPlugins`, and a plugin's
+  `SessionStart` hook runs on *every* spawned child, not once — which made
+  "Phiên mới" look broken (the panel's log cleared and the server correctly
+  minted a fresh session id and `--session-id`, but the child still recalled
+  unrelated work from other projects, injected by the hook, not by
+  conversation history). Confirmed empirically: without the flag,
+  `system:init`'s `plugins` field was non-empty and a real `SessionStart` hook
+  fired on every turn (verified via its own disk side effect); with the flag,
+  `plugins: []` and the hook did not run, on the same machine and the same
+  `~/.claude/settings.json`. Isolating the panel this way is deliberate, not
+  just a bugfix: it matches the original Claude for Chrome extension (fully
+  ephemeral between sessions) and Claude's own memory feature (siloed per
+  project) — the panel agent should not see the user's global plugins, hooks,
+  or cross-project memory at all.
+- `~/.cc-chrome-bridge/panel` (`PANEL_CWD` in `server/index.js`) is the working
+  directory every spawned `claude` child runs in, so it accumulates that CLI's
+  own session history over time. Nothing in this repo prunes it.
+- `test/panel-protocol.test.mjs` runs a real bridge with `CC_CHROME_HOST=127.0.0.1`,
+  so it creates `~/.cc-chrome-bridge/panel` on the machine running the test as
+  a side effect, and it binds a fixed port (8793) rather than an ephemeral
+  one — a second run, or another suite already holding that port, fails to
+  start rather than picking a different one.
+- `npm run verify:sidepanel` is deliberately **not** part of `npm test`: it
+  spawns the real `claude` CLI for live chat turns (no fixture stand-in), so it
+  spends real API usage on whatever account the machine is logged into and is
+  not deterministic enough for CI. Run it by hand — `HEADED=1` is already baked
+  into the npm script — when you need to verify the actual side-panel UI
+  end-to-end.
 
 ## Conventions
 

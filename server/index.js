@@ -20,12 +20,15 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { WebSocketServer } from "ws";
 import { createServer } from "node:http";
 import { randomUUID, randomBytes, timingSafeEqual } from "node:crypto";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { TokenStore } from "./tokens.js";
 import { RateLimiter, clientIp } from "./ratelimit.js";
+import { AgentSession } from "./agent.js";
+import { isLoopbackHost, isLoopbackAddress, forwardedHeadersIn } from "./loopback.js";
 
 const MODE = process.argv.includes("--http") || process.env.CC_CHROME_MODE === "http" ? "http" : "stdio";
 const PORT = Number(process.env.CC_CHROME_PORT || (MODE === "http" ? 8787 : 9876));
@@ -42,7 +45,45 @@ const REQUEST_TIMEOUT_MS = Number(process.env.CC_CHROME_TIMEOUT_MS || 45000);
 // CC_CHROME_SESSION_TTL_MS.
 const graceFromEnv = Number(process.env.CC_CHROME_RECONNECT_GRACE_MS);
 const RECONNECT_GRACE_MS = Number.isFinite(graceFromEnv) && graceFromEnv >= 0 ? graceFromEnv : 25000;
-const VERSION = "3.3.0";
+const VERSION = "3.4.0";
+
+// The panel spawns `claude` on this host with the team's logged-in account, so
+// it exists only on a bridge nobody else can reach. A public deployment keeps
+// serving tools and refuses the panel outright — see panelRefusalReason() and
+// /panel below.
+const AGENT_ENABLED = isLoopbackHost(HOST);
+
+// "Bound to loopback" and "nobody but this machine can reach me" are not the
+// same claim, and this repo ships the counterexample: deploy/chrome-bridge.service
+// sets CC_CHROME_HOST=127.0.0.1 *because* a TLS reverse proxy sits in front of
+// it. A gate that only reads the bind address would call that deployment
+// private and hand the internet a process spawn on the VPS, once per chat turn,
+// under whatever account the host is logged into.
+//
+// So a /panel upgrade has to prove all three, and any one failing is a 4004:
+//   1. the bind address is loopback (kept as defence in depth),
+//   2. the peer that actually arrived is loopback,
+//   3. no X-Forwarded-* header is present — one proves a proxy is in front,
+//      whatever the peer address says (a proxy's own peer address is loopback).
+//
+// Deliberately not overridable by an environment variable. A switch that
+// re-enables this is a switch someone will eventually flip, and this is exactly
+// the setting that must not be reachable by a configuration mistake.
+function panelRefusalReason(req) {
+  if (!AGENT_ENABLED) return `bridge is bound to ${HOST}, not loopback`;
+  const peer = req.socket?.remoteAddress;
+  if (!isLoopbackAddress(peer)) return `upgrade came from ${peer || "an unknown peer"}, not loopback`;
+  const forwarded = forwardedHeadersIn(req.headers);
+  if (forwarded.length) return `upgrade carries ${forwarded.join(", ")}, so a proxy is in front of this bridge`;
+  return null;
+}
+
+// A bare IPv6 host has to be bracketed before it can go in a URL. HOST may
+// already carry brackets (CC_CHROME_HOST="[::1]"), so strip first, then add.
+function hostForUrl(host) {
+  const bare = String(host || "").replace(/^\[|\]$/g, "");
+  return bare.includes(":") ? `[${bare}]` : bare;
+}
 
 // One Chrome tab group per Claude Code session. stdio serves exactly one
 // session per process, so a value minted at startup is that session's identity;
@@ -1128,10 +1169,31 @@ async function mainHttp() {
       // New session (initialize request).
       const body = await readBody(req);
       const sessionRef = { id: null };
+      // A panel keeps one MCP session id for its whole life even though it
+      // spawns a fresh `claude` per turn. The id decides the tab group name, so
+      // letting each turn generate its own would hand every turn a brand new
+      // group and lock Claude out of the tabs it opened a moment earlier.
+      const panelId = url.searchParams.get("panel");
+      const panel = panelId ? panels.get(panelId) : null;
+      if (panelId && !panel) {
+        return json(res, 404, { error: "unknown panel id" });
+      }
+      if (panel && panel.token !== token) {
+        return json(res, 403, { error: "panel belongs to a different token" });
+      }
       const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: randomUUID,
+        sessionIdGenerator: () => (panel ? panel.mcpSessionId : randomUUID()),
         onsessioninitialized: (id) => {
           sessionRef.id = id;
+          // The previous turn's transport still holds this id. Close it first,
+          // or its entry is silently overwritten and never cleaned up.
+          const previous = sessions.get(id);
+          if (previous && previous.transport !== transport) {
+            // close() is async: a plain try/catch would let a rejection escape
+            // as an unhandled rejection, which Node ≥15 treats as fatal. This
+            // runs on every single turn, so it has to be the safe form.
+            Promise.resolve(previous.transport.close()).catch(() => { /* already gone */ });
+          }
           sessions.set(id, { transport, token, lastSeen: Date.now() });
         },
       });
@@ -1153,14 +1215,270 @@ async function mainHttp() {
     }
   });
 
-  // WebSocket endpoint for extensions: /ws (token carried in Sec-WebSocket-Protocol)
+  const PANEL_CWD = join(homedir(), ".cc-chrome-bridge", "panel");
+  // Everything under here is derived from the design's tool-set decision: the
+  // agent gets the chrome MCP tools and nothing else.
+  const PANEL_ALLOWED_TOOLS = process.env.CC_CHROME_PANEL_TOOLS || "mcp__chrome";
+  const PANEL_SYSTEM_PROMPT =
+    "Bạn là trợ lý duyệt web chạy trong khung chat bên cạnh trình duyệt Chrome của người dùng. " +
+    "Bạn chỉ có các tool điều khiển trình duyệt, không đọc/ghi được file trên máy. " +
+    "Bạn chỉ thao tác được trên các tab nằm trong tab group của phiên này; " +
+    "muốn làm việc trên một trang người dùng đang mở, hãy bảo họ bấm nút \"Đưa tab này vào phiên\". " +
+    "Trả lời ngắn gọn bằng tiếng Việt.";
+
+  // A panel proves itself by receiving a frame, mirroring the rule the extension
+  // already lives by: `open` fires for refusals too, so only a message from the
+  // server is evidence of a live socket.
+  function attachPanel(ws, token) {
+    const panelId = randomUUID();
+    const panel = {
+      id: panelId,
+      ws,
+      token,
+      agent: null,
+      // Chosen here, handed to the MCP transport when the child initializes.
+      mcpSessionId: randomUUID(),
+    };
+    panels.set(panelId, panel);
+    log(`[panel ${panelId.slice(0, 8)}] connected`);
+
+    // AgentSession.onEvent can still fire just after dispose(), by which point
+    // the socket may already be gone — a send must never throw there.
+    const send = (obj) => {
+      if (ws.readyState === 1) ws.send(JSON.stringify(obj));
+    };
+
+    ws.on("close", () => {
+      panels.delete(panelId);
+      if (panel.agent) panel.agent.dispose();
+      // The panel's MCP transport is keyed by an id only this panel ever uses,
+      // so once the panel is gone nothing can reach it again — but it would sit
+      // in `sessions` pinning a transport and an McpServer until the 8-hour
+      // idle reaper. Open and close the side panel through a working day and
+      // that is dozens of them.
+      const session = sessions.get(panel.mcpSessionId);
+      if (session) {
+        sessions.delete(panel.mcpSessionId);
+        Promise.resolve(session.transport.close()).catch(() => { /* already gone */ });
+      }
+      log(`[panel ${panelId.slice(0, 8)}] disconnected`);
+    });
+    ws.on("error", (err) => log(`[panel ${panelId.slice(0, 8)}] socket error:`, err.message));
+
+    ws.on("message", async (data) => {
+      let msg;
+      try {
+        msg = JSON.parse(data.toString());
+      } catch {
+        return;
+      }
+      try {
+        await handlePanelMessage(panel, msg, send);
+      } catch (err) {
+        send({ type: "error", message: err.message });
+      }
+    });
+
+    ws.send(JSON.stringify({ type: "hello", panelId, version: VERSION }));
+  }
+
+  // Both ids a panel may replay are caller-supplied, and one of them reaches
+  // argv: sessionId is handed to `claude --resume`/`--session-id`. spawn() takes
+  // an argv array so there is no shell to inject into, but an arbitrary string
+  // still reaches the CLI's own parser, and a value shaped like a flag is read
+  // as one. Everything the server ever hands a panel is a UUID, so anything
+  // else is a bug or an attempt — refuse it here rather than pass it on.
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const uuidOrNull = (value, field) => {
+    if (value === undefined || value === null || value === "") return null;
+    if (typeof value !== "string" || !UUID_RE.test(value)) {
+      throw new Error(`${field} không hợp lệ (phải là UUID) — bấm "Phiên mới" để bắt đầu lại.`);
+    }
+    return value;
+  };
+
+  // An mcp session id replayed by a panel may only be adopted if nothing live
+  // is using it: an id still bound to an MCP transport, or held by another open
+  // panel, would put two conversations in one tab group and let the newcomer
+  // evict the incumbent's transport.
+  const mcpSessionIdFree = (panel, id) => {
+    if (sessions.has(id)) return false;
+    for (const other of panels.values()) {
+      if (other !== panel && other.mcpSessionId === id) return false;
+    }
+    return true;
+  };
+
+  async function handlePanelMessage(panel, msg, send) {
+    if (msg.type === "start") {
+      // Validate both replayed ids before touching any existing agent state.
+      // Validating after dispose() let a malformed frame tear down a live agent
+      // and only then throw, leaving panel.agent pointing at the disposed
+      // AgentSession — the `if (!panel.agent)` guard further down never fires,
+      // so the next `prompt` spawns a real `claude` child whose events are all
+      // swallowed by AgentSession.emit()'s `this.disposed` check. The panel
+      // looks frozen and a paid turn is consumed for nothing.
+      let sessionId = uuidOrNull(msg.sessionId, "sessionId");
+      const replayedMcpId = uuidOrNull(msg.mcpSessionId, "mcpSessionId");
+
+      if (panel.agent) panel.agent.dispose();
+      mkdirSync(PANEL_CWD, { recursive: true });
+
+      // Two side panels in two Chrome windows used to load one extension-global
+      // id and both `claude --resume` the same on-disk conversation, interleaving
+      // two chats into one file. The extension now keys its stored ids per
+      // window; this is the backstop for every other way two panels can end up
+      // holding one id — a fresh conversation, and a line saying so, instead of
+      // silent corruption.
+      const takenOver = Boolean(sessionId) &&
+        [...panels.values()].some((other) => other !== panel && other.agent?.sessionId === sessionId);
+      if (takenOver) sessionId = null;
+      // A panel that reopens replays the id it remembered from `ready`, and for
+      // that id the conversation already exists on disk — the first turn has to
+      // --resume it. Only a server-generated id is genuinely new.
+      const resuming = Boolean(sessionId);
+      if (!sessionId) sessionId = randomUUID();
+
+      // The conversation survives a reconnect through --resume; without this the
+      // tab group did not. mcpSessionId is what sessionGroupTitle() hashes into
+      // the group name, and a freshly minted one after a socket drop or a bridge
+      // restart renames the group — stranding every tab the user attached, with
+      // nothing on screen explaining why. So the panel replays it too.
+      if (replayedMcpId && replayedMcpId !== panel.mcpSessionId && mcpSessionIdFree(panel, replayedMcpId)) {
+        panel.mcpSessionId = replayedMcpId;
+      }
+
+      panel.agent = new AgentSession({
+        sessionId,
+        model: msg.model || null,
+        token: panel.token,
+        // Derived from HOST, not hardcoded: with CC_CHROME_HOST=::1 the panel
+        // opens (::1 is loopback) and a hardcoded 127.0.0.1 would leave every
+        // child unable to reach /mcp at all.
+        mcpUrl: `http://${hostForUrl(HOST)}:${PORT}/mcp?panel=${panel.id}`,
+        allowedTools: PANEL_ALLOWED_TOOLS,
+        cwd: PANEL_CWD,
+        systemPrompt: PANEL_SYSTEM_PROMPT,
+        resuming,
+        onEvent: (event) => send(event),
+        log,
+      });
+      send({
+        type: "ready",
+        sessionId,
+        // Replayed back on the next `start` — see the tab-group note above.
+        mcpSessionId: panel.mcpSessionId,
+        model: msg.model || null,
+        // Must match sessionGroupTitle() in extension/background.js character
+        // for character — the panel shows the user which tab group is theirs.
+        groupTitle: `Claude · ${panel.mcpSessionId.replace(/-/g, "").slice(0, 4)}`,
+      });
+      if (takenOver) {
+        send({
+          type: "error",
+          message: "Hội thoại này đang mở ở một khung chat khác — khung chat này bắt đầu một hội thoại mới.",
+        });
+      }
+      return;
+    }
+
+    // Checked before the agent-state guard so an unrecognised type always names
+    // itself: silence here would send whoever writes the panel UI hunting for a
+    // bug in the agent when the real fault is a typo in the frame they sent.
+    if (msg.type !== "prompt" && msg.type !== "stop" && msg.type !== "attach_tab") {
+      throw new Error(`Không hiểu lệnh '${String(msg.type)}' từ panel.`);
+    }
+
+    if (!panel.agent) throw new Error("Chưa khởi tạo phiên — gửi 'start' trước.");
+
+    if (msg.type === "prompt") {
+      const text = String(msg.text || "").trim();
+      if (!text) return;
+      if (panel.agent.busy) throw new Error("Claude đang chạy — bấm dừng trước đã.");
+      panel.agent.send(text);
+      return;
+    }
+
+    if (msg.type === "stop") {
+      panel.agent.stop();
+      return;
+    }
+
+    if (msg.type === "attach_tab") {
+      const result = await attachPanelTab(panel);
+      send({ type: "attach_tab_result", ...result });
+      return;
+    }
+  }
+
+  // Reaches the extension over the bridge socket the same way a tool call does,
+  // but carries the panel's own MCP session id so the tab lands in the panel's
+  // group rather than the terminal session's.
+  //
+  // Takes no windowId: an earlier version accepted one from the panel and
+  // validated it, but Chrome window ids are small sequential integers — a
+  // local process holding the panel token could enumerate 1..N and pull an
+  // arbitrary window's active tab into its group, not just the one the user
+  // meant to share. The fix is that the extension itself derives the
+  // focused window at handling time (see attach_tab in
+  // extension/background.js), so there is no parameter here to validate.
+  async function attachPanelTab(panel) {
+    try {
+      const conn = await registry.require(panel.token);
+      const result = await conn.call("attach_tab", {}, REQUEST_TIMEOUT_MS, panel.mcpSessionId);
+      return { ok: true, title: result.title, url: result.url };
+    } catch (err) {
+      // The extension's error messages here are written for Claude to act on
+      // ("Navigate to a normal web page first."), not for the person reading
+      // the Vietnamese panel UI. Translate the cases a user actually hits;
+      // anything unrecognised passes through unchanged rather than being
+      // papered over with a generic message that would hide a real fault.
+      //
+      // "No last-focused window" is Chrome's own rejection text from
+      // chrome.windows.getLastFocused({windowTypes:["normal"]}) when no
+      // normal window matches (e.g. only devtools/popup windows are open).
+      // "Grouping is not supported by tabs in this window." is Chrome's own
+      // text from chrome.tabs.group() for windows that structurally cannot
+      // hold a tab group. "No active tab in window" is attach_tab's own
+      // throw for the (now narrow, focus-then-query race) case where the
+      // window found by getLastFocused() has no active tab by the time it's
+      // queried — kept translated since it can still fire, just rarely.
+      // "only available on a bridge running on this machine" is the extension's
+      // own refusal (assertLoopbackBridge in extension/background.js) when its
+      // saved URL points at a shared bridge. Reachable here only if the URL was
+      // changed while this panel's socket stayed open, but it is the one case
+      // where the fix is a setting the user can see.
+      const message = /only available on a bridge running on this machine/.test(err.message)
+        ? "Extension đang trỏ vào một bridge dùng chung, nên không đưa tab vào phiên được. Mở popup và đổi URL sang bridge chạy trên máy này (ws://127.0.0.1:…)."
+        : /browser-internal page/.test(err.message)
+        ? "Không thể thao tác trên trang nội bộ của trình duyệt (chrome://, devtools://...). Hãy chuyển sang một trang bình thường rồi thử lại."
+        : /No last-focused window/.test(err.message)
+          ? "Không tìm thấy cửa sổ trình duyệt nào đang mở để đưa tab vào phiên."
+          : /Grouping is not supported by tabs in this window/.test(err.message)
+            ? "Không thể nhóm tab ở cửa sổ này. Hãy thử lại từ một cửa sổ trình duyệt bình thường."
+            : /No active tab in window/.test(err.message)
+              ? "Không tìm thấy tab đang mở trong cửa sổ này."
+              : err.message;
+      return { ok: false, error: message };
+    }
+  }
+
+  // WebSocket endpoints: /ws for the extension bridge, /panel for the side panel
+  // chat. Two servers, one gate — both go through the same origin and token
+  // checks, so there is only ever one auth path to keep honest.
   const wss = new WebSocketServer({ noServer: true, handleProtocols: pickSubprotocol });
+  const panelWss = new WebSocketServer({ noServer: true, handleProtocols: pickSubprotocol });
+  const panels = new Map(); // panelId -> PanelConnection (filled in by /panel below)
+
   httpServer.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
-    if (url.pathname !== "/ws") {
+    const isPanel = url.pathname === "/panel";
+    if (url.pathname !== "/ws" && !isPanel) {
       socket.destroy();
       return;
     }
+
+    const server = isPanel ? panelWss : wss;
 
     // Rejections complete the handshake and then close with a specific code.
     // A browser cannot read the HTTP status of a failed upgrade, so destroying
@@ -1168,8 +1486,19 @@ async function mainHttp() {
     // user would see "server not running" for what is really a config error.
     // A rejected socket is never registered, so it can do nothing meanwhile.
     const reject = (code, reason) => {
-      wss.handleUpgrade(req, socket, head, (ws) => ws.close(code, reason));
+      server.handleUpgrade(req, socket, head, (ws) => ws.close(code, reason));
     };
+
+    // Checked before origin and token on purpose: on a bridge anyone else can
+    // reach, the panel does not exist at all, and saying so is not a
+    // credential leak.
+    if (isPanel) {
+      const refusal = panelRefusalReason(req);
+      if (refusal) {
+        log(`Rejected /panel upgrade: ${refusal}`);
+        return reject(4004, "panel needs a bridge only this machine can reach");
+      }
+    }
 
     const origin = req.headers.origin || "";
     if (!originAllowed(origin)) {
@@ -1187,8 +1516,9 @@ async function mainHttp() {
       return reject(4001, "invalid token");
     }
 
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      registry.attach(ws, token, tokens.get(token));
+    server.handleUpgrade(req, socket, head, (ws) => {
+      if (isPanel) attachPanel(ws, token);
+      else registry.attach(ws, token, tokens.get(token));
     });
   });
 

@@ -31,7 +31,7 @@ const crxPath = join(root, "dist", "extension.crx");
 
 const zip = new AdmZip(zipPath);
 const names = zip.getEntries().map((e) => e.entryName);
-for (const required of ["manifest.json", "background.js", "popup.html", "popup.js", "icons/icon128.png"]) {
+for (const required of ["manifest.json", "background.js", "popup.html", "popup.js", "sidepanel.html", "sidepanel.js", "icons/icon128.png"]) {
   check(`zip contains ${required}`, names.includes(required), names.join(", "));
 }
 const zippedManifest = JSON.parse(zip.readAsText("manifest.json"));
@@ -51,6 +51,13 @@ check(
   manifest.version === serverVersion && manifest.version === serverPkg.version,
   `manifest=${manifest.version} index.js=${serverVersion} package.json=${serverPkg.version}`
 );
+
+// A zip missing the side_panel declaration is still a formally valid zip, but
+// the chat panel silently refuses to open and nothing catches that.
+check("manifest declares the side panel", zippedManifest.side_panel?.default_path === "sidepanel.html",
+  JSON.stringify(zippedManifest.side_panel));
+check("manifest requests the sidePanel permission", (zippedManifest.permissions || []).includes("sidePanel"),
+  JSON.stringify(zippedManifest.permissions));
 
 // --- crx envelope -----------------------------------------------------------
 

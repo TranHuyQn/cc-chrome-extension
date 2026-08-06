@@ -29,3 +29,11 @@ document.getElementById("save").addEventListener("click", () => {
 
 refresh();
 setInterval(refresh, 1000);
+
+// chrome.sidePanel.open() requires a user gesture, and a click inside the popup
+// is one. Opening from the service worker instead throws.
+document.getElementById("openPanel").addEventListener("click", async () => {
+  const { id } = await chrome.windows.getCurrent();
+  await chrome.sidePanel.open({ windowId: id });
+  window.close();
+});

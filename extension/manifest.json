@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Claude Code Chrome Bridge",
-  "version": "3.3.0",
+  "version": "3.4.0",
   "description": "Bridge extension that lets Claude Code control Chrome through a local MCP server (no claude.ai login required).",
   "background": {
     "service_worker": "background.js"
@@ -9,6 +9,9 @@
   "action": {
     "default_popup": "popup.html",
     "default_title": "Claude Code Chrome Bridge"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
   },
   "icons": {
     "16": "icons/icon16.png",
@@ -21,7 +24,8 @@
     "debugger",
     "storage",
     "alarms",
-    "tabGroups"
+    "tabGroups",
+    "sidePanel"
   ],
   "host_permissions": ["<all_urls>"]
 }

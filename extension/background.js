@@ -126,6 +126,13 @@ function withGroupLock(title, fn) {
   return next;
 }
 
+// Regroups unconditionally: if `tab` already belongs to a different live
+// session's group, chrome.tabs.group() below silently pulls it out of that
+// group and into this one. Both the tab's original session and this one only
+// ever get a tab here through a user-initiated action (new_tab / attach_tab),
+// so a user moving their own tab between two of their own sessions is
+// acceptable — there is no guard against it on purpose, but it is easy to
+// miss on a first read.
 async function addTabToSessionGroup(tab, session) {
   const title = sessionGroupTitle(session);
   return await withGroupLock(title, async () => {
@@ -177,6 +184,33 @@ function scheduleReconnect() {
 function isLoopbackUrl(parsed) {
   const host = parsed.hostname.replace(/^\[|\]$/g, "");
   return host === "127.0.0.1" || host === "localhost" || host === "::1";
+}
+
+// attach_tab is the one tool that reaches a tab outside the session's group,
+// and it exists for a button the user presses in the side panel. But `handlers`
+// is dispatched by method name from whatever arrives on /ws, so proving the
+// model cannot reach it says nothing about the *server*: on a shared bridge,
+// whoever controls that process could call attach_tab on every member and pull
+// their currently-focused tab — banking, email — into a group it can then read,
+// with no user action at all.
+//
+// The side panel only works against a bridge on this machine (see
+// panelRefusalReason() in server/index.js), so refusing attach_tab on any other
+// bridge costs nothing legitimate and removes that reach entirely. Read from
+// storage rather than the in-memory `wsUrl` so the guard does not depend on
+// which connection attempt happens to have run last.
+async function assertLoopbackBridge() {
+  const { wsUrl: configured } = await chrome.storage.local.get({ wsUrl: DEFAULT_WS_URL });
+  let parsed = null;
+  try {
+    parsed = new URL(configured);
+  } catch { /* unparseable is not loopback */ }
+  if (!parsed || !isLoopbackUrl(parsed)) {
+    throw new Error(
+      "attach_tab is only available on a bridge running on this machine (127.0.0.1/::1). " +
+      `This extension is configured for ${configured || "(no URL)"}, so the request was refused.`
+    );
+  }
 }
 
 async function connect() {
@@ -1235,6 +1269,34 @@ const handlers = {
     const tab = await chrome.tabs.update(target.id, { active: true });
     await chrome.windows.update(tab.windowId, { focused: true });
     return { tabId: tab.id, url: tab.url, title: tab.title };
+  },
+
+  // The one deliberate way a tab outside the session group gets in. It is not a
+  // relaxation of the in-group rule: 3.0.0 already treats dragging a tab into
+  // the group as the user granting access, and this does that drag for them
+  // when they press the button in the side panel.
+  //
+  // It takes no parameters at all — never a windowId, and never a tabId. An
+  // earlier version accepted a caller-supplied windowId; Chrome window ids
+  // are small sequential integers, so a local process holding the panel
+  // token could enumerate 1..N and pull an *arbitrary* window's active tab
+  // into its group, not just the one the user meant to share. The fix is not
+  // a stricter validator, it is removing the parameter: the extension finds
+  // the window the user is actually looking at itself, at the moment the
+  // button is pressed, so there is nothing left for a caller to name.
+  attach_tab: async (params) => {
+    await assertLoopbackBridge();
+    // No `if (!win)` guard here: chrome.windows.getLastFocused() rejects
+    // (with "No last-focused window") rather than resolving to a falsy
+    // value when nothing matches windowTypes, so a truthiness check on its
+    // result can never fire — dead code that lies to the next reader about
+    // there being a recoverable case here.
+    const win = await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
+    const [tab] = await chrome.tabs.query({ active: true, windowId: win.id });
+    if (!tab) throw new Error(`No active tab in window ${win.id}`);
+    assertScriptableUrl(tab);
+    const groupId = await addTabToSessionGroup(tab, params.__session);
+    return { ok: true, tabId: tab.id, groupId, title: tab.title, url: tab.url };
   },
 
   async scroll(params) {
