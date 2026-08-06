@@ -24,10 +24,11 @@ if (!existsSync(join(root, "server", "node_modules"))) {
 // real, recurring cost for a repo with no CI workflow to absorb it instead.
 // The tradeoff this accepts: the archive ships whatever is on disk in
 // server/node_modules, which could in principle drift from
-// server/package-lock.json if someone hand-edits it. In practice that
-// drift would already show up as failures in the e2e suites (test:e2e,
-// test:http, etc.), which exercise the real server against this same
-// node_modules — so a silently-wrong dependency tree does not stay silent.
+// server/package-lock.json if someone hand-edits it. The e2e suites
+// (test:e2e, test:http, etc.) exercise the real server against this same
+// node_modules and would catch a *broken* tree, but they would stay green
+// on a merely stale-yet-working one — this is a partial safety net, not
+// proof the tree matches the lockfile.
 
 rmSync(stage, { recursive: true, force: true });
 mkdirSync(stage, { recursive: true });

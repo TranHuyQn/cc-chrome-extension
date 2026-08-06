@@ -6,6 +6,7 @@
 
 import { execFileSync } from "node:child_process";
 import { readFileSync, mkdtempSync, rmSync, existsSync } from "node:fs";
+import { gunzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +14,42 @@ import AdmZip from "adm-zip";
 import { chromium } from "playwright";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+// Walks raw tar headers instead of shelling out to `tar -tzf`. Needed
+// specifically because macOS's own `tar -tzf` hides/merges AppleDouble
+// (`._<name>`) resource-fork entries on read — the exact same tool used to
+// build the archive on this platform, so a listing built from it can never
+// see the defect it's meant to catch. Each header is a 512-byte block; a PAX
+// extended header (typeflag 'x') precedes most real entries here (bsdtar
+// emits one per entry for high-res timestamps, not just for long names) and
+// carries the real path as a "<len> path=<value>\n" record when the name
+// doesn't fit in the 100-byte name field.
+function listTarMembers(tarPath) {
+  const buf = gunzipSync(readFileSync(tarPath));
+  const names = [];
+  let offset = 0;
+  let pendingName = null;
+  while (offset + 512 <= buf.length) {
+    const header = buf.subarray(offset, offset + 512);
+    if (header.every((b) => b === 0)) break; // end-of-archive marker
+    const typeflag = String.fromCharCode(header[156]);
+    const sizeOctal = header.subarray(124, 136).toString("ascii").replace(/\0/g, "").trim();
+    const size = sizeOctal ? parseInt(sizeOctal, 8) : 0;
+    const dataBlocks = Math.ceil(size / 512);
+    if (typeflag === "x" || typeflag === "g") {
+      // PAX extended (per-entry) or global header: metadata, not a member itself.
+      const data = buf.subarray(offset + 512, offset + 512 + size).toString("utf8");
+      const match = data.match(/(?:^|\n)\d+ path=([^\n]*)\n/);
+      if (typeflag === "x" && match) pendingName = match[1];
+    } else {
+      const rawName = header.subarray(0, 100).toString("utf8").split("\0")[0];
+      names.push(pendingName || rawName);
+      pendingName = null;
+    }
+    offset += 512 + dataBlocks * 512;
+  }
+  return names;
+}
 
 let failures = 0;
 function check(name, cond, detail = "") {
@@ -125,11 +162,13 @@ for (const required of [
 
 // macOS's own `tar -czf` silently adds one `._<name>` AppleDouble
 // resource-fork entry per real entry unless COPYFILE_DISABLE=1 is set.
-// macOS's own `tar -tzf` hides and merges those on read, so this class of
-// defect is invisible from the same tool used to build the archive — a
-// Linux install (`cp -R` in install.sh) extracts them for real, permanently,
-// as junk twins of every shipped file.
-const appleDoubleEntries = [...entries].filter((e) => /(^|\/)\._/.test(e));
+// macOS's own `tar -tzf` hides and merges those on read, so a listing built
+// from it (the `entries` set above) can never see this defect — a Linux
+// install (`cp -R` in install.sh) extracts them for real, permanently, as
+// junk twins of every shipped file. listTarMembers() walks the raw headers
+// instead, so it sees exactly what a non-macOS extractor sees.
+const rawMembers = listTarMembers(tarPath);
+const appleDoubleEntries = rawMembers.filter((e) => /(^|\/)\._/.test(e));
 check("no AppleDouble (._*) junk entries", appleDoubleEntries.length === 0, appleDoubleEntries.slice(0, 10).join(", "));
 
 // fs.cpSync resolves symlinks via realpath instead of preserving their
