@@ -109,3 +109,19 @@ cc_service_stop() {
     systemctl --user daemon-reload >/dev/null 2>&1 || true
   fi
 }
+
+# cc_service_loaded — true (exit 0) if the service is still loaded/running
+# right now. Read-only, mutates nothing. Every branch of cc_service_stop ends
+# in `|| true`, on purpose (launchctl/systemctl fail in ordinary situations —
+# stale bootstrap state, WSL, ssh without lingering — and install.sh already
+# treats that as a warn-and-continue case, not a fatal one), which means its
+# own exit code can never tell a caller whether the stop actually worked.
+# This is how uninstall.sh confirms it before deleting anything the stopped
+# process might still need.
+cc_service_loaded() {
+  if [ "$(cc_platform)" = macos ]; then
+    launchctl print "gui/$(id -u)/$(cc_unit_label)" >/dev/null 2>&1
+  else
+    systemctl --user is-active --quiet "$(cc_unit_label).service" 2>/dev/null
+  fi
+}
