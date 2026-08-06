@@ -465,10 +465,51 @@ async function resolveTab(params) {
   return tab;
 }
 
+// One list, two rules. A page under these schemes is browser-internal: no tool
+// may run code in it (assertScriptableUrl), and no tool may send a tab to one
+// (assertNavigableUrl). They started as two separate regexes and immediately
+// disagreed — one carried /i and the other did not, one listed two schemes and
+// the other five — which is exactly how one guard quietly stops covering what
+// its twin covers. about:blank is the deliberate exception on both sides:
+// resolveTab opens one when the session's group is empty and new_tab defaults
+// to it.
+const INTERNAL_URL_RE = /^(chrome|chrome-extension|devtools|edge|about):/i;
+
+function isInternalUrl(url) {
+  const u = url || "";
+  return INTERNAL_URL_RE.test(u) && !u.startsWith("about:blank");
+}
+
+// navigate and new_tab must agree on what a scheme-less url means. new_tab did
+// not prefix at all, and chrome.tabs.create resolves a relative url against the
+// EXTENSION's own base — so a bare "popup.html" opened this extension's own
+// page with nothing scheme-shaped in the payload to notice.
+function normalizeTargetUrl(url) {
+  return /^[a-z][a-z0-9+.-]*:/i.test(url) ? url : `https://${url}`;
+}
+
+// tab.url is where the tab IS. tab.pendingUrl is where Chrome is already taking
+// it, and it is the only field set while a navigation is in flight. Claude Code
+// issues independent tool calls concurrently (see the groupLocks comment
+// above), and this check runs a full chrome.debugger attach + Runtime.enable
+// before Runtime.evaluate reaches the renderer — so a concurrent navigate onto
+// an extension page would otherwise slip an eval into the privileged realm.
 function assertScriptableUrl(tab) {
-  const url = tab.url || "";
-  if (/^(chrome|chrome-extension|devtools|edge|about):/.test(url) && !url.startsWith("about:blank")) {
-    throw new Error(`Cannot run scripts on ${url} (browser-internal page). Navigate to a normal web page first.`);
+  for (const url of [tab.url, tab.pendingUrl]) {
+    if (isInternalUrl(url)) {
+      throw new Error(`Cannot run scripts on ${url} (browser-internal page). Navigate to a normal web page first.`);
+    }
+  }
+}
+
+// The destination counterpart: assertScriptableUrl inspects where a tab is,
+// which says nothing about where it is being sent. A tab already inside the
+// session group that lands on this extension's own pages puts chrome.tabs
+// within reach, and that is the whole of the in-group restriction — so both
+// doors into a tab's url, navigate and new_tab, go through here.
+function assertNavigableUrl(url) {
+  if (isInternalUrl(url)) {
+    throw new Error(`Cannot navigate to ${url} (browser-internal page). Use a normal web page.`);
   }
 }
 
@@ -1036,14 +1077,8 @@ const handlers = {
       await chrome.tabs.reload(tab.id);
     } else {
       if (!url) throw new Error("url is required (or set action to back/forward/reload)");
-      const fullUrl = /^[a-z][a-z0-9+.-]*:/i.test(url) ? url : `https://${url}`;
-      // assertScriptableUrl checks where the tab IS, not where it is being sent.
-      // Without a check on the destination, a tab already inside the session
-      // group could be driven to this extension's own pages, whose realm has
-      // chrome.tabs — which is the whole of the in-group restriction, gone.
-      if (/^(chrome-extension|devtools):/i.test(fullUrl)) {
-        throw new Error(`Cannot navigate to ${fullUrl} (browser-internal page). Use a normal web page.`);
-      }
+      const fullUrl = normalizeTargetUrl(url);
+      assertNavigableUrl(fullUrl);
       await chrome.tabs.update(tab.id, { url: fullUrl });
     }
     await waitForTabComplete(tab.id);
@@ -1181,6 +1216,11 @@ const handlers = {
     // nothing here ever called it.
     assertScriptableUrl(tab);
     await ensureDebugger(tab.id, ["Runtime"]);
+    // ensureDebugger is a full chrome.debugger.attach + Runtime.enable round
+    // trip on first use, and tool calls arrive concurrently, so the snapshot
+    // resolveTab handed back can be stale by the time the evaluate would reach
+    // the renderer. Re-read live state and re-assert against it here.
+    assertScriptableUrl(await chrome.tabs.get(tab.id));
     const evalResult = await cdp(tab.id, "Runtime.evaluate", {
       expression: params.code,
       returnByValue: true,
@@ -1254,9 +1294,17 @@ const handlers = {
   },
 
   async new_tab(params) {
+    // This is the second door onto a tab's url and it needs the same
+    // destination check navigate has: new_tab({url:"chrome-extension://<id>/…"})
+    // put this extension's own page inside the session group in a single call.
+    // normalizeTargetUrl covers the quieter half — chrome.tabs.create resolves
+    // a relative url against the extension's own base, so a bare "popup.html"
+    // did it with nothing scheme-shaped in the payload.
+    const url = params.url ? normalizeTargetUrl(params.url) : "about:blank";
+    assertNavigableUrl(url);
     // active: false — tabs Claude opens must not steal the user's focus.
     // switch_tab is the tool for actually bringing a tab to the front.
-    const tab = await chrome.tabs.create({ url: params.url || "about:blank", active: false });
+    const tab = await chrome.tabs.create({ url, active: false });
     if (params.url) await waitForTabComplete(tab.id);
     await addTabToSessionGroup(tab, params.__session);
     const updated = await chrome.tabs.get(tab.id);

@@ -66,9 +66,38 @@ async function run() {
     } catch (e) { return { ok: false, error: e.message }; }
   }, [SESSION, tabId, extensionId]);
   check("navigate refuses a chrome-extension:// target", navigated.ok === false, JSON.stringify(navigated));
+  // Asserting the message too, not just "it threw": otherwise an unrelated
+  // future error out of navigate would masquerade as this guard firing.
+  check("navigate's refusal names the browser-internal rule",
+    /browser-internal page/.test(navigated.error || ""), navigated.error);
 
   const landed = await sw.evaluate(async (tid) => (await chrome.tabs.get(tid)).url, tabId);
   check("the tab did not move to the extension page", !landed.startsWith("chrome-extension://"), landed);
+
+  // --- guard 1b: new_tab is the other door onto a tab's url ------------------
+  // Blocking navigate alone leaves new_tab({url:"chrome-extension://…"}) as a
+  // one-call way to put the extension's own page inside the session group.
+
+  const openedInternal = await sw.evaluate(async ([session, id]) => {
+    try {
+      return { ok: true, value: await handlers.new_tab({ url: `chrome-extension://${id}/popup.html`, __session: session }) };
+    } catch (e) { return { ok: false, error: e.message }; }
+  }, [SESSION, extensionId]);
+  check("new_tab refuses a chrome-extension:// url",
+    openedInternal.ok === false && /browser-internal page/.test(openedInternal.error || ""),
+    JSON.stringify(openedInternal));
+
+  // The quiet half of the same door: chrome.tabs.create resolves a RELATIVE url
+  // against the extension's own base, so this payload contains nothing
+  // scheme-shaped and still used to open chrome-extension://<id>/popup.html.
+  const openedRelative = await sw.evaluate(async (session) => {
+    try {
+      return { ok: true, value: await handlers.new_tab({ url: "popup.html", __session: session }) };
+    } catch (e) { return { ok: false, error: e.message }; }
+  }, SESSION);
+  check("a relative new_tab url does not resolve to the extension's own page",
+    !String(openedRelative.value?.url || "").startsWith("chrome-extension://"),
+    JSON.stringify(openedRelative));
 
   // --- guard 2: javascript_eval must refuse an extension page ---------------
   // Reached here by putting the tab on that page directly, bypassing `navigate`,
@@ -85,7 +114,27 @@ async function run() {
     } catch (e) { return { ok: false, error: e.message }; }
   }, [SESSION, tabId]);
 
+  // --- guard 2b: a tab that is merely on its way to an extension page --------
+  // assertScriptableUrl read only tab.url, the snapshot resolveTab took. While
+  // a navigation is in flight Chrome carries the destination in tab.pendingUrl
+  // instead, and javascript_eval spends a whole chrome.debugger attach +
+  // Runtime.enable in that window before the evaluate reaches the renderer —
+  // with tool calls dispatched concurrently, that is a reachable race, not a
+  // theoretical one. Driven against a synthetic tab record rather than a real
+  // in-flight navigation so the assertion is deterministic: racing a real one
+  // would pass or fail on timing, which is worse than not testing it.
+  const pendingCase = await sw.evaluate((id) => {
+    try {
+      assertScriptableUrl({ url: "https://example.com/", pendingUrl: `chrome-extension://${id}/popup.html` });
+      return { ok: true };
+    } catch (e) { return { ok: false, error: e.message }; }
+  }, extensionId);
+
   /* eslint-enable no-undef */
+
+  check("a tab navigating to an extension page is not scriptable (pendingUrl, not just url)",
+    pendingCase.ok === false && /browser-internal page/.test(pendingCase.error || ""),
+    JSON.stringify(pendingCase));
 
   check("javascript_eval refuses an extension page", evaled.ok === false, JSON.stringify(evaled));
   check("the refusal names the browser-internal rule",
