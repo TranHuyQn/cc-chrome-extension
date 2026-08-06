@@ -23,7 +23,20 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // extended header (typeflag 'x') precedes most real entries here (bsdtar
 // emits one per entry for high-res timestamps, not just for long names) and
 // carries the real path as a "<len> path=<value>\n" record when the name
-// doesn't fit in the 100-byte name field.
+// doesn't fit in the 100-byte name field. For names that fit in ustar's
+// fixed fields but still exceed the 100-byte `name` field alone (roughly
+// 101-255 bytes), bsdtar splits across `prefix` (offset 345, 155 bytes) +
+// "/" + `name` instead of emitting a PAX override — read and join both.
+//
+// Two things this deliberately does not handle, safe in this archive today:
+// it stops at the first all-zero block rather than requiring the two
+// consecutive ones the tar spec uses to mark end-of-archive (this build
+// never produces a real all-zero header body mid-archive, so one is enough
+// here), and it does not special-case GNU long-name entries (typeflag 'L')
+// — one would be pushed as a spurious literal "././@LongLink" member,
+// inflating the count rather than hiding entries, so it fails safe. Neither
+// occurs: this archive's typeflag census is 0 (file) / 2 (symlink) / 5
+// (dir) / x (PAX) only.
 function listTarMembers(tarPath) {
   const buf = gunzipSync(readFileSync(tarPath));
   const names = [];
@@ -43,7 +56,8 @@ function listTarMembers(tarPath) {
       if (typeflag === "x" && match) pendingName = match[1];
     } else {
       const rawName = header.subarray(0, 100).toString("utf8").split("\0")[0];
-      names.push(pendingName || rawName);
+      const prefix = header.subarray(345, 500).toString("utf8").split("\0")[0];
+      names.push(pendingName || (prefix ? `${prefix}/${rawName}` : rawName));
       pendingName = null;
     }
     offset += 512 + dataBlocks * 512;
@@ -168,6 +182,21 @@ for (const required of [
 // junk twins of every shipped file. listTarMembers() walks the raw headers
 // instead, so it sees exactly what a non-macOS extractor sees.
 const rawMembers = listTarMembers(tarPath);
+
+// Anchor listTarMembers() against the `entries` set built from `tar -tzf`
+// above, so a walker that silently stops early (a logic bug, not a thrown
+// exception — nothing else would report an empty/short result as an error)
+// fails loudly instead of reporting a suspiciously clean archive. `tar -tzf`
+// hides AppleDouble members but agrees with the walker on everything else,
+// so their non-AppleDouble counts must match exactly.
+const normalizedRaw = rawMembers.map((n) => n.replace(/^\.\//, "").replace(/\/$/, ""));
+const nonAppleDoubleRawCount = normalizedRaw.filter((n) => !/(^|\/)\._/.test(n)).length;
+check(
+  "listTarMembers() sees as many non-AppleDouble entries as tar -tzf",
+  nonAppleDoubleRawCount === entries.size,
+  `listTarMembers=${nonAppleDoubleRawCount} tar-tzf=${entries.size}`,
+);
+
 const appleDoubleEntries = rawMembers.filter((e) => /(^|\/)\._/.test(e));
 check("no AppleDouble (._*) junk entries", appleDoubleEntries.length === 0, appleDoubleEntries.slice(0, 10).join(", "));
 
