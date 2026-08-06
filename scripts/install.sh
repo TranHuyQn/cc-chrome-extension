@@ -6,7 +6,16 @@
 # Script này KHÔNG cần quyền root và chỉ ghi vào thư mục home của bạn.
 set -euo pipefail
 
+# C2: the token in $STATE_FILE authorizes full browser control (and, on a
+# loopback bridge, spawning `claude` under this login). umask 077 means
+# every file/dir this script creates — via mkdir, cp, mv, tar, or node's
+# writeFileSync — starts owner-only, with no window where it briefly exists
+# group/other-readable. Token files also pass an explicit `mode: 0o600` at
+# writeFileSync so they don't depend on umask alone.
+umask 077
+
 PORT="${CC_CHROME_PORT:-8787}"
+[[ "$PORT" =~ ^[0-9]+$ ]] || { echo "Lỗi: CC_CHROME_PORT không hợp lệ: '$PORT' (phải là số)." >&2; exit 1; }
 INSTALL_DIR="$HOME/.cc-chrome-bridge"
 STATE_FILE="$HOME/.ccchrome.json"
 COMMAND_DEST="$HOME/.claude/commands/ccchrome.md"
@@ -18,6 +27,25 @@ RELEASE_URL="${CC_CHROME_RELEASE_URL:-https://github.com/TranHuyQn/cc-chrome-ext
 
 say() { echo "$@"; }
 die() { echo "Lỗi: $*" >&2; exit 1; }
+
+# I6: `node` is already a hard requirement below, so generating the token
+# through it avoids adding `openssl` as a second one.
+new_token() { node -e 'process.stdout.write(require("crypto").randomBytes(16).toString("hex"))'; }
+
+# C3: read the token out of a possibly-missing/malformed/keyless state file
+# without ever letting a raw Node exception reach the user. Prints nothing
+# (empty string) on any problem; the caller decides what "no token" means.
+read_existing_token() {
+  CC_STATE_FILE="$STATE_FILE" node -e '
+    const fs = require("fs");
+    try {
+      const data = JSON.parse(fs.readFileSync(process.env.CC_STATE_FILE, "utf8"));
+      if (typeof data.token === "string") process.stdout.write(data.token);
+    } catch {
+      // malformed JSON, missing file, missing key — all treated as "no usable token"
+    }
+  '
+}
 
 command -v node >/dev/null 2>&1 || die "chưa có 'node'. Cài Node.js 18 trở lên rồi chạy lại."
 node_major="$(node -p 'process.versions.node.split(".")[0]')"
@@ -34,78 +62,157 @@ upgrade=no
 say "Claude Code Chrome Bridge — $([ $upgrade = yes ] && echo 'nâng cấp' || echo 'cài đặt')"
 say ""
 
-# 1. Dừng service cũ trước khi thay mã nguồn, nếu không tiến trình đang chạy
-#    vẫn giữ cổng và bản mới không lên được.
+# 1. Chuẩn bị mã nguồn mới trong thư mục tạm và kiểm tra đầy đủ TRƯỚC khi
+#    đụng tới bản cài hiện tại (C1). Tải hỏng, gói thiếu node_modules, gói
+#    phát hành thiếu uninstall.sh/service-unit.sh — tất cả phải dừng lại ở
+#    đây, không được xoá mất bản cài đang chạy (và thư mục extension Chrome
+#    đã Load unpacked) trước khi biết bản thay thế dùng được.
+say "→ Chuẩn bị mã nguồn mới…"
+stage="$(mktemp -d)"
+tmp=""
+trap 'rm -rf "$stage" "$tmp"' EXIT
+if [ -n "$SOURCE" ]; then
+  cp -R "$SOURCE/server" "$stage/server"
+  cp -R "$SOURCE/extension" "$stage/extension"
+  cp "$SOURCE/.claude/commands/ccchrome.md" "$stage/ccchrome.md"
+  # I8: uninstall.sh does not exist in this checkout until Task 5 lands, so
+  # this one copy stays conditional — the only branch where "missing" is
+  # expected rather than a broken release.
+  [ -f "$SOURCE/scripts/uninstall.sh" ] && cp "$SOURCE/scripts/uninstall.sh" "$stage/"
+  cp "$SOURCE/scripts/service-unit.sh" "$stage/"
+else
+  tmp="$(mktemp -d)"
+  curl -fsSL "$RELEASE_URL" -o "$tmp/release.tar.gz" \
+    || die "không tải được gói phát hành. Bản cài hiện tại (nếu có) không bị thay đổi."
+  tar -xzf "$tmp/release.tar.gz" -C "$tmp" \
+    || die "gói phát hành hỏng, không giải nén được. Bản cài hiện tại không bị thay đổi."
+  cp -R "$tmp/server" "$stage/server"
+  cp -R "$tmp/extension" "$stage/extension"
+  cp "$tmp/ccchrome.md" "$stage/ccchrome.md"
+  # I8: a real release is expected to ship both files. Missing either one
+  # means the release itself is broken — fail loudly instead of silently
+  # shipping a bridge the user can never uninstall.
+  cp "$tmp/uninstall.sh" "$stage/" || die "gói phát hành thiếu uninstall.sh."
+  cp "$tmp/service-unit.sh" "$stage/" || die "gói phát hành thiếu service-unit.sh."
+fi
+[ -d "$stage/server/node_modules" ] \
+  || die "gói phát hành thiếu node_modules. Bản cài hiện tại không bị thay đổi."
+
+# 2. Dừng service cũ — an toàn để làm bây giờ, vì mã nguồn thay thế đã sẵn
+#    sàng và đã qua kiểm tra ở bước 1. Nếu dừng service trước rồi mới tải
+#    (thứ tự cũ), một lần tải hỏng sẽ để lại service đã tắt lẫn mã nguồn bị
+#    xoá — không còn gì chạy được.
 if [ "$upgrade" = yes ]; then
   say "→ Dừng dịch vụ đang chạy…"
   [ -n "${CC_CHROME_SKIP_SERVICE:-}" ] || cc_service_stop
 fi
 
-# 2. Mã nguồn
+# 3. Đưa mã nguồn đã kiểm tra vào vị trí thật.
 say "→ Cài mã nguồn vào $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR/logs"
 rm -rf "$INSTALL_DIR/server" "$INSTALL_DIR/extension"
-if [ -n "$SOURCE" ]; then
-  cp -R "$SOURCE/server" "$INSTALL_DIR/server"
-  cp -R "$SOURCE/extension" "$INSTALL_DIR/extension"
-  cp "$SOURCE/.claude/commands/ccchrome.md" "$INSTALL_DIR/ccchrome.md"
-  # uninstall.sh does not exist until Task 5; copy it when present so the
-  # closing message's "bash $INSTALL_DIR/uninstall.sh" is truthful once it
-  # lands, but don't fail this install over its absence today.
-  [ -f "$SOURCE/scripts/uninstall.sh" ] && cp "$SOURCE/scripts/uninstall.sh" "$INSTALL_DIR/"
-  cp "$SOURCE/scripts/service-unit.sh" "$INSTALL_DIR/"
-else
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
-  curl -fsSL "$RELEASE_URL" -o "$tmp/release.tar.gz" || die "không tải được gói phát hành."
-  tar -xzf "$tmp/release.tar.gz" -C "$tmp"
-  cp -R "$tmp/server" "$INSTALL_DIR/server"
-  cp -R "$tmp/extension" "$INSTALL_DIR/extension"
-  cp "$tmp/ccchrome.md" "$INSTALL_DIR/ccchrome.md"
-  [ -f "$tmp/uninstall.sh" ] && cp "$tmp/uninstall.sh" "$INSTALL_DIR/"
-  [ -f "$tmp/service-unit.sh" ] && cp "$tmp/service-unit.sh" "$INSTALL_DIR/"
+mv "$stage/server" "$INSTALL_DIR/server"
+mv "$stage/extension" "$INSTALL_DIR/extension"
+mv "$stage/ccchrome.md" "$INSTALL_DIR/ccchrome.md"
+if [ -f "$stage/uninstall.sh" ]; then
+  mv "$stage/uninstall.sh" "$INSTALL_DIR/uninstall.sh"
+  chmod +x "$INSTALL_DIR/uninstall.sh"
 fi
-[ -f "$INSTALL_DIR/uninstall.sh" ] && chmod +x "$INSTALL_DIR/uninstall.sh"
-[ -d "$INSTALL_DIR/server/node_modules" ] || die "gói phát hành thiếu node_modules."
+mv "$stage/service-unit.sh" "$INSTALL_DIR/service-unit.sh"
 
-# 3. Token — giữ nguyên khi nâng cấp, để khỏi phải dán lại URL vào popup.
+# 4. Token — giữ nguyên khi nâng cấp, để khỏi phải dán lại URL vào popup.
 if [ "$upgrade" = yes ]; then
-  TOKEN="$(node -p "require('$STATE_FILE').token")"
-  say "→ Giữ token cũ"
+  TOKEN="$(read_existing_token)"
+  if [[ "$TOKEN" =~ ^[0-9a-f]{16,}$ ]]; then
+    say "→ Giữ token cũ"
+  else
+    # C3: a missing/malformed/keyless state file must never crash here or
+    # silently produce a "Bearer undefined" install — mint a fresh token
+    # and say so, the same as a first install.
+    say "→ Token cũ trong $STATE_FILE bị hỏng hoặc thiếu — sinh token mới."
+    TOKEN="$(new_token)"
+  fi
 else
-  TOKEN="$(openssl rand -hex 16)"
+  TOKEN="$(new_token)"
   say "→ Sinh token mới"
 fi
-node -e "require('fs').writeFileSync('$STATE_FILE', JSON.stringify({ token: '$TOKEN', port: $PORT }, null, 2) + '\n')"
-node -e "require('fs').writeFileSync('$INSTALL_DIR/tokens.json', JSON.stringify({ '$TOKEN': 'local' }, null, 2) + '\n')"
 
-# 4. Service
+# I4: values go through process.env, never interpolated into JS source —
+# an apostrophe or backslash in $HOME (e.g. /tmp/o'brien) would otherwise
+# break the generated JavaScript. Explicit `mode: 0o600` backs up umask (C2).
+CC_STATE_FILE="$STATE_FILE" CC_TOKEN="$TOKEN" CC_PORT="$PORT" node -e '
+  const fs = require("fs");
+  const port = Number(process.env.CC_PORT);
+  fs.writeFileSync(
+    process.env.CC_STATE_FILE,
+    JSON.stringify({ token: process.env.CC_TOKEN, port }, null, 2) + "\n",
+    { mode: 0o600 }
+  );
+'
+# Minor: merge into any existing tokens.json instead of overwriting it
+# wholesale, so an upgrade does not discard a token a user added by hand.
+CC_TOKENS_FILE="$INSTALL_DIR/tokens.json" CC_TOKEN="$TOKEN" node -e '
+  const fs = require("fs");
+  const file = process.env.CC_TOKENS_FILE;
+  let tokens = {};
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) tokens = parsed;
+  } catch {
+    // missing or malformed — start fresh rather than fail the install
+  }
+  tokens[process.env.CC_TOKEN] = "local";
+  fs.writeFileSync(file, JSON.stringify(tokens, null, 2) + "\n", { mode: 0o600 });
+'
+
+# 5. Service
 say "→ Cài dịch vụ nền"
 cc_write_unit "$INSTALL_DIR" "$PORT"
 if [ -n "${CC_CHROME_SKIP_SERVICE:-}" ]; then
   say "  (bỏ qua bước nạp dịch vụ — CC_CHROME_SKIP_SERVICE)"
-else
-  cc_service_start
+elif cc_service_start; then
   say "→ Chờ bridge sẵn sàng…"
   ok=no
   for _ in $(seq 1 40); do
     if curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then ok=yes; break; fi
     sleep 0.5
   done
-  [ "$ok" = yes ] || die "bridge không lên sau 20 giây. Xem log: $INSTALL_DIR/logs/bridge.err.log"
+  # I7: a slow/failed health check must not abort before the slash command
+  # and MCP registration below, and before the closing instructions print —
+  # those are what let the user finish the install by hand.
+  [ "$ok" = yes ] || say "→ Cảnh báo: bridge không phản hồi sau 20 giây. Xem log: $INSTALL_DIR/logs/bridge.err.log"
+else
+  # I7: `launchctl bootstrap`/`systemctl --user` fail in ordinary, common
+  # situations (stale bootstrap state, WSL/containers, ssh without
+  # lingering). Warn and keep going instead of dying with raw tool output.
+  say "→ Cảnh báo: không khởi động được dịch vụ nền. Xem log: $INSTALL_DIR/logs/bridge.err.log"
+  say "   Bạn có thể tự chạy: node $INSTALL_DIR/server/index.js --http"
 fi
 
-# 5. Slash command
+# 6. Slash command
 mkdir -p "$(dirname "$COMMAND_DEST")"
 cp "$INSTALL_DIR/ccchrome.md" "$COMMAND_DEST"
 say "→ Đã cài lệnh /ccchrome"
 
-# 6. Đăng ký MCP với Claude Code
+# 7. Đăng ký MCP với Claude Code
+#
+# Minor: the Bearer token is visible in `ps`/`/proc/<pid>/cmdline` for the
+# lifetime of this `claude mcp add` child, to any other local user — same
+# class of tradeoff as the panel's spawned-argv token documented in
+# CLAUDE.md. Same-machine-only exposure; not fixed here.
 if command -v claude >/dev/null 2>&1; then
   claude mcp remove --scope user chrome >/dev/null 2>&1 || true
-  claude mcp add --scope user --transport http chrome \
-    "http://127.0.0.1:$PORT/mcp" --header "Authorization: Bearer $TOKEN" >/dev/null
-  say "→ Đã đăng ký MCP server 'chrome' với Claude Code"
+  # I5: a `claude` too old to know --transport http (or any other failure)
+  # must not abort the script — the user still needs the Load-unpacked and
+  # ws:// instructions printed below regardless of whether this succeeded.
+  if claude mcp add --scope user --transport http chrome \
+      "http://127.0.0.1:$PORT/mcp" --header "Authorization: Bearer $TOKEN" >/dev/null 2>&1; then
+    say "→ Đã đăng ký MCP server 'chrome' với Claude Code"
+  else
+    say "→ Không đăng ký được MCP server tự động (có thể 'claude' bản cũ chưa hỗ trợ --transport http)."
+    say "   Đăng ký thủ công:"
+    say "   claude mcp add --scope user --transport http chrome http://127.0.0.1:$PORT/mcp --header \"Authorization: Bearer $TOKEN\""
+  fi
 else
   say "→ Không thấy lệnh 'claude' — bỏ qua đăng ký MCP. Cài Claude Code rồi chạy lại script này."
 fi
@@ -121,4 +228,9 @@ say "     ws://127.0.0.1:$PORT/ws?token=$TOKEN"
 say ""
 say "  Badge chuyển 'on' màu xanh là xong. Mở khung chat bằng nút 'Mở khung chat' trong popup."
 say ""
-say "  Gỡ cài đặt:  bash $INSTALL_DIR/uninstall.sh"
+# I8 + minor: only promise the uninstall command if the file is actually
+# there (it isn't yet, from a checkout predating Task 5), and quote the
+# path so the line stays copy-pasteable when $HOME contains a space.
+if [ -f "$INSTALL_DIR/uninstall.sh" ]; then
+  say "  Gỡ cài đặt:  bash \"$INSTALL_DIR/uninstall.sh\""
+fi
