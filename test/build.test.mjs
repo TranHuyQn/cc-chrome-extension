@@ -101,6 +101,14 @@ const tarPath = join(root, "dist", "cc-chrome-bridge.tar.gz");
 check("release tarball exists", existsSync(tarPath));
 
 const listing = execFileSync("tar", ["-tzf", tarPath], { encoding: "utf8" });
+// Exact entry names, not substring matching against the raw listing — a
+// substring check would also pass on e.g. "server/index.js.bak".
+const entries = new Set(
+  listing
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => line.replace(/^\.\//, "").replace(/\/$/, "")),
+);
 for (const required of [
   "server/index.js",
   "server/agent.js",
@@ -112,8 +120,29 @@ for (const required of [
   "service-unit.sh",
   "ccchrome.md",
 ]) {
-  check(`tarball contains ${required}`, listing.includes(required), listing.slice(0, 500));
+  check(`tarball contains ${required}`, entries.has(required), listing.slice(0, 500));
 }
+
+// macOS's own `tar -czf` silently adds one `._<name>` AppleDouble
+// resource-fork entry per real entry unless COPYFILE_DISABLE=1 is set.
+// macOS's own `tar -tzf` hides and merges those on read, so this class of
+// defect is invisible from the same tool used to build the archive — a
+// Linux install (`cp -R` in install.sh) extracts them for real, permanently,
+// as junk twins of every shipped file.
+const appleDoubleEntries = [...entries].filter((e) => /(^|\/)\._/.test(e));
+check("no AppleDouble (._*) junk entries", appleDoubleEntries.length === 0, appleDoubleEntries.slice(0, 10).join(", "));
+
+// fs.cpSync resolves symlinks via realpath instead of preserving their
+// literal target, which previously rewrote relative symlinks under
+// server/node_modules/.bin/ into absolute paths naming the builder's own
+// checkout — dangling and machine-specific on every other machine.
+const verboseListing = execFileSync("tar", ["-tvzf", tarPath], { encoding: "utf8" });
+const absoluteLinks = verboseListing
+  .split("\n")
+  .filter((line) => line.includes(" -> "))
+  .map((line) => line.split(" -> ")[1])
+  .filter((target) => target && target.startsWith("/"));
+check("no symlink in the tarball has an absolute target", absoluteLinks.length === 0, absoluteLinks.slice(0, 5).join(", "));
 
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);
