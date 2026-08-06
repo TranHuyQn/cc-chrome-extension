@@ -33,6 +33,7 @@
 
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,7 +41,26 @@ import { chromium } from "playwright";
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const extensionPath = join(REPO, "extension");
-const MCP_PORT = 8787;
+
+// An ephemeral port, NOT the hardcoded 8787. This script is the acceptance
+// run for a *local install*, so on exactly the machine it matters most the
+// installed service already owns 8787: the spawned child would die instantly
+// with "FATAL: port 8787 already in use", the health poll below would then
+// succeed against the INSTALLED bridge, and every later section would run
+// against a bridge whose token set has no TOKEN — a cascade of confusing
+// failures reported as a passing health check.
+function freePort() {
+  return new Promise((res, rej) => {
+    const probe = createServer();
+    probe.unref();
+    probe.on("error", rej);
+    probe.listen(0, "127.0.0.1", () => {
+      const { port } = probe.address();
+      probe.close(() => res(port));
+    });
+  });
+}
+const MCP_PORT = await freePort();
 const TOKEN = "paneltoken12345";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -56,6 +76,7 @@ const serverProc = spawn("node", [join(REPO, "server", "index.js"), "--http"], {
     ...process.env,
     CC_CHROME_TOKENS: `${TOKEN}=huy`,
     CC_CHROME_HOST: "127.0.0.1",
+    CC_CHROME_PORT: String(MCP_PORT),
   },
   stdio: ["ignore", "inherit", "inherit"],
 });
@@ -69,7 +90,14 @@ for (let i = 0; i < 40; i++) {
   await sleep(250);
 }
 check("bridge /health", healthy);
-if (!healthy) { serverProc.kill(); process.exit(1); }
+// A 200 on that port proves *something* answers there, not that the thing
+// this script started is what answered. The ephemeral port above makes a
+// collision unlikely rather than impossible (another process can still grab
+// it between the probe closing and the bridge binding), so assert the child
+// is genuinely alive: a bridge that exited on EADDRINUSE has a non-null
+// exitCode while some other listener happily serves /health.
+check("the spawned bridge is still running (not a stranger answering /health)", serverProc.exitCode === null, `exitCode=${serverProc.exitCode}`);
+if (!healthy || serverProc.exitCode !== null) { serverProc.kill(); process.exit(1); }
 
 let userDataDir;
 let context;

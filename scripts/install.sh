@@ -54,10 +54,32 @@ command -v node >/dev/null 2>&1 || die "chưa có 'node'. Cài Node.js 18 trở 
 node_major="$(node -p 'process.versions.node.split(".")[0]')"
 [ "$node_major" -ge 18 ] || die "cần Node.js 18 trở lên, máy đang có $(node -v)."
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=/dev/null
-. "$script_dir/service-unit.sh"
-cc_platform >/dev/null || die "chỉ hỗ trợ macOS và Linux."
+# C1: service-unit.sh must NOT be sourced here. In both documented flows this
+# script is the only file the user has — `curl … | bash` and `curl … -o
+# install.sh; bash install.sh` — and service-unit.sh only arrives inside the
+# release tarball downloaded ~40 lines below. Sourcing it up front made every
+# real install (and every upgrade, since install.sh is the documented upgrade
+# path too) exit 1 having created nothing. The library is sourced right after
+# staging instead, from "$stage"; $script_dir is only the fallback for running
+# straight out of a checkout (what test/install.test.mjs's CC_CHROME_SOURCE
+# path does).
+#
+# ${BASH_SOURCE[0]} is unbound when the script arrives on stdin, and `set -u`
+# turns reading it into a fatal error before anything else can run — hence the
+# :- default and the empty-string case.
+script_dir=""
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+
+# Platform preflight, inlined rather than calling cc_platform(): refusing an
+# unsupported OS is worth doing before a multi-megabyte download, and at this
+# point the library that defines cc_platform does not exist yet. Kept in sync
+# with cc_platform() in service-unit.sh by hand — two cases, no logic.
+case "$(uname -s)" in
+  Darwin|Linux) ;;
+  *) die "chỉ hỗ trợ macOS và Linux (máy này là $(uname -s))." ;;
+esac
 
 upgrade=no
 [ -f "$STATE_FILE" ] && upgrade=yes
@@ -107,19 +129,42 @@ fi
 [ -d "$stage/server/node_modules" ] \
   || die "gói phát hành thiếu node_modules. Bản cài hiện tại không bị thay đổi."
 
+# C1: now — and only now — the shared library exists. Prefer the freshly
+# staged copy (that is the version about to be installed, so the running
+# script and the installed unit file can never disagree); fall back to a
+# sibling file when this script runs straight out of a checkout.
+if [ -f "$stage/service-unit.sh" ]; then
+  # shellcheck source=/dev/null
+  . "$stage/service-unit.sh"
+elif [ -n "$script_dir" ] && [ -f "$script_dir/service-unit.sh" ]; then
+  # shellcheck source=/dev/null
+  . "$script_dir/service-unit.sh"
+else
+  die "thiếu service-unit.sh. Bản cài hiện tại không bị thay đổi."
+fi
+
 # 2. Dừng service cũ — an toàn để làm bây giờ, vì mã nguồn thay thế đã sẵn
 #    sàng và đã qua kiểm tra ở bước 1. Nếu dừng service trước rồi mới tải
 #    (thứ tự cũ), một lần tải hỏng sẽ để lại service đã tắt lẫn mã nguồn bị
 #    xoá — không còn gì chạy được.
-if [ "$upgrade" = yes ]; then
-  if [ -n "${CC_CHROME_SKIP_SERVICE:-}" ]; then
-    # N4: say only what actually happens — CC_CHROME_SKIP_SERVICE means this
-    # step is skipped, not performed.
-    say "  (bỏ qua bước dừng dịch vụ — CC_CHROME_SKIP_SERVICE)"
-  else
-    say "→ Dừng dịch vụ đang chạy…"
-    cc_service_stop
-  fi
+#
+#    Stopped UNCONDITIONALLY, not just when $STATE_FILE exists. On Linux the
+#    two can disagree: a user who deleted ~/.ccchrome.json to reset a token,
+#    or an interrupted uninstall, leaves the unit loaded and running while
+#    $upgrade reads "no". The tree would then be replaced under a live
+#    process, `systemctl --user enable --now` is a no-op on an already-active
+#    unit, and the old process keeps the port with the OLD token set — so
+#    /health answers, the install reports success, and the ws URL just printed
+#    gets a 4001. (macOS never had this: cc_service_start does bootout before
+#    bootstrap.) Stopping a service that isn't running is free — every branch
+#    of cc_service_stop ends in `|| true`.
+if [ -n "${CC_CHROME_SKIP_SERVICE:-}" ]; then
+  # N4: say only what actually happens — CC_CHROME_SKIP_SERVICE means this
+  # step is skipped, not performed.
+  say "  (bỏ qua bước dừng dịch vụ — CC_CHROME_SKIP_SERVICE)"
+else
+  say "→ Dừng dịch vụ đang chạy (nếu có)…"
+  cc_service_stop
 fi
 
 # 3. Đưa mã nguồn đã kiểm tra vào vị trí thật. $stage nằm trên cùng

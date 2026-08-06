@@ -8,10 +8,13 @@
 // Usage: node test/install.test.mjs
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readFileSync, statSync } from "node:fs";
+import {
+  mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readFileSync, statSync,
+  copyFileSync, readdirSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -295,5 +298,87 @@ check("a second uninstall reports nothing to do", /0 mục|không còn gì/i.tes
 check("and still exits 0", un.status === 0, `status=${un.status}`);
 
 rmSync(fakeHome, { recursive: true, force: true });
+
+// --- the real release flow: one downloaded file, no siblings (C1/I1) --------
+//
+// Everything above installs with CC_CHROME_SOURCE pointed at this checkout,
+// so install.sh always had scripts/service-unit.sh sitting right next to it.
+// Neither documented flow looks like that: the user fetches exactly ONE file
+// and the tarball carrying service-unit.sh is downloaded ~40 lines into the
+// run. Reproduced against the pre-fix script, both of these exited 1 having
+// created nothing — `. "$script_dir/service-unit.sh"` ran before anything was
+// downloaded ("No such file or directory"), and the piped flow additionally
+// died on `BASH_SOURCE[0]: unbound variable` under `set -u`, because a script
+// arriving on stdin has no BASH_SOURCE at all.
+//
+// It is dist/install.sh that is copied, not scripts/install.sh: that is the
+// byte-for-byte artifact a user actually downloads, and build.test.mjs's F8
+// guard only ever checked that the file exists and matches — never that it
+// runs. The tarball is (re)built here rather than reused so this suite is
+// correct when run standalone (`npm run test:install`) as well as after
+// test/build.test.mjs in the full run.
+{
+  const relBuild = spawnSync("node", [join(root, "scripts", "build-release.mjs")], { encoding: "utf8" });
+  check("release artifacts build", relBuild.status === 0, relBuild.stderr);
+  const tarball = join(root, "dist", "cc-chrome-bridge.tar.gz");
+  const distInstall = join(root, "dist", "install.sh");
+  check("dist/install.sh and the tarball both exist", existsSync(tarball) && existsSync(distInstall));
+
+  // `bash install.sh` and `cat install.sh | bash` fail differently (only the
+  // second one has an unbound BASH_SOURCE), so both are run.
+  for (const [label, argv] of [
+    ["bash install.sh", ["install.sh"]],
+    ["cat install.sh | bash", ["-c", "cat install.sh | bash"]],
+  ]) {
+    const base = mkdtempSync(join(tmpdir(), "cc-install-release-"));
+    const home = join(base, "home");
+    const only = join(base, "only");
+    const bin = join(base, "bin");
+    for (const d of [home, only, bin]) mkdirSync(d, { recursive: true });
+    copyFileSync(distInstall, join(only, "install.sh"));
+    // A stub `claude`, first on PATH, so a tester with the real CLI installed
+    // never has it spawned by this suite.
+    writeFileSync(join(bin, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+
+    check(
+      `${label}: the download directory holds install.sh and nothing else`,
+      readdirSync(only).join(",") === "install.sh",
+      readdirSync(only).join(","),
+    );
+
+    const env = {};
+    for (const key of passthroughKeys) {
+      if (process.env[key] !== undefined) env[key] = process.env[key];
+    }
+    env.HOME = home;
+    env.PATH = `${bin}:${process.env.PATH ?? ""}`;
+    env.CC_CHROME_SKIP_SERVICE = "1";
+    // pathToFileURL, not `file://${tarball}`: a repo path containing a space
+    // or a '#' would otherwise produce a URL curl cannot fetch.
+    env.CC_CHROME_RELEASE_URL = pathToFileURL(tarball).href;
+
+    const r = spawnSync("bash", argv, { cwd: only, env, encoding: "utf8" });
+    check(`${label}: exits 0`, r.status === 0, `status=${r.status}\n${r.stdout}\n${r.stderr}`);
+
+    const relInstallDir = join(home, ".cc-chrome-bridge");
+    check(`${label}: installs the server`, existsSync(join(relInstallDir, "server", "index.js")));
+    check(`${label}: installs the extension`, existsSync(join(relInstallDir, "extension", "manifest.json")));
+    check(`${label}: installs node_modules from the tarball`, existsSync(join(relInstallDir, "server", "node_modules", "ws")));
+    // service-unit.sh is the file whose absence broke both flows — it has to
+    // end up installed, not merely sourced from somewhere.
+    check(`${label}: installs service-unit.sh`, existsSync(join(relInstallDir, "service-unit.sh")));
+    check(`${label}: installs uninstall.sh`, existsSync(join(relInstallDir, "uninstall.sh")));
+    check(`${label}: writes the service unit`, existsSync(
+      process.platform === "darwin"
+        ? join(home, "Library", "LaunchAgents", "com.ccchrome.bridge.plist")
+        : join(home, ".config", "systemd", "user", "ccchrome-bridge.service"),
+    ));
+    check(`${label}: writes a token file`, existsSync(join(home, ".ccchrome.json")));
+    check(`${label}: prints the ws URL for the popup`, /ws:\/\/127\.0\.0\.1:8787\/ws\?token=/.test(r.stdout), r.stdout.slice(-400));
+
+    rmSync(base, { recursive: true, force: true });
+  }
+}
+
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

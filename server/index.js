@@ -1259,12 +1259,30 @@ async function mainHttp() {
   });
 
   httpServer.listen(PORT, HOST, () => {
-    log(`MCP server (http mode) listening on http://${HOST}:${PORT}`);
-    log(`  Claude Code:  claude mcp add --transport http chrome https://<domain>/mcp --header "Authorization: Bearer <token>"`);
-    log(`  Extension:    wss://<domain>/ws?token=<token>  (set in the extension popup)`);
-    log(`  Health:       GET /health`);
-    log(`  Pairing:      POST /pair, GET /pair/status, DELETE /pair (for /ccchrome connect)`);
-    log(`  Downloads:    GET /extension.zip, GET /extension.crx, GET /ccchrome.md (if dist/ is built)`);
+    // These are the first lines in ~/.cc-chrome-bridge/logs/bridge.err.log,
+    // which is exactly where install.sh and the README send a user whose
+    // bridge did not come up — so they have to describe THIS bridge. The
+    // default install is local: no domain, no TLS terminator, no pairing.
+    // Printing wss://<domain>/… there sends someone to configure a server
+    // that does not exist. Same derivation as notConnectedError() above,
+    // hostForUrl() included so a CC_CHROME_HOST=::1 bridge prints a URL that
+    // can actually be pasted.
+    const base = `http://${hostForUrl(HOST)}:${PORT}`;
+    log(`MCP server (http mode) listening on ${base}`);
+    if (isLoopbackHost(HOST)) {
+      log(`  Claude Code:  claude mcp add --scope user --transport http chrome ${base}/mcp --header "Authorization: Bearer <token>"`);
+      log(`  Extension:    ws://${hostForUrl(HOST)}:${PORT}/ws?token=<token>  (set in the extension popup)`);
+      log(`  Health:       GET ${base}/health`);
+    } else {
+      // Bound to a non-loopback address: a reverse proxy is the only
+      // supported way to reach this, so the public URL is a domain this
+      // process cannot know — <domain> stays a placeholder on purpose.
+      log(`  Claude Code:  claude mcp add --transport http chrome https://<domain>/mcp --header "Authorization: Bearer <token>"`);
+      log(`  Extension:    wss://<domain>/ws?token=<token>  (set in the extension popup)`);
+      log(`  Health:       GET /health`);
+      if (tokens.pairSecret) log(`  Pairing:      POST /pair, GET /pair/status, DELETE /pair`);
+      log(`  Downloads:    GET /extension.zip, GET /extension.crx, GET /ccchrome.md (if dist/ is built)`);
+    }
   });
 }
 
