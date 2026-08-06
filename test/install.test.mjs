@@ -27,10 +27,31 @@ const fakeHome = mkdtempSync(join(tmpdir(), "cc-install-home-"));
 // A stub `claude` on PATH: the installer registers the MCP server through it,
 // and the test asserts on what it was asked to do rather than needing the real
 // CLI (which would mutate the tester's own MCP config).
+//
+// It also has to track registration state, not just log calls: uninstall.sh's
+// idempotency depends on `claude mcp get chrome` actually reflecting whether
+// `mcp remove` ran, the way the real CLI does. A stub that always exits 0
+// would make every uninstall run believe the registration still exists,
+// re-"removing" it and reporting 1 item on every rerun.
 const binDir = join(fakeHome, "bin");
 mkdirSync(binDir, { recursive: true });
 const claudeLog = join(fakeHome, "claude-calls.log");
-writeFileSync(join(binDir, "claude"), `#!/usr/bin/env bash\necho "$@" >> "${claudeLog}"\nexit 0\n`, { mode: 0o755 });
+const mcpMarker = join(fakeHome, "claude-mcp-chrome-registered");
+writeFileSync(
+  join(binDir, "claude"),
+  `#!/usr/bin/env bash
+echo "$@" >> "${claudeLog}"
+if [ "$1" = "mcp" ] && [ "$2" = "add" ]; then
+  : > "${mcpMarker}"
+elif [ "$1" = "mcp" ] && [ "$2" = "remove" ]; then
+  rm -f "${mcpMarker}"
+elif [ "$1" = "mcp" ] && [ "$2" = "get" ]; then
+  [ -f "${mcpMarker}" ] && exit 0 || exit 1
+fi
+exit 0
+`,
+  { mode: 0o755 },
+);
 
 // Whitelisted, not spread from process.env: a tester with e.g. CC_CHROME_PORT
 // or CC_CHROME_RELEASE_URL exported in their own shell would otherwise leak
@@ -118,12 +139,30 @@ const dry = run("uninstall.sh", ["--dry-run"]);
 check("dry-run removes nothing", existsSync(join(fakeHome, ".ccchrome.json")));
 check("dry-run says what it would remove", /\.ccchrome\.json/.test(dry), dry.slice(0, 400));
 
-run("uninstall.sh");
+const realOut = run("uninstall.sh");
 check("removes the token file", !existsSync(join(fakeHome, ".ccchrome.json")));
 check("removes the slash command", !existsSync(join(fakeHome, ".claude", "commands", "ccchrome.md")));
 check("removes the service unit", !existsSync(unit));
 check("removes the server directory", !existsSync(join(installDir, "server")));
 check("KEEPS the panel conversation data", existsSync(join(installDir, "panel", "session.jsonl")));
+
+// The service must be stopped before the source tree is deleted — deleting
+// the directory out from under a live process leaves an orphan holding the
+// port, and the next install dies on EADDRINUSE. CC_CHROME_SKIP_SERVICE=1
+// means cc_service_stop itself never actually runs in this test (on
+// purpose — it must never touch the real login session's bridge), so it
+// can't be used as the timing signal. Its announcement line can: `note()`
+// fires in the same code block, in the same order, right where the real
+// stop call would happen, so the position of "dịch vụ nền" relative to
+// "<installDir>/server" in stdout is a faithful proxy for which one the
+// script would actually do first outside the test.
+const serviceLineIdx = realOut.split("\n").findIndex((l) => l.includes("dịch vụ nền"));
+const serverLineIdx = realOut.split("\n").findIndex((l) => l.includes(join(installDir, "server")));
+check(
+  "stops the service before deleting the source tree",
+  serviceLineIdx !== -1 && serverLineIdx !== -1 && serviceLineIdx < serverLineIdx,
+  `service@${serviceLineIdx} server@${serverLineIdx}\n${realOut}`,
+);
 
 const un = run("uninstall.sh");
 check("a second uninstall reports nothing to do", /0 mục|không còn gì/i.test(un), un.slice(0, 300));
