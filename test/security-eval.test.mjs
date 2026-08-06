@@ -20,7 +20,8 @@ import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const selfPath = fileURLToPath(import.meta.url);
+const root = resolve(dirname(selfPath), "..");
 const extensionPath = join(root, "extension");
 
 let failures = 0;
@@ -154,6 +155,47 @@ async function run() {
     } catch (e) { return { ok: false, error: e.message }; }
   }, [SESSION, tabId]);
 
+  // upload_file is the fourth mutating debugger tool. On this page today it
+  // fails anyway at DOM.setFileInputFiles ("Node is not a file input element"),
+  // but only because neither popup.html nor sidepanel.html currently contains a
+  // file input — the attach, getDocument and querySelector all succeed. So the
+  // assertion below deliberately pins the REFUSAL MESSAGE, not merely that the
+  // call failed: without that, this check would pass on the coincidence and
+  // keep passing right up until the HTML gains a file input.
+  const uploaded = await sw.evaluate(async ([session, tid]) => {
+    try {
+      return { ok: true, value: await handlers.upload_file({ tabId: tid, selector: "input", filePath: "/etc/hosts", __session: session }) };
+    } catch (e) { return { ok: false, error: e.message }; }
+  }, [SESSION, tabId]);
+
+  // ...and the guard must not have cost upload_file its actual job. No other
+  // suite covers this: e2e.mjs exercises press_key and type_text on ordinary
+  // pages but never calls upload_file at all (checked across the whole repo),
+  // so without this an over-broad guard here would break the tool silently and
+  // every suite would stay green.
+  const uploadOk = await sw.evaluate(async ([session, self]) => {
+    try {
+      const t = await handlers.new_tab({ url: "https://example.com/", __session: session });
+      await chrome.scripting.executeScript({
+        target: { tabId: t.tabId },
+        func: () => {
+          const i = document.createElement("input");
+          i.type = "file";
+          i.id = "cc_upload_probe";
+          document.body.appendChild(i);
+        },
+      });
+      const value = await handlers.upload_file({ tabId: t.tabId, selector: "#cc_upload_probe", filePath: self, __session: session });
+      const name = await chrome.scripting.executeScript({
+        target: { tabId: t.tabId },
+        func: () => document.querySelector("#cc_upload_probe").files[0]?.name || null,
+      });
+      return { ok: true, value, fileName: name[0]?.result };
+    } catch (e) { return { ok: false, error: e.message }; }
+  }, [SESSION, selfPath]);
+  // Asserting the file actually landed in the input, not just that the call
+  // returned: upload_file reports back its own arguments either way.
+
   // take_screenshot deliberately has NO such guard, and this asserts the
   // decision rather than the absence of code: capturing pixels mutates nothing
   // and screenshotting an internal page is genuinely useful when diagnosing,
@@ -166,12 +208,29 @@ async function run() {
     } catch (e) { return { ok: false, error: e.message }; }
   }, [SESSION, tabId]);
 
+  // The about:blank exemption must be as case-insensitive as the scheme regex
+  // it exempts from: matching one loosely and the other strictly refused
+  // "About:Blank" while allowing "about:blank" — one rule disagreeing with
+  // itself. resolveTab opens about:blank tabs, so this side matters.
+  const blankCase = await sw.evaluate(() => {
+    try {
+      assertScriptableUrl({ url: "About:Blank" });
+      return { ok: true };
+    } catch (e) { return { ok: false, error: e.message }; }
+  });
+
   /* eslint-enable no-undef */
 
+  check("the about:blank exemption is case-insensitive, like the scheme regex it exempts from",
+    blankCase.ok === true, JSON.stringify(blankCase));
   check("press_key is refused on an extension page",
     pressed.ok === false && /browser-internal page/.test(pressed.error || ""), JSON.stringify(pressed));
   check("type_text is refused on an extension page",
     typed.ok === false && /browser-internal page/.test(typed.error || ""), JSON.stringify(typed));
+  check("upload_file is refused on an extension page",
+    uploaded.ok === false && /browser-internal page/.test(uploaded.error || ""), JSON.stringify(uploaded));
+  check("upload_file still works on an ordinary page (the guard is not over-broad)",
+    uploadOk.ok === true && uploadOk.fileName === "security-eval.test.mjs", JSON.stringify(uploadOk));
   check("take_screenshot on the same page still SUCCEEDS (deliberate asymmetry, not an oversight)",
     shot.ok === true && typeof shot.value?.base64 === "string" && shot.value.base64.length > 0,
     JSON.stringify({ ok: shot.ok, error: shot.error, base64Length: shot.value?.base64?.length }));

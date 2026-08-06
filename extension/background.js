@@ -477,7 +477,11 @@ const INTERNAL_URL_RE = /^(chrome|chrome-extension|devtools|edge|about):/i;
 
 function isInternalUrl(url) {
   const u = url || "";
-  return INTERNAL_URL_RE.test(u) && !u.startsWith("about:blank");
+  // The exemption is case-insensitive because INTERNAL_URL_RE is. Matching the
+  // scheme loosely but the exemption strictly refuses "About:Blank" while
+  // allowing "about:blank" — one rule disagreeing with itself, which is where
+  // the next drift starts.
+  return INTERNAL_URL_RE.test(u) && !/^about:blank/i.test(u);
 }
 
 // navigate and new_tab must agree on what a scheme-less url means. new_tab did
@@ -1190,13 +1194,17 @@ const handlers = {
   async take_screenshot(params) {
     const tab = await resolveTab(params);
     // The missing assertScriptableUrl here is a decision, not an oversight, and
-    // adding one "for consistency" with press_key/type_text/javascript_eval
-    // would be a regression in usefulness for no security gain. Those three
-    // MUTATE a privileged page — injecting keystrokes or script into this
-    // extension's own options UI repoints the bridge persistently, and there is
-    // no legitimate use for it. Capturing pixels mutates nothing, and
-    // screenshotting an internal page is sometimes genuinely useful when
-    // diagnosing. Same debugger reach, deliberately different rule.
+    // adding one "for consistency" with press_key/type_text/javascript_eval/
+    // upload_file would be a regression in usefulness for no security gain.
+    // Those four MUTATE a privileged page — injecting keystrokes, script or a
+    // file selection into this extension's own options UI repoints the bridge
+    // persistently, and there is no legitimate use for it. Capturing pixels
+    // mutates nothing, and screenshotting an internal page is sometimes
+    // genuinely useful when diagnosing. The line the guards follow is
+    // mutate-vs-capture, not which Chrome API a handler happens to use: the
+    // fullPage branch below does reach chrome.debugger the way those four do
+    // and still carries no guard on purpose, while the default branch never
+    // touches the debugger at all (chrome.tabs.captureVisibleTab).
     //
     // Screenshots are used to inspect real visual defects (spacing, colour,
     // overflow). A fake orange edge in every image would corrupt that, so the
@@ -1414,6 +1422,14 @@ const handlers = {
   async upload_file(params) {
     if (!params.selector || !params.filePath) throw new Error("selector and filePath are required");
     const tab = await resolveTab(params);
+    // The fourth mutating debugger tool, guarded for the same reason as
+    // press_key/type_text/javascript_eval. On a browser-internal page the
+    // attach, DOM.getDocument and DOM.querySelector all succeed today and only
+    // DOM.setFileInputFiles fails, with "Node is not a file input element" —
+    // that is a coincidence of the current HTML (neither popup.html nor
+    // sidepanel.html happens to contain a file input), not a guard, and it
+    // stops holding the day one of them does.
+    assertScriptableUrl(tab);
     await ensureDebugger(tab.id, ["DOM"]);
     const doc = await cdp(tab.id, "DOM.getDocument", {});
     const node = await cdp(tab.id, "DOM.querySelector", {
