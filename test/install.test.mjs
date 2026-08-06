@@ -103,6 +103,10 @@ check("a rerun prints upgrade wording", /nâng cấp/.test(rerunOut), rerunOut.s
 const after = JSON.parse(readFileSync(join(fakeHome, ".ccchrome.json"), "utf8")).token;
 check("a rerun keeps the existing token", after === before, `${before} -> ${after}`);
 check("a rerun actually replaces the source tree", !existsSync(marker));
+// A regression that deletes server/ and fails to restore it would still
+// pass both checks above (marker gone, token unchanged) — this is the one
+// that actually proves the bridge is still installable after the rerun.
+check("a rerun leaves a working server/ in place", existsSync(join(installDir, "server", "index.js")));
 
 // --- uninstall -------------------------------------------------------------
 

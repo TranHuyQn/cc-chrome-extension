@@ -11,7 +11,10 @@ set -euo pipefail
 # every file/dir this script creates — via mkdir, cp, mv, tar, or node's
 # writeFileSync — starts owner-only, with no window where it briefly exists
 # group/other-readable. Token files also pass an explicit `mode: 0o600` at
-# writeFileSync so they don't depend on umask alone.
+# writeFileSync, and (N2) get an unconditional `chmod` on every run too,
+# because writeFileSync's `mode` only applies the moment a file is *created*
+# — rewriting an existing file (the upgrade path, every time) leaves
+# whatever mode it already had untouched.
 umask 077
 
 PORT="${CC_CHROME_PORT:-8787}"
@@ -62,13 +65,19 @@ upgrade=no
 say "Claude Code Chrome Bridge — $([ $upgrade = yes ] && echo 'nâng cấp' || echo 'cài đặt')"
 say ""
 
-# 1. Chuẩn bị mã nguồn mới trong thư mục tạm và kiểm tra đầy đủ TRƯỚC khi
-#    đụng tới bản cài hiện tại (C1). Tải hỏng, gói thiếu node_modules, gói
-#    phát hành thiếu uninstall.sh/service-unit.sh — tất cả phải dừng lại ở
-#    đây, không được xoá mất bản cài đang chạy (và thư mục extension Chrome
-#    đã Load unpacked) trước khi biết bản thay thế dùng được.
+# 1. Chuẩn bị mã nguồn mới trong "$INSTALL_DIR/.new" và kiểm tra đầy đủ TRƯỚC
+#    khi đụng tới bản cài hiện tại (C1). Staging NẰM TRONG $INSTALL_DIR thay
+#    vì thư mục tạm hệ thống, để bước hoán đổi ở mục 3 luôn là "mv" trên cùng
+#    filesystem — tức đổi tên tức thời, không phải copy. Đổi tên thì Ctrl-C
+#    hầu như không có cửa sổ nào để rơi vào giữa chừng; copy xuyên filesystem
+#    (tmpfs /tmp trên Linux, ví dụ) có thể mất vài giây cho node_modules và
+#    hết dung lượng đĩa giữa chừng thì hỏng cả hai bản.
 say "→ Chuẩn bị mã nguồn mới…"
-stage="$(mktemp -d)"
+mkdir -p "$INSTALL_DIR"
+chmod 700 "$INSTALL_DIR"
+stage="$INSTALL_DIR/.new"
+rm -rf "$stage"
+mkdir -p "$stage"
 tmp=""
 trap 'rm -rf "$stage" "$tmp"' EXIT
 if [ -n "$SOURCE" ]; then
@@ -103,11 +112,18 @@ fi
 #    (thứ tự cũ), một lần tải hỏng sẽ để lại service đã tắt lẫn mã nguồn bị
 #    xoá — không còn gì chạy được.
 if [ "$upgrade" = yes ]; then
-  say "→ Dừng dịch vụ đang chạy…"
-  [ -n "${CC_CHROME_SKIP_SERVICE:-}" ] || cc_service_stop
+  if [ -n "${CC_CHROME_SKIP_SERVICE:-}" ]; then
+    # N4: say only what actually happens — CC_CHROME_SKIP_SERVICE means this
+    # step is skipped, not performed.
+    say "  (bỏ qua bước dừng dịch vụ — CC_CHROME_SKIP_SERVICE)"
+  else
+    say "→ Dừng dịch vụ đang chạy…"
+    cc_service_stop
+  fi
 fi
 
-# 3. Đưa mã nguồn đã kiểm tra vào vị trí thật.
+# 3. Đưa mã nguồn đã kiểm tra vào vị trí thật. $stage nằm trên cùng
+#    filesystem với $INSTALL_DIR nên mỗi "mv" dưới đây là đổi tên, không copy.
 say "→ Cài mã nguồn vào $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR/logs"
 rm -rf "$INSTALL_DIR/server" "$INSTALL_DIR/extension"
@@ -119,6 +135,7 @@ if [ -f "$stage/uninstall.sh" ]; then
   chmod +x "$INSTALL_DIR/uninstall.sh"
 fi
 mv "$stage/service-unit.sh" "$INSTALL_DIR/service-unit.sh"
+rm -rf "$stage"
 
 # 4. Token — giữ nguyên khi nâng cấp, để khỏi phải dán lại URL vào popup.
 if [ "$upgrade" = yes ]; then
@@ -128,8 +145,11 @@ if [ "$upgrade" = yes ]; then
   else
     # C3: a missing/malformed/keyless state file must never crash here or
     # silently produce a "Bearer undefined" install — mint a fresh token
-    # and say so, the same as a first install.
+    # and say so, the same as a first install. N1: this necessarily
+    # replaces whatever tokens.json had, so tell the user their old URL
+    # (if they ever had one working) is now dead and must be re-pasted.
     say "→ Token cũ trong $STATE_FILE bị hỏng hoặc thiếu — sinh token mới."
+    say "  Token cũ (nếu còn dùng được) sẽ bị thu hồi — dán lại URL mới vào popup extension."
     TOKEN="$(new_token)"
   fi
 else
@@ -149,21 +169,25 @@ CC_STATE_FILE="$STATE_FILE" CC_TOKEN="$TOKEN" CC_PORT="$PORT" node -e '
     { mode: 0o600 }
   );
 '
-# Minor: merge into any existing tokens.json instead of overwriting it
-# wholesale, so an upgrade does not discard a token a user added by hand.
+# N1: tokens.json holds exactly one live token, this one — written wholesale,
+# not merged. server/tokens.js loads this file wholesale as the set of
+# credentials that authorize full browser control and (on a loopback bridge)
+# spawning `claude` under this login; merging previous entries in meant nothing
+# ever revoked them, so a run of bad-state recoveries left an unbounded set of
+# still-valid tokens behind. Overwriting is what actually revokes the old one.
 CC_TOKENS_FILE="$INSTALL_DIR/tokens.json" CC_TOKEN="$TOKEN" node -e '
   const fs = require("fs");
-  const file = process.env.CC_TOKENS_FILE;
-  let tokens = {};
-  try {
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) tokens = parsed;
-  } catch {
-    // missing or malformed — start fresh rather than fail the install
-  }
-  tokens[process.env.CC_TOKEN] = "local";
-  fs.writeFileSync(file, JSON.stringify(tokens, null, 2) + "\n", { mode: 0o600 });
+  fs.writeFileSync(
+    process.env.CC_TOKENS_FILE,
+    JSON.stringify({ [process.env.CC_TOKEN]: "local" }, null, 2) + "\n",
+    { mode: 0o600 }
+  );
 '
+# N2: repair modes on every run, not just the run that created these files —
+# writeFileSync's `mode` option is a create-time-only default in Node/POSIX,
+# so a file that already existed with looser bits (e.g. from a pre-fix
+# install) would otherwise keep them forever across every future upgrade.
+chmod 600 "$STATE_FILE" "$INSTALL_DIR/tokens.json"
 
 # 5. Service
 say "→ Cài dịch vụ nền"
@@ -186,7 +210,8 @@ else
   # situations (stale bootstrap state, WSL/containers, ssh without
   # lingering). Warn and keep going instead of dying with raw tool output.
   say "→ Cảnh báo: không khởi động được dịch vụ nền. Xem log: $INSTALL_DIR/logs/bridge.err.log"
-  say "   Bạn có thể tự chạy: node $INSTALL_DIR/server/index.js --http"
+  # N3: quoted so the command stays copy-pasteable when $INSTALL_DIR contains a space.
+  say "   Bạn có thể tự chạy: node \"$INSTALL_DIR/server/index.js\" --http"
 fi
 
 # 6. Slash command
