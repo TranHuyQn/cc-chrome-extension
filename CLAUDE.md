@@ -24,8 +24,8 @@ cd test && npm install   # e2e deps (playwright)
 ```bash
 npm run build       # package extension -> dist/*.zip + signed dist/*.crx
 npm run lint        # eslint (flat config in eslint.config.mjs); must stay at 0 errors
-npm test            # build.test + origin.test + e2e (stdio) + e2e (http) — needs real Chromium
-npm run test:stdio  # a single suite: also test:build, test:origin, test:http
+npm test            # build.test + origin.test + e2e + e2e-http — needs real Chromium
+npm run test:e2e    # a single suite: also test:build, test:origin, test:http
 ```
 
 Tests launch a real Chromium with the extension loaded. All four files under `test/` read

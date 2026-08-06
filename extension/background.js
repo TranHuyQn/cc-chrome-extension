@@ -180,10 +180,12 @@ function scheduleReconnect() {
   reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
 }
 
-// A loopback URL is tried even with no token, because a bridge running on
-// this machine may simply not have one configured yet. A remote URL without a
-// token can only ever be refused — worth saying locally instead of
-// round-tripping.
+// A loopback URL is tried even with no token — the server always requires
+// auth to even start (see the FATAL check in server/index.js's mainHttp), so
+// a token-less bridge cannot exist; connecting without one just lets the
+// server's own 4002 explain the problem instead of the extension guessing
+// here. A remote URL without a token skips the round trip: it can only ever
+// be refused.
 function isLoopbackUrl(parsed) {
   const host = parsed.hostname.replace(/^\[|\]$/g, "");
   return host === "127.0.0.1" || host === "localhost" || host === "::1";

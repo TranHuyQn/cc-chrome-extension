@@ -83,6 +83,12 @@ const server = spawn(process.execPath, [join(root, "server", "index.js"), "--htt
 });
 server.stderr.setEncoding("utf8");
 server.stderr.on("data", (d) => process.stderr.write(`[server] ${d}`));
+// A child that dies at startup (bad flag, port already in use, ...) would
+// otherwise leave the poll below spinning for the full 12s and then fail
+// inside mcpClient.connect() with a bare ECONNREFUSED — the real cause (the
+// child's own exit code/signal) is only visible here.
+let serverExit = null;
+server.on("exit", (code, signal) => { serverExit = { code, signal }; });
 
 // Everything that needs the server or a browser lives in this try so a
 // timeout or thrown check partway through still tears down the child process
@@ -91,9 +97,17 @@ server.stderr.on("data", (d) => process.stderr.write(`[server] ${d}`));
 let context = null;
 let userDataDir = null;
 try {
-  for (let i = 0; i < 60; i++) {
-    try { if ((await fetch(`http://127.0.0.1:${PORT}/health`)).ok) break; } catch { /* not up yet */ }
+  let healthy = false;
+  for (let i = 0; i < 60 && !serverExit; i++) {
+    try { if ((await fetch(`http://127.0.0.1:${PORT}/health`)).ok) { healthy = true; break; } } catch { /* not up yet */ }
     await sleep(200);
+  }
+  if (!healthy) {
+    throw new Error(
+      serverExit
+        ? `Bridge server exited before /health came up (code=${serverExit.code}, signal=${serverExit.signal}). Check the [server] stderr above.`
+        : `Bridge server never answered http://127.0.0.1:${PORT}/health within 12s.`
+    );
   }
 
   const mcpClient = new Client({ name: "e2e-test", version: "1.0.0" }, { capabilities: {} });

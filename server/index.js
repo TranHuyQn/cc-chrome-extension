@@ -10,9 +10,10 @@
 // each token identifies one team member: their Claude Code sessions are
 // routed to their own Chrome extension. Tokens are required either way.
 //
-// The `--http` flag is still accepted (and still required) even though http
-// is now the only mode: every doc, unit file, and script that starts this
-// server passes it, and there is nothing to gain from making it an error.
+// The `--http` flag is still accepted even though http is now the only mode
+// (it is not required — process.argv is never checked for it — but every
+// doc, unit file, and script that starts this server still passes it, and
+// there is nothing to gain from making its absence an error).
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -30,7 +31,20 @@ import { AgentSession } from "./agent.js";
 import { isLoopbackHost, isLoopbackAddress, forwardedHeadersIn } from "./loopback.js";
 
 const PORT = Number(process.env.CC_CHROME_PORT || 8787);
-const HOST = process.env.CC_CHROME_HOST || "0.0.0.0";
+// Loopback by default: the mode this replaced (stdio) bound 127.0.0.1
+// unconditionally, and this release's premise is that most installs are a
+// single person running the bridge on their own machine, where 0.0.0.0 would
+// expose an unauthenticated GET /health (a positive fingerprint that this
+// host runs Chrome Bridge with a live browser attached) to the network for
+// nothing, and — the bigger reason — would leave AGENT_ENABLED below false,
+// silently disabling the side panel until the user discovers CC_CHROME_HOST
+// on their own. README.md and deploy/chrome-bridge.service both say never to
+// expose 8787 directly; a default that violates that is the configuration
+// mistake panelRefusalReason() below says must not be reachable. The shared
+// VPS deployment is the exception, so it opts in: deploy/Dockerfile sets
+// CC_CHROME_HOST=0.0.0.0 explicitly, and deploy/chrome-bridge.service already
+// sets 127.0.0.1 explicitly (unaffected by this default either way).
+const HOST = process.env.CC_CHROME_HOST || "127.0.0.1";
 const REQUEST_TIMEOUT_MS = Number(process.env.CC_CHROME_TIMEOUT_MS || 45000);
 // Chrome terminates an extension's service worker once its window has been in
 // the background long enough for intensive throttling to starve the keepalive
@@ -271,11 +285,15 @@ class BridgeRegistry {
   }
 
   notConnectedError() {
-    const where = `Point the extension at this server: click the extension icon in Chrome and set the WebSocket URL to ws(s)://<host>/ws?token=<your-token> (same token as your Claude Code config), then 'Lưu & kết nối lại'.`;
+    // ws://HOST:PORT is exactly right for the common case (a local install,
+    // HOST defaulting to 127.0.0.1) — copy-pasteable as-is. Behind a reverse
+    // proxy (the shared-VPS deployment) this process only knows its own bind
+    // address, not the public domain or that TLS terminates in front of it,
+    // so that one case still needs a human to swap in wss://<their-domain>.
     return new Error(
       "Chrome extension is not connected for this account.\n" +
       "1. Chrome must be running with the 'Claude Code Chrome Bridge' extension installed (chrome://extensions -> Load unpacked -> extension/ folder).\n" +
-      `2. ${where}`
+      `2. Point the extension at this server: click the extension icon in Chrome and set the WebSocket URL to ws://${HOST}:${PORT}/ws?token=<your-token> (same token as your Claude Code config; behind a reverse proxy, use wss://<your-domain>/ws?token=<your-token> instead), then 'Lưu & kết nối lại'.`
     );
   }
 
