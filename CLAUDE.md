@@ -8,8 +8,13 @@ An MCP server (`server/`) + Chrome MV3 extension (`extension/`) that lets Claude
 without any claude.ai login. Every MCP tool call is forwarded over WebSocket to the extension, which
 executes it with `chrome.tabs` / `chrome.scripting` / `chrome.debugger` and returns JSON.
 
-Two runtime modes, both in `server/index.js`: `stdio` (local, single user, binds `127.0.0.1:9876`)
-and `http` (`--http`, shared VPS, multi-user, Bearer-token routing, port `8787`).
+One runtime mode: `mainHttp()` in `server/index.js` runs an HTTP + WebSocket server, bound to
+`127.0.0.1` by default (port `8787`), that every Claude Code session and the extension both talk to.
+There is no `mainStdio()` — stdio mode (single process on stdout, no auth) was removed in 3.5.0. The
+distribution model changed with it: `scripts/install.sh` installs a per-user background service (see
+"Setup and commands" below) instead of everyone pointing at one shared server; `deploy/` still runs
+the old shared-server shape for anyone who deliberately wants it (see the warning at the top of
+`deploy/chrome-bridge.service`).
 
 ## Setup and commands
 
@@ -87,11 +92,6 @@ They run in a different realm, so:
 - Element refs live on `window.__cc_refs`, rebuilt by `read_page`/`find`. They go stale on navigation
   or DOM replacement; that is expected, the fix is to call `read_page` again.
 
-## stdio mode: stdout is the MCP transport
-
-In stdio mode stdout carries the MCP protocol. Any stray `console.log` in `server/index.js` corrupts
-the session. Log through `log()` (which is `console.error`) or `process.stderr` only.
-
 ## Versions and signing key
 
 - Three files carry the version and must agree: `extension/manifest.json` `version` (names the build
@@ -105,7 +105,7 @@ the session. Log through `log()` (which is `console.error`) or `process.stderr` 
 
 ## Security invariants — do not relax without being asked
 
-- Both modes require `Origin: chrome-extension://…` on the WebSocket handshake.
+- The bridge requires `Origin: chrome-extension://…` on the WebSocket handshake.
   An absent Origin is a rejection, not a pass. It blocks browser-originated
   cross-origin connections and raises the bar against casual local clients, but
   `Origin` is client-supplied and a purpose-built local process forges it in one
@@ -170,15 +170,16 @@ the session. Log through `log()` (which is `console.error`) or `process.stderr` 
   deliberate tradeoff, not an oversight. The panel already requires a loopback
   bridge, so the exposure is same-machine only, and that machine already holds
   the token in `~/.ccchrome.json` and `chrome.storage`.
-- Known limitation, not a fixed one: a hand-typed
-  `ws://127.0.0.1:9876/ws?token=anything` still dials `/panel` on the stdio
-  bridge and evicts the extension's own connection. The stdio bridge
-  (`DEFAULT_WS_URL`, port 9876) has no path routing at all, so `/panel` lands
-  in the same connection handler as `/ws` and `registry.attach()` treats it as
-  a replacement connection (closes the old one with 4000). The panel's guard
-  in `extension/sidepanel.js` keys only on the token's presence in the saved
-  URL, not on which bridge is actually on the other end, and the stdio bridge
-  ignores both path and token. No documented flow produces that URL.
+- Historical note, now moot: earlier versions had a second `stdio` mode
+  bridge that ignored path routing entirely, so a hand-typed
+  `ws://127.0.0.1:9876/ws?token=anything` would dial `/panel` on it and evict
+  the extension's own connection. `mainStdio()` was removed in 3.5.0 — there
+  is exactly one server process now, it always does path-based routing
+  between `/ws` and `/panel`, and nothing in this repo listens on 9876 by
+  default any more. `extension/sidepanel.js` and `extension/popup.js` still
+  carry `9876` in a stale UI fallback default; that is a dead value with
+  nothing behind it unless a caller manually points the extension at some
+  other, unrelated process on that port.
 - `attach_tab` in `extension/background.js` is the one sanctioned way a tab
   outside the session group gets in. It is not an MCP tool, so **Claude** cannot
   call it — but that is the only boundary that claim covers: `handleRequest`
@@ -209,18 +210,24 @@ the session. Log through `log()` (which is `console.error`) or `process.stderr` 
   stored ids per window (`panelSession.<windowId>` in `chrome.storage.local`)
   for the same reason: one extension-global key made two windows resume one
   conversation.
-- **Known hole, verified in a real browser, not fixed here:**
-  `chrome.debugger.attach` succeeds on this extension's *own*
-  `chrome-extension://<id>/sidepanel.html` and `popup.html`, and `javascript_eval`
-  never calls `assertScriptableUrl` (only `execInTab` does), nor does `navigate`.
-  So a model can `navigate` a tab already in its own group to the extension's own
-  page and then `javascript_eval` there — that code runs in the extension's
-  privileged realm with `chrome.tabs.*`, which defeats `resolveTabInGroup`
-  entirely (confirmed end-to-end: `chrome.tabs.query({})` returned every tab in
-  the browser). Chrome blocks attach on `chrome://` but not on
-  `chrome-extension://`. Pre-existing, predates the side panel branch, and needs
-  its own decision (deny `chrome-extension://` in `javascript_eval`, or refuse to
-  `navigate` there at all).
+- **Closed in 3.5.0:** `chrome.debugger.attach` still succeeds on this
+  extension's *own* `chrome-extension://<id>/sidepanel.html` and `popup.html`
+  (Chrome blocks attach on `chrome://` but not on `chrome-extension://`), so
+  the guard has to be at the tool level, not the debugger API. `navigate` calls
+  `assertNavigableUrl()` and refuses to send a tab to `chrome-extension:` (or
+  `chrome:`, `devtools:`, `edge:`, non-blank `about:`) in the first place, and
+  every mutating debugger-backed tool — `javascript_eval`, `press_key`,
+  `type_text`, `upload_file` — calls `assertScriptableUrl()` on the tab before
+  it touches `chrome.debugger`, so none of them can run against a
+  browser-internal page even if a tab somehow already sits on one.
+  `take_screenshot` deliberately does **not** call `assertScriptableUrl()` —
+  that is a decision, not a gap: capturing pixels mutates nothing, while
+  injecting keystrokes, script or a file selection into this extension's own
+  options UI has no legitimate use and can repoint the bridge itself.
+  `test/security-eval.test.mjs` guards both halves of this: it asserts the
+  four mutating tools are refused against `chrome-extension:`/`chrome:`
+  targets, and separately asserts `take_screenshot` still **succeeds** against
+  the same targets, specifically so nobody "fixes" that asymmetry later.
 
 ## Side panel chat operational notes
 
@@ -261,5 +268,5 @@ the session. Log through `log()` (which is `console.error`) or `process.stderr` 
 - User-facing docs (`README.md`, popup UI, `/ccchrome` command output) are in Vietnamese. Code,
   comments, and commit messages are in English.
 - Config is env-var driven and documented in the README table — add new vars there too.
-- `.claude/commands/ccchrome.md` is shipped to users via `scripts/install-command.sh`; it is a
-  product surface, not local tooling.
+- `.claude/commands/ccchrome.md` is shipped to users via `scripts/install.sh` (it copies the file into
+  `~/.claude/commands/`); it is a product surface, not local tooling.

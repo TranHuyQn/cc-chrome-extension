@@ -1,6 +1,13 @@
 # Chạy không cần Docker: systemd unit (đặt tại /etc/systemd/system/chrome-bridge.service)
 #   sudo systemctl daemon-reload && sudo systemctl enable --now chrome-bridge
 # Vẫn cần reverse proxy TLS (Caddy/nginx) phía trước cổng 8787.
+#
+# ⚠️  MÔ HÌNH CŨ — không còn dùng từ 3.5.0.
+# Từ 3.5.0 mỗi người tự chạy bridge trên máy mình (xem scripts/install.sh).
+# File này giữ lại cho ai vẫn đang chạy mô hình server chung.
+# Lưu ý: unit này đặt CC_CHROME_HOST=127.0.0.1 vì có reverse proxy đứng trước —
+# đó KHÔNG phải là "chỉ máy này gọi được", và /panel sẽ từ chối (mã 4004) vì
+# cổng chặn còn kiểm địa chỉ peer và các header X-Forwarded-*.
 [Unit]
 Description=Claude Code Chrome Bridge MCP server (http mode)
 After=network.target
