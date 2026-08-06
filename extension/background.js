@@ -4,7 +4,9 @@
 // browser-automation commands (navigate, click, fill, screenshot, ...)
 // using chrome.tabs / chrome.scripting / chrome.debugger.
 
-const DEFAULT_WS_URL = "ws://127.0.0.1:9876";
+// The bridge has one mode now: http bound to loopback, installed as a per-user
+// service. 9876 was the stdio bridge, which no longer exists.
+const DEFAULT_WS_URL = "ws://127.0.0.1:8787/ws";
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 const KEEPALIVE_MS = 20000;
@@ -178,9 +180,10 @@ function scheduleReconnect() {
   reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
 }
 
-// A loopback URL is the stdio-mode bridge (ws://127.0.0.1:9876), which has no
-// tokens at all. Anything else is a shared server, where a URL without a token
-// can only ever be refused — worth saying locally instead of round-tripping.
+// A loopback URL is tried even with no token, because a bridge running on
+// this machine may simply not have one configured yet. A remote URL without a
+// token can only ever be refused — worth saying locally instead of
+// round-tripping.
 function isLoopbackUrl(parsed) {
   const host = parsed.hostname.replace(/^\[|\]$/g, "");
   return host === "127.0.0.1" || host === "localhost" || host === "::1";

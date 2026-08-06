@@ -2,20 +2,19 @@
 // MCP server that bridges Claude Code to the "Claude Code Chrome Bridge"
 // extension.
 //
-// Two modes:
-//
-// 1. stdio (default) — for running locally on each developer machine:
-//      Claude Code --(MCP/stdio)--> this process --(ws://127.0.0.1)--> extension
-//
-// 2. http (--http flag or CC_CHROME_MODE=http) — for hosting on a shared
-//    VPS so a whole team can use one server:
+// One mode: http, bound to loopback by default, installed as a per-user
+// background service on each developer's own machine:
 //      Claude Code --(MCP over Streamable HTTP, Bearer token)--> this process
-//      extension  --(wss://host/ws?token=...)--------------------^
-//    Each token identifies one team member: their Claude Code sessions are
-//    routed to their own Chrome extension. Tokens are required in http mode.
+//      extension  --(ws://127.0.0.1/ws?token=...)-----------------^
+// The same server also runs on a shared VPS for a whole team, in which case
+// each token identifies one team member: their Claude Code sessions are
+// routed to their own Chrome extension. Tokens are required either way.
+//
+// The `--http` flag is still accepted (and still required) even though http
+// is now the only mode: every doc, unit file, and script that starts this
+// server passes it, and there is nothing to gain from making it an error.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { WebSocketServer } from "ws";
 import { createServer } from "node:http";
@@ -30,9 +29,8 @@ import { RateLimiter, clientIp } from "./ratelimit.js";
 import { AgentSession } from "./agent.js";
 import { isLoopbackHost, isLoopbackAddress, forwardedHeadersIn } from "./loopback.js";
 
-const MODE = process.argv.includes("--http") || process.env.CC_CHROME_MODE === "http" ? "http" : "stdio";
-const PORT = Number(process.env.CC_CHROME_PORT || (MODE === "http" ? 8787 : 9876));
-const HOST = process.env.CC_CHROME_HOST || (MODE === "http" ? "0.0.0.0" : "127.0.0.1");
+const PORT = Number(process.env.CC_CHROME_PORT || 8787);
+const HOST = process.env.CC_CHROME_HOST || "0.0.0.0";
 const REQUEST_TIMEOUT_MS = Number(process.env.CC_CHROME_TIMEOUT_MS || 45000);
 // Chrome terminates an extension's service worker once its window has been in
 // the background long enough for intensive throttling to starve the keepalive
@@ -85,11 +83,6 @@ function hostForUrl(host) {
   return bare.includes(":") ? `[${bare}]` : bare;
 }
 
-// One Chrome tab group per Claude Code session. stdio serves exactly one
-// session per process, so a value minted at startup is that session's identity;
-// http reuses the MCP session id, which already means the same thing.
-const STDIO_SESSION_ID = randomUUID();
-
 const log = (...args) => console.error("[claude-code-chrome-mcp]", ...args);
 
 // Only the Chrome extension may drive the bridge. An absent Origin used to slip
@@ -120,9 +113,7 @@ function tokenFromSubprotocol(req) {
 
 // `ws` omits Sec-WebSocket-Protocol from the 101 response unless a protocol is
 // selected here, and a browser that offered protocols and got none back fails
-// the handshake with no usable error. Both modes install this: stdio normally
-// sees no subprotocol, but a local URL that still carries ?token= would make
-// the extension offer one.
+// the handshake with no usable error. Both /ws and /panel install this.
 function pickSubprotocol(protocols) {
   for (const proto of protocols) {
     if (proto.startsWith(SUBPROTOCOL_PREFIX)) return proto;
@@ -280,9 +271,7 @@ class BridgeRegistry {
   }
 
   notConnectedError() {
-    const where = MODE === "http"
-      ? `Point the extension at this server: click the extension icon in Chrome and set the WebSocket URL to wss://<your-domain>/ws?token=<your-token> (same token as your Claude Code config), then 'Lưu & kết nối lại'.`
-      : `Make sure Chrome is running with the extension installed and its WebSocket URL is ws://127.0.0.1:${PORT} (click the extension icon to check).`;
+    const where = `Point the extension at this server: click the extension icon in Chrome and set the WebSocket URL to ws(s)://<host>/ws?token=<your-token> (same token as your Claude Code config), then 'Lưu & kết nối lại'.`;
     return new Error(
       "Chrome extension is not connected for this account.\n" +
       "1. Chrome must be running with the 'Claude Code Chrome Bridge' extension installed (chrome://extensions -> Load unpacked -> extension/ folder).\n" +
@@ -635,40 +624,6 @@ function buildMcpServer(getBridge, getBridgeNow, statusExtra = {}, sessionRef = 
   );
 
   return server;
-}
-
-// ---------------------------------------------------------------------------
-// stdio mode (local, single user)
-// ---------------------------------------------------------------------------
-
-async function mainStdio() {
-  const wss = new WebSocketServer({ host: "127.0.0.1", port: PORT, handleProtocols: pickSubprotocol });
-  wss.on("listening", () => log(`WebSocket bridge listening on ws://127.0.0.1:${PORT}`));
-  wss.on("error", (err) => {
-    if (err.code === "EADDRINUSE") {
-      log(`FATAL: port ${PORT} already in use. Another MCP server instance running? Set CC_CHROME_PORT to change.`);
-      process.exit(1);
-    }
-    log("WebSocket server error:", err.message);
-  });
-  wss.on("connection", (socket, req) => {
-    const origin = req.headers.origin || "";
-    if (!originAllowed(origin)) {
-      log(`Rejected connection from origin: ${origin || "(none)"}`);
-      socket.close(4003, "origin not allowed");
-      return;
-    }
-    registry.attach(socket, "default", "local");
-  });
-
-  const server = buildMcpServer(
-    () => registry.require("default"),
-    () => registry.requireNow("default"),
-    { mode: "stdio" },
-    { id: STDIO_SESSION_ID }
-  );
-  await server.connect(new StdioServerTransport());
-  log(`MCP server ready (stdio). Waiting for the Chrome extension on ws://127.0.0.1:${PORT} ...`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1542,5 +1497,4 @@ async function mainHttp() {
   });
 }
 
-if (MODE === "http") await mainHttp();
-else await mainStdio();
+await mainHttp();
