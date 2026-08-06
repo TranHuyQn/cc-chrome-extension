@@ -75,6 +75,8 @@ function makeSession(extra = {}) {
   check("asks for stream-json output", flat.includes("--output-format stream-json"), flat);
   check("disables every built-in tool", argv.includes("--tools") && argv[argv.indexOf("--tools") + 1] === "", flat);
   check("uses strict mcp config", argv.includes("--strict-mcp-config"), flat);
+  check("excludes user-level settings so no plugin/hook injects cross-project memory",
+    argv.includes("--setting-sources") && argv[argv.indexOf("--setting-sources") + 1] === "project", flat);
   check("allows the chrome mcp tools", flat.includes("mcp__chrome"), flat);
   check("first turn opens the session id, not a resume",
     argv.includes("--session-id") && !argv.includes("--resume"), flat);

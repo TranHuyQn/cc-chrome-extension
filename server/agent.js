@@ -103,6 +103,17 @@ export class AgentSession {
       "--verbose",
       "--include-partial-messages",
       "--strict-mcp-config",
+      // User-level settings (~/.claude/settings.json) can carry `enabledPlugins`
+      // whose `SessionStart` hooks inject cross-project memory (or anything
+      // else) into every spawned child — including this one, on a "fresh"
+      // session, which made "Phiên mới" look broken: the log cleared but the
+      // model still recalled unrelated prior work from other projects. This
+      // agent must start genuinely blank every time, the way the original
+      // Claude for Chrome extension is fully ephemeral between sessions. Do
+      // not remove this thinking it's redundant with --strict-mcp-config —
+      // that flag only pins the *MCP* config; it does nothing about plugins,
+      // hooks, or any other user-level setting.
+      "--setting-sources", "project",
       "--mcp-config", this.mcpConfig(),
       // Every built-in tool off: this agent has no business reading or writing
       // the user's filesystem, and the browser tools all arrive over MCP.

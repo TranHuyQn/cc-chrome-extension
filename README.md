@@ -212,6 +212,17 @@ Nói thẳng để khỏi hiểu nhầm:
   bấm **Đưa tab này vào phiên** ngay trong khung chat.
 - **Agent trong panel không đọc/ghi được file nào trên máy** — chạy với
   `--tools ""`, chỉ có đúng các tool điều khiển trình duyệt (`mcp__chrome`).
+- **Agent trong panel không thấy plugin, hook hay ký ức chéo project nào của
+  bạn** — tiến trình `claude` mà server spawn cho mỗi lượt chat chạy với cờ
+  `--setting-sources project`, loại hẳn cấu hình cấp người dùng
+  (`~/.claude/settings.json`) ra khỏi phiên. Đây là chủ đích: nếu không có cờ
+  này, một plugin bật toàn cục (ví dụ plugin ghi nhớ chạy qua hook
+  `SessionStart`) sẽ nạp ký ức từ **mọi project khác** vào phiên panel, kể cả
+  khi bạn vừa bấm "Phiên mới" — log trên UI trống nhưng model vẫn nhớ việc ở
+  project khác, vì ký ức đó chưa bao giờ đến từ hội thoại. Panel bị cô lập
+  khỏi cấu hình người dùng để khớp với extension Claude for Chrome gốc (không
+  giữ gì qua lại giữa các phiên) và với tính năng ghi nhớ của Claude (vốn
+  tách riêng theo từng project).
 - **Server không lưu nội dung hội thoại nào cả** — nhưng lịch sử vẫn tồn tại
   trên chính máy này, trong file phiên của CLI `claude` dưới
   `~/.cc-chrome-bridge/panel` (xem mục Vận hành bên dưới), và **sống sót qua
@@ -241,11 +252,17 @@ Nói thẳng để khỏi hiểu nhầm:
 
 ### Nếu khung chat mở chậm
 
-Mỗi lượt chat spawn một tiến trình `claude` mới — nếu máy chạy server có cấu
-hình `SessionStart` hook (ví dụ qua các plugin), hook đó chạy lại **mỗi lượt
-chat**, không chỉ một lần lúc khởi động. Trên máy phát triển tính năng này,
-việc đó cộng thêm độ trễ khởi động rõ rệt cho từng lượt trả lời — không phải
-lỗi mạng hay lỗi model, mà là chi phí cố hữu của kiến trúc spawn-mỗi-lượt.
+Mỗi lượt chat spawn một tiến trình `claude` mới — đó là chi phí cố hữu của
+kiến trúc spawn-mỗi-lượt (khởi động CLI, nạp MCP server...), không phải lỗi
+mạng hay lỗi model.
+
+**Không còn do `SessionStart` hook nữa.** Bản thân tiến trình được spawn với
+`--setting-sources project` (xem mục ngay trên), nên hook cấp người dùng —
+kể cả hook chạy qua plugin bật toàn cục — không nạp vào phiên panel nữa. Đã
+đo lại bằng thực nghiệm: trước khi thêm cờ, `system:init` của mỗi lượt chat
+báo `plugins` khác rỗng và một hook `SessionStart` thật (ghi file side-effect
+ra đĩa) chạy đúng mỗi lượt; sau khi thêm cờ, `plugins: []` và hook đó không
+chạy nữa, dù vẫn cùng máy, cùng file cấu hình `~/.claude/settings.json`.
 
 ### Vận hành
 

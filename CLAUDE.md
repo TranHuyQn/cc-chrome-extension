@@ -224,6 +224,23 @@ the session. Log through `log()` (which is `console.error`) or `process.stderr` 
 
 ## Side panel chat operational notes
 
+- `AgentSession.buildArgs()` in `server/agent.js` passes `--setting-sources
+  project` to every spawned `claude` child. This is load-bearing, not
+  redundant with `--strict-mcp-config`: user-level settings
+  (`~/.claude/settings.json`) can carry `enabledPlugins`, and a plugin's
+  `SessionStart` hook runs on *every* spawned child, not once — which made
+  "Phiên mới" look broken (the panel's log cleared and the server correctly
+  minted a fresh session id and `--session-id`, but the child still recalled
+  unrelated work from other projects, injected by the hook, not by
+  conversation history). Confirmed empirically: without the flag,
+  `system:init`'s `plugins` field was non-empty and a real `SessionStart` hook
+  fired on every turn (verified via its own disk side effect); with the flag,
+  `plugins: []` and the hook did not run, on the same machine and the same
+  `~/.claude/settings.json`. Isolating the panel this way is deliberate, not
+  just a bugfix: it matches the original Claude for Chrome extension (fully
+  ephemeral between sessions) and Claude's own memory feature (siloed per
+  project) — the panel agent should not see the user's global plugins, hooks,
+  or cross-project memory at all.
 - `~/.cc-chrome-bridge/panel` (`PANEL_CWD` in `server/index.js`) is the working
   directory every spawned `claude` child runs in, so it accumulates that CLI's
   own session history over time. Nothing in this repo prunes it.
