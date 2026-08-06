@@ -57,3 +57,13 @@ execFileSync("tar", ["-czf", join(dist, "cc-chrome-bridge.tar.gz"), "-C", stage,
 });
 rmSync(stage, { recursive: true, force: true });
 console.log("wrote dist/cc-chrome-bridge.tar.gz");
+
+// install.sh also ships as a STANDALONE release asset, copied straight to
+// dist/ rather than only left inside the tarball above. The one-line install
+// documented everywhere (README.md, .claude/commands/ccchrome.md) is
+// `curl .../releases/latest/download/install.sh | bash` — install.sh has to
+// exist on its own before the tarball it downloads is ever fetched, so
+// packing it exclusively inside cc-chrome-bridge.tar.gz would make that
+// command 404 no matter how carefully a release is published by hand.
+copyFileSync(join(root, "scripts", "install.sh"), join(dist, "install.sh"));
+console.log("wrote dist/install.sh");

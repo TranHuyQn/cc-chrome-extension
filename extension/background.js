@@ -21,7 +21,7 @@ const NETWORK_BUFFER_MAX = 400;
 // has no CLOSE_REASONS map at all, so the only client that can ever *display*
 // this message is a 2.0.0 extension whose saved URL simply has no ?token=.
 const CLOSE_REASONS = {
-  4001: "Token sai hoặc đã bị thu hồi — chạy lại /ccchrome connect",
+  4001: "Token sai hoặc đã bị thu hồi — mở popup, kiểm tra lại URL đã dán, hoặc chạy lại lệnh cài (bash ~/.cc-chrome-bridge/uninstall.sh rồi cài lại) để lấy token mới",
   4002: "URL thiếu token, hoặc extension cũ hơn server — kiểm tra URL đã có ?token=… chưa, rồi tải lại extension từ <server>/extension.zip nếu vẫn lỗi",
   4003: "Server từ chối: origin không hợp lệ",
 };
@@ -31,7 +31,7 @@ const CLOSE_REASONS = {
 const REFUSAL_CODES = new Set([4001, 4002, 4003]);
 
 const MISSING_TOKEN_REASON =
-  "URL thiếu token — server từ xa cần dạng wss://<domain>/ws?token=… (chạy /ccchrome connect để lấy URL)";
+  "URL thiếu token — server từ xa cần dạng wss://<domain>/ws?token=…; hỏi người quản lý server đó để lấy URL đầy đủ";
 
 const GROUP_COLOR = "orange";
 

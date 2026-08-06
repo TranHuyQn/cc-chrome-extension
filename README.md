@@ -17,8 +17,8 @@ Extension thay thế cho **Claude in Chrome** chính thức, dành cho team dùn
 > - Dịch vụ nền ghi **đường dẫn tuyệt đối** tới `node` vào lúc cài, không phải
 >   `node` trần. Đổi phiên bản Node bằng nvm/volta/fnm sau khi cài xong nghĩa
 >   là đường dẫn cũ biến mất — dịch vụ crash-loop âm thầm, không có gì báo lý
->   do. Chạy lại `scripts/install.sh` (hoặc `/ccchrome install`) để ghi lại
->   đường dẫn `node` mới.
+>   do. Chạy lại lệnh cài ở mục [Cài đặt](#cài-đặt) (`/ccchrome install` in ra
+>   đúng lệnh đó) để ghi lại đường dẫn `node` mới.
 
 ## Kiến trúc
 
@@ -73,7 +73,16 @@ macOS, `systemd --user` trên Linux) chạy bridge tại `http://127.0.0.1:8787`
 `chrome` với Claude Code (`claude mcp add --scope user --transport http chrome ...`).
 
 Máy đã cài rồi mà chạy lại đúng lệnh trên: script tự nhận ra là **nâng cấp**, giữ nguyên token cũ
-(khỏi phải dán lại URL vào extension), chỉ thay mã nguồn và khởi động lại dịch vụ.
+(khỏi phải dán lại URL vào extension), chỉ thay mã nguồn dưới `~/.cc-chrome-bridge/` và khởi động lại
+dịch vụ nền (phần server).
+
+> ⚠️ **Script KHÔNG tự cập nhật extension đang chạy trong Chrome.** Nó ghi đè
+> `~/.cc-chrome-bridge/extension` trên đĩa, nhưng Chrome vẫn chạy đúng bản code cũ đã Load unpacked
+> cho tới khi bạn tự bấm **Reload** trên thẻ extension ở `chrome://extensions` — Chrome không tự đọc
+> lại thư mục. Bỏ qua bước này nghĩa là bạn **âm thầm vẫn chạy extension của bản cũ**, kể cả khi
+> server đã lên bản mới: nếu bản cũ thiếu một bản vá bảo mật (như hai chốt `navigate`/`javascript_eval`
+> thêm ở 3.5.0, xem [Lưu ý bảo mật](#lưu-ý-bảo-mật)), bạn vẫn thiếu nó cho tới khi Reload. Luôn vào
+> `chrome://extensions` bấm **Reload** trên "Claude Code Chrome Bridge" sau mỗi lần chạy lại lệnh cài.
 
 ### 2. Hai việc phải tự làm trong Chrome
 
@@ -117,9 +126,11 @@ Script dừng dịch vụ nền, gỡ đăng ký MCP server `chrome`, xoá token
 
 - **Xem log**: `~/.cc-chrome-bridge/logs/bridge.err.log` (lỗi) và `bridge.log` (output thường). Hoặc
   gõ `/ccchrome logs` trong Claude Code.
-- **Khởi động lại dịch vụ**: `/ccchrome restart`, hoặc tự chạy `scripts/service-unit.sh`'s
-  `cc_service_stop`/`cc_service_start` (xem file đó để biết đúng lệnh `launchctl`/`systemctl` cho nền
-  tảng của bạn).
+- **Khởi động lại dịch vụ**: `/ccchrome restart`, hoặc tự chạy tay (cài qua `curl` thì bạn không có
+  thư mục `scripts/` của repo trên máy — file đã cài nằm ở `~/.cc-chrome-bridge/service-unit.sh`):
+  ```bash
+  bash -c 'source "$HOME/.cc-chrome-bridge/service-unit.sh" && cc_service_stop && cc_service_start'
+  ```
 - **Đổi phiên bản Node (nvm/volta/fnm)**: dịch vụ nền ghi đường dẫn tuyệt đối tới `node` lúc cài, nên
   đổi phiên bản Node sau đó làm dịch vụ crash-loop âm thầm. Chạy lại lệnh cài ở mục 1 để ghi lại đường
   dẫn `node` hiện tại.
@@ -385,8 +396,8 @@ Một người mở nhiều phiên Claude Code cùng lúc vẫn ổn — tất c
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
-| `CC_CHROME_PORT` | `8787` | Port HTTP server (Streamable HTTP cho Claude Code + WebSocket cho extension đều đi qua cổng này). |
-| `CC_CHROME_HOST` | `127.0.0.1` | Địa chỉ bind — **không đổi theo mode nào nữa, chỉ có một mặc định**. Quan trọng vì `AGENT_ENABLED` (bật khung chat side panel) được tính thẳng từ biến này: bind khác `127.0.0.1`/`::1` (ví dụ để chạy kiểu VPS) sẽ **âm thầm tắt khung chat**, không có log cảnh báo riêng nào khác ngoài mục này. `install.sh` không đặt biến này — luôn dùng đúng mặc định. |
+| `CC_CHROME_PORT` | `8787` | Port HTTP server (Streamable HTTP cho Claude Code + WebSocket cho extension đều đi qua cổng này). **Với dịch vụ nền cài bằng `install.sh`, đây KHÔNG phải biến đọc lúc chạy** — `install.sh` đọc `CC_CHROME_PORT` từ shell của bạn một lần, lúc cài, rồi ghi thẳng con số đó (literal, không phải tên biến) vào file dịch vụ (`scripts/service-unit.sh`). `export CC_CHROME_PORT=...` **sau khi** đã cài không đổi được cổng dịch vụ đang chạy — phải `export` giá trị mới rồi chạy lại lệnh cài ở mục [Cài đặt](#cài-đặt) (hoặc tự sửa file dịch vụ) để đổi cổng. |
+| `CC_CHROME_HOST` | `127.0.0.1` | Địa chỉ bind. **Với dịch vụ nền cài bằng `install.sh`, biến này không có tác dụng gì cả** — không như `CC_CHROME_PORT`, `install.sh` không đọc `CC_CHROME_HOST` từ môi trường: `scripts/service-unit.sh` ghi cứng `127.0.0.1` vào file dịch vụ, không tham số hoá. Đổi được host chỉ khi chạy `node server/index.js --http` tay (mô hình VPS ở dưới) hoặc tự sửa file dịch vụ. Quan trọng dù vậy vì `AGENT_ENABLED` (bật khung chat side panel) được tính thẳng từ giá trị host lúc chạy: bind khác `127.0.0.1`/`::1` sẽ **âm thầm tắt khung chat**, không có log cảnh báo riêng nào khác ngoài mục này. |
 | `CC_CHROME_TOKENS` | — | Token tĩnh: `token1=tên1,token2=tên2`. `install.sh` dùng `CC_CHROME_TOKENS_FILE` (dưới đây) thay vì biến này. |
 | `CC_CHROME_TOKENS_FILE` | — | Thay thế: file JSON `{"token": "tên"}`. `install.sh` ghi token do nó sinh vào `~/.cc-chrome-bridge/tokens.json` và trỏ dịch vụ nền vào đó. |
 | `CC_CHROME_PAIR_SECRET` | — | Bật pairing tự phục vụ (`POST /pair`) cho mô hình VPS dùng chung — xem [Triển khai lên VPS](#triển-khai-lên-vps-cho-cả-team). Cần ít nhất token tĩnh hoặc pair secret để chạy. |
@@ -421,14 +432,18 @@ cd test && npm install && cd ..
 node test/e2e.mjs
 ```
 
-Yêu cầu: có Chromium/Chrome trên máy. Test dùng `executablePath: /opt/pw-browsers/chromium` (môi trường CI); trên máy cá nhân sửa `test/e2e.mjs` cho trỏ đúng Chrome, hoặc bỏ `executablePath` để Playwright tự tải browser.
+Yêu cầu: có Chromium/Chrome trên máy. Test đọc biến môi trường `CHROME_PATH` cho đường dẫn browser
+(`CHROME_PATH=/path/to/chrome npm test`) — không đặt thì Playwright tự tải và dùng browser riêng của
+nó (không cần sửa gì trong `test/`). **Trên macOS, để trống `CHROME_PATH`** — xem lưu ý trong
+`CLAUDE.md` mục "Setup and commands" về vì sao Google Chrome bản thường không load được extension
+chưa đóng gói trên macOS ≥ 137.
 
 ## Troubleshooting
 
 | Triệu chứng | Cách xử lý |
 |---|---|
 | Tool báo "Chrome extension is not connected" | Mở Chrome, bấm icon extension xem trạng thái; bấm **Lưu & kết nối lại**. Kiểm tra dịch vụ nền còn sống không: `/ccchrome status` hoặc `curl http://127.0.0.1:8787/health`. |
-| Badge đỏ mãi không xanh | Port lệch nhau — xem popup extension và `CC_CHROME_PORT`. Hoặc port bị process khác chiếm (server sẽ log `port already in use` vào stderr). |
+| Badge đỏ mãi không xanh | Port lệch nhau — xem popup extension có đúng port dịch vụ nền đang chạy không (`~/.ccchrome.json` → trường `port`; đổi lại bằng cách cài lại với `CC_CHROME_PORT` mới, xem bảng Cấu hình, không phải sửa biến môi trường suông). Hoặc port bị process khác chiếm (server sẽ log `port already in use` vào stderr — xem `/ccchrome logs`). |
 | "Cannot run scripts on chrome://..." | Trang nội bộ của Chrome không cho inject script — chuyển sang tab web thường. |
 | Console/network trả rỗng | Việc thu thập chỉ bắt đầu từ lần gọi tool đầu tiên trên tab đó — reload trang rồi đọc lại. |
 | Click/fill báo "Ref N is stale" | Trang đã thay đổi — gọi `read_page` lại để lấy ref mới. |

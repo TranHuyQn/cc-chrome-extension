@@ -151,6 +151,17 @@ execFileSync("node", [join(root, "scripts", "build-release.mjs")], { stdio: "inh
 const tarPath = join(root, "dist", "cc-chrome-bridge.tar.gz");
 check("release tarball exists", existsSync(tarPath));
 
+// install.sh must also exist as its OWN release asset, not just inside the
+// tarball above: the one-line install everyone is told to run
+// (`curl .../releases/latest/download/install.sh | bash`) needs install.sh
+// to be fetchable before the tarball it then downloads is ever requested.
+const distInstallPath = join(root, "dist", "install.sh");
+check("install.sh is produced as a standalone release asset (dist/install.sh)", existsSync(distInstallPath));
+check(
+  "dist/install.sh is byte-identical to scripts/install.sh",
+  existsSync(distInstallPath) && readFileSync(distInstallPath, "utf8") === readFileSync(join(root, "scripts", "install.sh"), "utf8")
+);
+
 const listing = execFileSync("tar", ["-tzf", tarPath], { encoding: "utf8" });
 // Exact entry names, not substring matching against the raw listing — a
 // substring check would also pass on e.g. "server/index.js.bak".

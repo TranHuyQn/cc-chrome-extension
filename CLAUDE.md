@@ -50,6 +50,13 @@ the stable Google Chrome channel) still honors those flags, so the working combi
 platform is `HEADED=1` with no `CHROME_PATH` — that runs Playwright's bundled browser with a
 visible window.
 
+`scripts/install.sh` is the end-user installer referenced above under "What this is" (not needed for
+developing or testing this repo — `npm test` starts and stops its own server instances directly): it
+installs a per-user background service via `scripts/service-unit.sh` (LaunchAgent on macOS,
+`systemd --user` on Linux) and registers the MCP server with Claude Code over `--transport http`.
+`npm run build:release` (`scripts/build-release.mjs`) is what packages a release for GitHub — see
+"Publishing a GitHub Release" below.
+
 There is no formatter or bundler, and the extension is plain JS loaded directly by Chrome — never
 introduce a build step for `extension/` without being asked. A `PostToolUse` hook in
 `.claude/settings.json` lints every `.js`/`.mjs` file right after it is written; fix what it reports
@@ -102,6 +109,19 @@ They run in a different realm, so:
 - `key.pem` (gitignored, generated on first `npm run build`) determines the Chrome extension ID.
   Never delete or regenerate it — a new key changes the ID and breaks everyone's installed extension
   and any enterprise allowlist.
+
+## Publishing a GitHub Release
+
+`npm run build:release` (`scripts/build-release.mjs`) writes exactly two things to `dist/`:
+`cc-chrome-bridge.tar.gz` (the full install payload — `server/`, `extension/`, `node_modules`,
+`uninstall.sh`, `service-unit.sh`, `ccchrome.md`) and, standalone, `install.sh`. **Both files must be
+uploaded as release assets**, not just the tarball — the documented one-line install
+(`curl -fsSL .../releases/latest/download/install.sh | bash`, in `README.md` and
+`.claude/commands/ccchrome.md`) fetches `install.sh` on its own, before it ever downloads the tarball
+that `install.sh` itself pulls at `CC_CHROME_RELEASE_URL`. Forgetting the standalone `install.sh`
+asset makes that curl command 404 silently — there is no CI workflow that does this upload
+automatically, so it is a manual step on every release: run `npm run build:release`, then attach both
+`dist/cc-chrome-bridge.tar.gz` and `dist/install.sh` to the GitHub Release.
 
 ## Security invariants — do not relax without being asked
 
@@ -225,9 +245,13 @@ They run in a different realm, so:
   injecting keystrokes, script or a file selection into this extension's own
   options UI has no legitimate use and can repoint the bridge itself.
   `test/security-eval.test.mjs` guards both halves of this: it asserts the
-  four mutating tools are refused against `chrome-extension:`/`chrome:`
-  targets, and separately asserts `take_screenshot` still **succeeds** against
-  the same targets, specifically so nobody "fixes" that asymmetry later.
+  four mutating tools are refused against `chrome-extension://` targets (the
+  only scheme it drives against a real tab — `chrome:`, `devtools:`, `edge:`
+  are covered by `assertScriptableUrl()`/`assertNavigableUrl()` sharing the
+  one `INTERNAL_URL_RE` regex, not by a separate assertion per scheme), and
+  separately asserts `take_screenshot` still **succeeds** against the same
+  `chrome-extension://` target, specifically so nobody "fixes" that asymmetry
+  later.
 
 ## Side panel chat operational notes
 

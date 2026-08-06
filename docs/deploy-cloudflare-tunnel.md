@@ -1,5 +1,16 @@
 # Deploy lên home server qua Cloudflare Tunnel
 
+> ⚠️ **MÔ HÌNH CŨ — không còn dùng từ 3.5.0.** Từ 3.5.0 mỗi người tự chạy bridge
+> trên máy mình (xem `README.md` mục "Cài đặt", `curl … | bash`) — không cần
+> home server, không cần pairing secret. Tài liệu này giữ lại cho ai **cố
+> tình** muốn chạy một server dùng chung qua Cloudflare Tunnel. Hai điều đã
+> đổi mà tài liệu dưới đây chưa phản ánh hết: endpoint `GET /install.sh` đã bị
+> xoá khỏi server (sinh script theo URL server, không còn hợp với mô hình
+> cài local) — không còn cách tự động cài slash command từ một lệnh `curl`;
+> và slash command `/ccchrome` không còn `connect`/`disconnect` — dùng `curl`
+> thẳng tới `/pair` như `README.md` mục "Triển khai lên VPS cho cả team"
+> hướng dẫn.
+
 Hướng dẫn cho: **home server Linux có Docker**, **tunnel `cloudflared` đã chạy sẵn trong một container** (chỉ thêm hostname mới), team **2–5 người**.
 
 Đích đến: mỗi thành viên gõ lệnh trong Claude Code và Chrome trên máy họ làm theo.
@@ -259,23 +270,24 @@ Kỳ vọng `HTTP/2 200` và `content-type: application/zip`. Nếu ra 404 thì 
 
 Làm một mình cho chạy thông rồi mới mở cho team.
 
-### C1. Cài slash command
+### C2. Lấy token và nối Claude Code với server
 
-Trong repo, trên **máy cá nhân** của bạn (không phải server):
+Không còn slash command lo việc này — gọi thẳng `/pair` (cần pairing secret bạn vừa đặt ở `.env`):
 
 ```bash
-bash scripts/install-command.sh
+curl -sS -X POST https://cccb.beelyai.com/pair \
+  -H "Authorization: Bearer <pairing-secret>" \
+  -H "content-type: application/json" \
+  -d '{"name": "<tên-của-bạn>"}'
 ```
 
-### C2. Nối Claude Code với server
+Kết quả JSON gồm `token`, `mcpUrl`, `wsUrl`. Đăng ký MCP server với Claude Code bằng `mcpUrl`:
 
-Mở một phiên Claude Code mới, gõ:
-
+```bash
+claude mcp add --scope user --transport http chrome \
+  https://cccb.beelyai.com/mcp \
+  --header "Authorization: Bearer <token-vừa-lấy>"
 ```
-/ccchrome connect https://cccb.beelyai.com
-```
-
-Lệnh sẽ hỏi pairing secret, tự sinh token riêng cho bạn, tự chạy `claude mcp add`, rồi in ra URL dạng `wss://cccb.beelyai.com/ws?token=...`.
 
 ### C3. Cài extension và dán URL
 
@@ -318,13 +330,10 @@ Với mỗi thành viên, gửi đúng hai thứ:
 1. Domain: `https://cccb.beelyai.com`
 2. Pairing secret — **gửi riêng cho từng người**, đừng đăng lên nhóm chung
 
-Rồi họ chỉ cần chạy một lệnh (không cần clone repo):
-
-```bash
-curl -fsSL https://cccb.beelyai.com/install.sh | bash
-```
-
-Lệnh này tải và chạy một script bash trực tiếp từ server — họ nên biết vậy trước khi chạy; ai muốn đọc trước thì tách làm hai bước (`curl -fsSL .../install.sh -o install.sh`, đọc, rồi `bash install.sh`). Script chỉ tự cài slash command `/ccchrome`, rồi in ra bước tiếp theo: `/ccchrome connect https://cccb.beelyai.com` trong Claude Code — lệnh đó sẽ dẫn cài extension Chrome từng bước (tải, giải nén vào một thư mục cố định, **Load unpacked** trong `chrome://extensions`) và hỏi pairing secret bạn vừa gửi riêng cho họ.
+Không còn script cài một lệnh cho mô hình này (`GET /install.sh` đã bị xoá khỏi server ở 3.5.0). Mỗi
+người tự làm đúng ba bước ở mục C2–C3 ở trên bằng thông tin của chính họ: gọi `POST /pair` với pairing
+secret bạn gửi (đổi `name` thành tên họ), `claude mcp add` bằng `mcpUrl` nhận được, rồi cài extension +
+dán `wsUrl` vào popup.
 
 Kiểm ai đã nối được:
 
@@ -343,7 +352,8 @@ docker compose logs chrome-bridge | grep "extension connected"
 docker compose exec chrome-bridge cat /data/ccchrome-tokens.json
 ```
 
-**Thu hồi token của một người** — họ tự chạy `/ccchrome disconnect`, hoặc bạn làm hộ:
+**Thu hồi token của một người** — không còn `/ccchrome disconnect`, gọi thẳng `/pair` (họ tự chạy bằng
+token của họ, hoặc bạn làm hộ bằng token đó):
 
 ```bash
 curl -sS -X DELETE https://cccb.beelyai.com/pair -H "Authorization: Bearer <token-của-họ>"
@@ -421,13 +431,13 @@ Ai biết domain đều xem được số người đang kết nối. Không l�
 |---|---|---|
 | `curl https://cccb.beelyai.com/health` ra lỗi 1033 hoặc 502 | cloudflared không nối được container | Xem A3: bridge có healthy không, và có **cùng network** với cloudflared không. Ingress phải là `http://chrome-bridge:8787` (tên container, không phải `localhost`) |
 | Log cloudflared: `dial tcp: lookup chrome-bridge ... no such host` | Hai container khác network | `CC_CHROME_TUNNEL_NETWORK` trong `.env` sai. Sửa rồi `docker compose up -d` |
-| Badge đỏ, popup ghi **"Token sai hoặc đã bị thu hồi"** | Token sai, đã thu hồi, hoặc Cloudflare cắt subprotocol | Chạy B1. Nếu B1 đạt thì lấy token mới bằng `/ccchrome connect` |
-| Badge đỏ, popup ghi **"URL thiếu token, hoặc extension cũ hơn server"** | URL dán vào popup không có `?token=`, hoặc extension còn bản 1.x | Dán lại URL đầy đủ từ `/ccchrome connect`; nếu vẫn thế thì cài lại extension từ `/extension.zip` |
+| Badge đỏ, popup ghi **"Token sai hoặc đã bị thu hồi"** | Token sai, đã thu hồi, hoặc Cloudflare cắt subprotocol | Chạy B1. Nếu B1 đạt thì lấy token mới bằng `POST /pair` (mục C2) |
+| Badge đỏ, popup ghi **"URL thiếu token, hoặc extension cũ hơn server"** | URL dán vào popup không có `?token=`, hoặc extension còn bản 1.x | Dán lại `wsUrl` từ `POST /pair` (mục C2); nếu vẫn thế thì cài lại extension từ `/extension.zip` |
 | Badge đỏ, popup ghi **"origin không hợp lệ"** | Có gì đó không phải extension đang nối, hoặc `CC_CHROME_EXTENSION_ID` bị đặt sai | Bỏ `CC_CHROME_EXTENSION_ID` khỏi `.env` nếu team dùng Load unpacked |
 | Badge đỏ, popup ghi **"MCP server chưa chạy"** | Không tới được server | `curl https://domain/health` từ chính máy đó |
 | Claude Code không thấy tool `chrome` | Tool MCP chỉ nạp lúc mở phiên | Thoát `claude`, chạy lại, gõ `/mcp` kiểm tra |
-| `/ccchrome connect` trả 429 | Đã thử sai secret quá 10 lần trong 15 phút | Chờ hết `Retry-After` (tối đa 15 phút), lấy secret đúng rồi thử lại |
-| `/ccchrome connect` trả 503 | Đã chạm trần `CC_CHROME_MAX_TOKENS` | Thu hồi token không dùng, hoặc tăng trần trong `.env` |
+| `POST /pair` trả 429 | Đã thử sai secret quá 10 lần trong 15 phút | Chờ hết `Retry-After` (tối đa 15 phút), lấy secret đúng rồi thử lại |
+| `POST /pair` trả 503 | Đã chạm trần `CC_CHROME_MAX_TOKENS` | Thu hồi token không dùng, hoặc tăng trần trong `.env` |
 | Tool báo "Chrome extension is not connected" | Chrome đóng, hoặc extension mất kết nối | Mở Chrome, bấm icon xem badge, bấm **Lưu & kết nối lại** |
 | `docker compose up` báo `Cannot find module './tokens.js'` | Image cũ build từ Dockerfile trước 2.0.0 | `docker compose build --no-cache` |
 

@@ -61,7 +61,10 @@ bash install.sh
 ```
 
 Đã cài rồi mà muốn nâng cấp: chạy lại đúng lệnh trên — `install.sh` tự phát hiện bản cũ, giữ nguyên
-token (khỏi phải dán lại URL), chỉ thay mã nguồn và khởi động lại dịch vụ.
+token (khỏi phải dán lại URL), chỉ thay mã nguồn và khởi động lại dịch vụ **phía server**. Luôn nhắc
+thêm bước KHÔNG tự động: script không cập nhật extension đang chạy trong Chrome — người dùng phải tự
+vào `chrome://extensions` bấm **Reload** trên "Claude Code Chrome Bridge" sau mỗi lần nâng cấp, nếu
+không sẽ âm thầm chạy extension của bản cũ (có thể thiếu bản vá bảo mật) dù server đã mới.
 
 ## `restart`
 
@@ -79,7 +82,13 @@ Mục tiêu: dừng rồi khởi động lại dịch vụ nền, dùng đúng c
    nền tảng nào trước.)
 3. Đợi khoảng 1-2 giây rồi gọi `/ccchrome status` để xác nhận bridge sống lại và cổng đúng như cũ.
 4. Không khởi động được (script báo lỗi) → in nguyên lỗi cho người dùng, gợi ý xem log bằng
-   `/ccchrome logs`, và câu lệnh chạy tay: `node "$HOME/.cc-chrome-bridge/server/index.js" --http`.
+   `/ccchrome logs`, và câu lệnh chạy tay (đọc `port` từ `~/.ccchrome.json`, mặc định `8787` nếu file
+   không có trường đó — **thiếu `CC_CHROME_TOKENS_FILE` thì lệnh dưới chết ngay với `FATAL: http mode
+   requires auth`**, đây không phải lỗi vặt, thiếu nó là lệnh không chạy được gì cả):
+   ```bash
+   CC_CHROME_TOKENS_FILE="$HOME/.cc-chrome-bridge/tokens.json" CC_CHROME_PORT="<port>" \
+     node "$HOME/.cc-chrome-bridge/server/index.js" --http
+   ```
 
 ## `logs`
 
