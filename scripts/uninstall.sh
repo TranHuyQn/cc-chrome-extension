@@ -79,8 +79,21 @@ if [ "$DRY" = no ]; then
     # thể thất bại vì bootstrap hỏng, WSL, ssh không lingering — install.sh
     # đã coi đó là cảnh báo-rồi-tiếp-tục, không phải lỗi chết), nên exit code
     # của nó không chứng minh được gì. Hỏi lại bằng cc_service_loaded thay vì
-    # tin rằng "đã gọi lệnh dừng" nghĩa là "đã dừng".
-    if cc_service_loaded; then
+    # tin rằng "đã gọi lệnh dừng" nghĩa là "đã dừng". `launchctl bootout` có
+    # thể trả về trong khi tiến trình vẫn còn đang thoát hẳn — hỏi ngay lập
+    # tức một lần dễ bắt trúng khoảnh khắc đó và báo lỗi oan cho một lần gỡ
+    # cài hoàn toàn bình thường, nên thử lại vài lần trước khi kết luận.
+    still_loaded=no
+    for attempt in 1 2 3; do
+      if cc_service_loaded; then
+        still_loaded=yes
+        [ "$attempt" -lt 3 ] && sleep 0.5
+      else
+        still_loaded=no
+        break
+      fi
+    done
+    if [ "$still_loaded" = yes ]; then
       echo "Lỗi: đã gọi lệnh dừng dịch vụ nhưng có vẻ nó vẫn đang chạy." >&2
       echo "Không xoá thêm gì để tránh xoá mã nguồn dưới một tiến trình còn sống." >&2
       if [ "$(cc_platform)" = macos ]; then
@@ -116,11 +129,23 @@ fi
 #    thẳng, đọc exit code của chính nó.
 if command -v claude >/dev/null 2>&1; then
   if [ "$DRY" = yes ]; then
+    # Đếm nó vào danh sách xem trước: bản thân danh sách này đã liệt nó ra
+    # (dòng note dưới), nên số đếm mà không khớp số dòng liệt kê thì cái
+    # "xem trước" này còn tự mâu thuẫn với chính nó — chả ai tin được nữa.
     note "đăng ký MCP 'chrome' (scope user) trong Claude Code — nếu có"
+    gone
   else
     if claude mcp remove --scope user chrome >/dev/null 2>&1; then
       note "đăng ký MCP 'chrome' trong Claude Code"
       gone
+    else
+      # remove thất bại không tự nó có nghĩa là "chẳng có gì để gỡ" — cấu
+      # hình bị khoá, 'claude' lệch phiên bản, hay entry nằm ở scope khác
+      # (remove --scope user không đụng tới) đều trả về y hệt vậy. Im lặng
+      # ở đây thì hai tình huống — "sạch sẽ" và "còn sót lại đâu đó" —
+      # không ai phân biệt được nữa.
+      echo "  ! 'claude mcp remove --scope user chrome' không thành công (có thể do không còn gì để gỡ, hoặc lệnh thất bại)." >&2
+      echo "    Kiểm tra / gỡ tay nếu cần:  claude mcp remove --scope user chrome" >&2
     fi
   fi
 else
@@ -158,7 +183,7 @@ for sub in server extension logs ccchrome.md tokens.json uninstall.sh service-un
   # sẽ báo "không có" và bị bỏ qua mãi mãi; [ -L ] bắt luôn trường hợp đó.
   if [ -e "$INSTALL_DIR/$sub" ] || [ -L "$INSTALL_DIR/$sub" ]; then
     note "$INSTALL_DIR/$sub"
-    [ "$DRY" = no ] && step_rm "$INSTALL_DIR/$sub" rf
+    [ "$DRY" = no ] && step_rm "${INSTALL_DIR:?}/$sub" rf
     gone
   fi
 done

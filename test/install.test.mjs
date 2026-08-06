@@ -227,6 +227,18 @@ check(
   new RegExp(`rm -rf "${installDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/panel"`).test(dry),
   dry,
 );
+// The MCP advisory line is one of the "  - " bullets the dry-run prints, so
+// it has to be counted in the summary too — a preview whose own bullet list
+// and its own total disagree isn't trustworthy as a preview.
+{
+  const dryBullets = dry.split("\n").filter((l) => l.startsWith("  - ")).length;
+  const dryTotalMatch = dry.match(/Sẽ gỡ (\d+) mục/);
+  check(
+    "dry-run's bullet count matches its own total",
+    dryTotalMatch !== null && Number(dryTotalMatch[1]) === dryBullets,
+    `bullets=${dryBullets} total=${dryTotalMatch?.[1]}\n${dry}`,
+  );
+}
 
 // --- uninstall: the real, order-verified run (F7) ---------------------------
 
@@ -240,6 +252,24 @@ check(
 // executes — but PATH is shadowed with the fake launchctl/systemctl above,
 // so it can never reach a real service. The fake records, at the exact
 // moment the real stop call happens, whether installDir/server still exists.
+//
+// This safety rests entirely on binDir staying first on PATH for this one
+// call, and on the fakes exiting 0 for any verb they don't specifically
+// recognize (cc_platform/cc_unit_label etc. may probe launchctl/systemctl in
+// ways not enumerated above). Nothing here asserts the shadowing actually
+// took effect — if a future edit reorders PATH construction or this call
+// stops passing an env override that survives the spread in runRaw(), this
+// would silently start invoking the *real* launchctl/systemctl on the
+// tester's machine instead of failing loudly. Whoever touches PATH handling
+// in this file should keep that invariant in mind.
+//
+// The log is truncated immediately before this specific call: it's an
+// append-only file with no run boundary of its own, so a stale line from an
+// earlier run (or, worse, from a mutation that deletes the cc_service_stop
+// call so nothing new is ever appended) could otherwise be mistaken for
+// this run's evidence. Asserting "exactly one line, and it says yes" is
+// what actually ties the evidence to *this* invocation.
+writeFileSync(stopLog, "");
 const realOut = run("uninstall.sh", [], { CC_CHROME_SKIP_SERVICE: "" });
 check("removes the token file", !existsSync(join(fakeHome, ".ccchrome.json")));
 check("removes the slash command", !existsSync(join(fakeHome, ".claude", "commands", "ccchrome.md")));
@@ -248,12 +278,16 @@ check("removes the server directory", !existsSync(join(installDir, "server")));
 check("removes the orphaned .new staging directory", !existsSync(join(installDir, ".new")));
 check("KEEPS the panel conversation data", existsSync(join(installDir, "panel", "session.jsonl")));
 
-const stopLogContent = existsSync(stopLog) ? readFileSync(stopLog, "utf8") : "";
-check("actually invokes cc_service_stop (not just prints about it)", stopLogContent.trim().length > 0, stopLogContent);
+const stopLogLines = existsSync(stopLog) ? readFileSync(stopLog, "utf8").split("\n").filter(Boolean) : [];
+check(
+  "actually invokes cc_service_stop exactly once this run (not zero, not a stale line)",
+  stopLogLines.length === 1,
+  JSON.stringify(stopLogLines),
+);
 check(
   "the service is stopped while the source tree still exists — the real ordering, not a text proxy",
-  /server_exists=yes/.test(stopLogContent),
-  stopLogContent || realOut.slice(0, 400),
+  stopLogLines.length === 1 && stopLogLines[0].includes("server_exists=yes"),
+  stopLogLines.join("\n") || realOut.slice(0, 400),
 );
 
 const un = runRaw("uninstall.sh");
