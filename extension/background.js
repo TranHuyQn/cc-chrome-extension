@@ -1037,6 +1037,13 @@ const handlers = {
     } else {
       if (!url) throw new Error("url is required (or set action to back/forward/reload)");
       const fullUrl = /^[a-z][a-z0-9+.-]*:/i.test(url) ? url : `https://${url}`;
+      // assertScriptableUrl checks where the tab IS, not where it is being sent.
+      // Without a check on the destination, a tab already inside the session
+      // group could be driven to this extension's own pages, whose realm has
+      // chrome.tabs — which is the whole of the in-group restriction, gone.
+      if (/^(chrome-extension|devtools):/i.test(fullUrl)) {
+        throw new Error(`Cannot navigate to ${fullUrl} (browser-internal page). Use a normal web page.`);
+      }
       await chrome.tabs.update(tab.id, { url: fullUrl });
     }
     await waitForTabComplete(tab.id);
@@ -1168,6 +1175,11 @@ const handlers = {
   async javascript_eval(params) {
     if (!params.code) throw new Error("code is required");
     const tab = await resolveTab(params);
+    // execInTab calls this for chrome.scripting; this handler goes through
+    // chrome.debugger instead, so it has to make the same check itself.
+    // assertScriptableUrl already covers chrome-extension: — the bug was that
+    // nothing here ever called it.
+    assertScriptableUrl(tab);
     await ensureDebugger(tab.id, ["Runtime"]);
     const evalResult = await cdp(tab.id, "Runtime.evaluate", {
       expression: params.code,
