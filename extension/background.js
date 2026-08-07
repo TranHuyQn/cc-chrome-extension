@@ -1206,33 +1206,50 @@ const handlers = {
     // persistently, and there is no legitimate use for it. Capturing pixels
     // mutates nothing, and screenshotting an internal page is sometimes
     // genuinely useful when diagnosing. The line the guards follow is
-    // mutate-vs-capture, not which Chrome API a handler happens to use: the
-    // fullPage branch below does reach chrome.debugger the way those four do
-    // and still carries no guard on purpose, while the default branch never
-    // touches the debugger at all (chrome.tabs.captureVisibleTab).
+    // mutate-vs-capture, not which Chrome API a handler happens to use — both
+    // branches below reach chrome.debugger the way those four do and both
+    // still carry no guard on purpose.
     //
     // Screenshots are used to inspect real visual defects (spacing, colour,
     // overflow). A fake orange edge in every image would corrupt that, so the
     // frame comes off for the capture and goes straight back on.
-    if (params.fullPage) {
-      await ensureDebugger(tab.id, ["Page"]);
-      await clearBorder(tab.id);
-      try {
-        const shot = await cdp(tab.id, "Page.captureScreenshot", {
-          format: "png",
-          captureBeyondViewport: true,
-        });
-        return { mimeType: "image/png", base64: shot.data, fullPage: true };
-      } finally {
-        paintBorder(tab.id);
-      }
-    }
-    await chrome.tabs.update(tab.id, { active: true });
-    await clearBorder(tab.id);
-    await sleep(150);
+    //
+    // Both branches now go through CDP Page.captureScreenshot instead of
+    // chrome.tabs.captureVisibleTab. That older API can only capture the tab
+    // that is ACTIVE in its window, so the default branch used to force the
+    // target tab active first (chrome.tabs.update(tab.id, {active:true})) —
+    // measured (focus-investigation.md) to steal whatever other tab the
+    // owner had open in that same window, every time. Page.captureScreenshot
+    // has no such requirement; it captures the given tab directly regardless
+    // of which tab is active. captureBeyondViewport is the only difference
+    // between the two branches — omitted here, that's what "default
+    // (non-fullPage)" means: just the visible viewport.
+    //
+    // Cost accepted, not overlooked: every default screenshot now attaches
+    // the debugger, so Chrome shows its "is debugging this browser" infobar
+    // on that tab, not just for eval/console/network/upload calls as before.
+    // That's judged worth it — an infobar is not focus theft, and this
+    // extension already pays that cost for four other tools. Deliberately no
+    // fallback to the old activate-and-capture path if the attach fails (e.g.
+    // DevTools already owns this tab's debugger): falling back would quietly
+    // reintroduce the exact steal this fix removes. The caller gets a clear
+    // error telling it what to do instead.
     try {
-      const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-      return { mimeType: "image/png", base64: dataUrl.split(",", 2)[1], fullPage: false };
+      await ensureDebugger(tab.id, ["Page"]);
+    } catch (err) {
+      throw new Error(
+        `Cannot take a screenshot without activating the tab: the debugger could not attach (${err.message}). ` +
+        "Close DevTools (or any other debugger session) on this tab and try again.",
+        { cause: err }
+      );
+    }
+    await clearBorder(tab.id);
+    try {
+      const shot = await cdp(tab.id, "Page.captureScreenshot", {
+        format: "png",
+        ...(params.fullPage ? { captureBeyondViewport: true } : {}),
+      });
+      return { mimeType: "image/png", base64: shot.data, fullPage: !!params.fullPage };
     } finally {
       paintBorder(tab.id);
     }
@@ -1416,10 +1433,19 @@ const handlers = {
 
   async resize_window(params) {
     const tab = await resolveTab(params);
+    // state:"normal" must only be sent when the window is actually
+    // minimized. Measured directly (see focus-investigation.md): that field
+    // alone -- even width/height with no `state` steal nothing -- raises
+    // whatever window it's sent to, 3/3, EVEN when the window is already
+    // normal (a same-value transition). Sending it unconditionally on every
+    // call is exactly what made resize_window the one handler (besides
+    // switch_tab, whose whole job is to do this) that could bring a
+    // background window forward while the owner was working in another one.
+    const win = await chrome.windows.get(tab.windowId);
     await chrome.windows.update(tab.windowId, {
       width: params.width || 1280,
       height: params.height || 800,
-      state: "normal",
+      ...(win.state === "minimized" ? { state: "normal" } : {}),
     });
     return { width: params.width || 1280, height: params.height || 800 };
   },
