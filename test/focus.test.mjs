@@ -34,10 +34,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // A real page with some visible content, not about:blank -- take_screenshot's
 // positive assertion needs a non-trivial PNG, and a flat blank page compresses
 // too well to prove much either way.
+// margin:0 on body matters: without it the browser's default ~8px body
+// margin pushes the header's actual top-left away from device-pixel (0,0),
+// which cost a false-red the first time this was run at a devicePixelRatio
+// > 1 (sampling landed just above the header, in the default white margin,
+// not in a bug).
 const TEST_PAGE = `<!DOCTYPE html>
-<html><head><title>Focus test page</title></head>
+<html><head><title>Focus test page</title><style>body{margin:0}</style></head>
 <body>
-<h1 style="color:#fff;background:#e8710a;padding:24px">Focus test page</h1>
+<h1 style="color:#fff;background:#e8710a;padding:24px;margin:0">Focus test page</h1>
 <p>Some paragraph text so the rendered pixels are not a flat fill.</p>
 <div style="height:400px;background:linear-gradient(45deg,#123,#e8710a)"></div>
 </body></html>`;
@@ -107,6 +112,45 @@ async function run() {
 
   const lastFocusedId = async () => await sw.evaluate(async () => (await chrome.windows.getLastFocused()).id);
 
+  // The `focused` field on an individual chrome.windows.Window is a stricter,
+  // OS-driven signal than chrome.windows.getLastFocused()/onFocusChanged --
+  // this sandbox was found (throwaway probe, before this file was written) to
+  // report getLastFocused() as some real window id at all times, yet EVERY
+  // window's own `focused` field reads false throughout a run, never true,
+  // even right after chrome.windows.create({focused:true}). So `focused`
+  // tells us whether the OS has actually handed this Chromium process real
+  // window-manager focus at all -- which decides whether a window-raise
+  // side effect can be observed here, whether it's the bug's or a legitimate
+  // one's. See the long comment further down for what this gates.
+  const anyWindowReallyFocused = async () =>
+    (await sw.evaluate(async () => (await chrome.windows.getAll()).map((w) => w.focused))).some(Boolean);
+
+  // Decodes a captured screenshot back into pixels using a real <canvas> in
+  // whichever Chromium page Playwright already has open -- data: URIs decode
+  // in any page regardless of that page's own origin, so which page is used
+  // doesn't matter. This is the same technique test/e2e.mjs's pngHasOrange
+  // helper uses, just sampling a specific pixel instead of scanning for one
+  // colour.
+  const decodePngPixel = async (base64, x, y) => {
+    const page = context.pages()[0];
+    /* eslint-disable no-undef -- browser globals, evaluated inside the page by Playwright, not by this Node process */
+    return await page.evaluate(async ([b64, px, py]) => {
+      const img = new Image();
+      img.src = `data:image/png;base64,${b64}`;
+      await img.decode();
+      const w = img.naturalWidth;
+      const h = img.naturalHeight;
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      const [r, g, b, a] = ctx.getImageData(Math.min(px, w - 1), Math.min(py, h - 1), 1, 1).data;
+      return { width: w, height: h, pixel: [r, g, b, a] };
+    }, [base64, x, y]);
+    /* eslint-enable no-undef */
+  };
+
   // ===========================================================================
   // take_screenshot (default, non-fullPage branch) must not steal TAB focus
   // ===========================================================================
@@ -136,6 +180,22 @@ async function run() {
   const activeBeforeShot = await activeTabIdOf(winShot.windowId);
   check("user's tab is active before take_screenshot", activeBeforeShot === userTabId, `got ${activeBeforeShot}`);
 
+  // The real expectation to check the captured PNG against, read from the
+  // actual page before the capture: its CSS viewport size and device pixel
+  // ratio. CDP Page.captureScreenshot returns physical pixels, so the PNG's
+  // own dimensions should equal viewport size * dpr (not a hardcoded
+  // 1280x720 -- that would just be a second guess, no more "expected" than
+  // the number this is replacing).
+  const shotViewport = await sw.evaluate(async (tabId) => {
+    /* eslint-disable no-undef -- `func` below runs injected into the page by chrome.scripting, not in this file's scope */
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => ({ width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio }),
+    });
+    /* eslint-enable no-undef */
+    return result;
+  }, cTabId);
+
   const shotResult = await callHandler("take_screenshot", { tabId: cTabId, __session: SESSION_SHOT });
   check("take_screenshot succeeded", shotResult.__ok === true, JSON.stringify(shotResult).slice(0, 300));
 
@@ -146,16 +206,47 @@ async function run() {
     `expected ${userTabId} (user's tab), got ${activeAfterShot} (session tab is ${cTabId})`
   );
 
-  // Positive assertion: the fix must not turn take_screenshot into a no-op.
+  // Positive assertions: the fix must not turn take_screenshot into a no-op,
+  // and it must be proven BY THE PIXELS, not by base64 length -- a fully
+  // blank 1280x720 PNG was measured (independent review) at 27,780 base64
+  // characters, 27x a bare ">1000" threshold, so length alone would have let
+  // a screenshot that captures nothing pass silently. TEST_PAGE's #e8710a
+  // header exists specifically so there is a known colour to check for.
   const base64 = shotResult.__ok ? shotResult.result.base64 : "";
   check(
-    "take_screenshot still returns a non-trivial base64 PNG",
+    "take_screenshot still returns a base64 PNG",
     shotResult.__ok === true &&
       shotResult.result.mimeType === "image/png" &&
       shotResult.result.fullPage === false &&
       typeof base64 === "string" &&
       base64.length > 1000,
     `mimeType=${shotResult.result?.mimeType} fullPage=${shotResult.result?.fullPage} base64.length=${base64.length}`
+  );
+
+  // CSS point (15,15) -- comfortably inside the header's 24px padding, now
+  // that TEST_PAGE zeroes the default body margin -- converted to device
+  // pixels via the same dpr the dimensions check above already validated.
+  const decodedShot = shotResult.__ok
+    ? await decodePngPixel(base64, Math.round(15 * shotViewport.dpr), Math.round(15 * shotViewport.dpr))
+    : null;
+  check(
+    "the PNG's own dimensions match the captured tab's real viewport (device pixels = CSS viewport * dpr), " +
+    "not a blank/stub-sized image",
+    !!decodedShot &&
+      decodedShot.width > 0 &&
+      decodedShot.height > 0 &&
+      decodedShot.width === Math.round(shotViewport.width * shotViewport.dpr) &&
+      decodedShot.height === Math.round(shotViewport.height * shotViewport.dpr),
+    JSON.stringify({ decodedShot, shotViewport })
+  );
+  check(
+    "a pixel near the top-left decodes to the #e8710a header background TEST_PAGE actually served " +
+    "on the SESSION tab -- not blank, and not the user's about:blank tab",
+    !!decodedShot &&
+      Math.abs(decodedShot.pixel[0] - 0xe8) <= 8 &&
+      Math.abs(decodedShot.pixel[1] - 0x71) <= 8 &&
+      Math.abs(decodedShot.pixel[2] - 0x0a) <= 8,
+    `pixel=${JSON.stringify(decodedShot && decodedShot.pixel)}`
   );
 
   // ===========================================================================
@@ -181,25 +272,31 @@ async function run() {
   check("winUser is last-focused right after creation, ahead of winResize", await waitForLastFocused(winUser.windowId));
   const userTabId2 = await activeTabIdOf(winUser.windowId);
 
+  // Read the regime BEFORE calling resize_window: does the OS currently give
+  // this Chromium process real window-manager focus at all? See
+  // anyWindowReallyFocused() above for what this checks and why it's a
+  // different, stricter signal than getLastFocused().
+  const focusIsObservableHere = await anyWindowReallyFocused();
+
   // Spy on chrome.windows.update in the service worker and capture the exact
   // arguments resize_window passes it. This is the deterministic half of the
-  // proof: a throwaway probe run before this file was written found that in
-  // THIS sandbox, chrome.windows.getLastFocused() never moves off whichever
-  // window was last CREATED, no matter the technique tried against an OLDER
-  // window afterwards -- chrome.windows.update({focused:true}) retried 20x,
-  // chrome.windows.update({state:"normal"}) (the exact field under test)
-  // retried, a real minimized->normal transition, and even Playwright's own
-  // page.bringToFront(). chrome.windows.onFocusChanged only ever fired for
-  // the two window-creation events, never for any post-hoc attempt. This
-  // matches focus-investigation.md's own "Could not measure: OS-level
-  // window-manager effects" caveat and CLAUDE.md's documented note that an
-  // unattended headed run cannot reliably re-raise an older window -- it is
-  // apparently absolute here, not just unreliable. So the OS-observable
-  // "did the window actually get raised" side effect cannot be used as the
-  // load-bearing assertion in this environment; inspecting the real argument
-  // resize_window hands to the real chrome.windows.update (still exercising
-  // the actual handler and the actual Chrome API, just observed one layer
-  // earlier) is what can.
+  // proof, and it is the one that always gates pass/fail here: whether the
+  // window-raise side effect is OS-observable in a given run turns out to be
+  // environment-dependent, not absolute. A throwaway probe run before this
+  // file was written found chrome.windows.getLastFocused() never moving off
+  // whichever window was last CREATED in this particular sandbox, no matter
+  // the technique tried against an older window afterwards. But
+  // focus-investigation.md's own raw probe output (same Chrome 151, a
+  // different run) shows the opposite: focusedWindowId DID move onto the
+  // target window, 3/3, isolated to state:"normal" alone. Both were honest --
+  // the raise is real and happens exactly when the OS has actually handed
+  // the Chromium process real window-manager focus, and invisible otherwise;
+  // nothing inside the test gets to choose which regime a given run lands in
+  // (see anyWindowReallyFocused() above). So the argument resize_window
+  // actually hands to the real chrome.windows.update -- still the real
+  // handler calling the real Chrome API, just observed one layer earlier
+  // than its OS-level side effect -- is the assertion that cannot go green
+  // for the wrong reason regardless of which regime this run is in.
   await sw.evaluate(() => {
     globalThis.__updateCalls = [];
     globalThis.__origWindowsUpdate = chrome.windows.update;
@@ -231,15 +328,27 @@ async function run() {
     JSON.stringify(updateCalls)
   );
 
-  // Informational only -- not counted towards pass/fail, see the long comment
-  // above. Printed anyway so a run in an environment where OS-level window
-  // focus IS observable (e.g. the one focus-investigation.md was measured in)
-  // shows the corroborating evidence.
-  const focusedAfterResize = await lastFocusedId();
-  console.log(
-    `INFO  chrome.windows.getLastFocused() after resize_window = ${focusedAfterResize} ` +
-    `(winUser=${winUser.windowId}, winResize=${winResize.windowId}) -- informational only, not asserted`
-  );
+  // Conditional on the regime read before the call: when the OS is actually
+  // giving this Chromium process real focus, the window-raise side effect IS
+  // observable (per focus-investigation.md's own measurement) and gets
+  // asserted for real, on top of the deterministic spy check above. When it
+  // isn't (this sandbox, so far, every run), the effect cannot be observed by
+  // definition, so this costs nothing to attempt and is skipped rather than
+  // asserted false-negative.
+  if (focusIsObservableHere) {
+    const focusedAfterResize = await lastFocusedId();
+    check(
+      "resize_window does not steal window focus -- winUser is still last-focused",
+      focusedAfterResize === winUser.windowId,
+      `expected ${winUser.windowId} (winUser), got ${focusedAfterResize} (resize target window is ${winResize.windowId})`
+    );
+  } else {
+    console.log(
+      "SKIP  resize_window window-focus effect check -- this run's Chromium process does not currently hold " +
+      "real OS-level window focus (chrome.windows.getAll() reports no window with focused:true), so the raise " +
+      "this fix removes would not be observable here even if it still happened; see anyWindowReallyFocused()."
+    );
+  }
 
   const activeAfterResize = await activeTabIdOf(winUser.windowId);
   check(
@@ -303,16 +412,15 @@ async function run() {
   // Reuses winResize/c2TabId from the resize_window case above, which is
   // currently the background window with an inactive session tab.
   //
-  // Not asserted here: that switch_tab also raises winResize's WINDOW to
-  // last-focused. It does, per background.js:1361 and per
-  // focus-investigation.md's measurement table ("switch_tab ... Yes
-  // (intended)") -- but that is the same OS-level window-focus signal the
-  // long comment above the resize_window spy explains this sandbox cannot
-  // observe (chrome.windows.getLastFocused() never moved off the
-  // last-CREATED window here, for ANY window-raise attempt, intended or not).
-  // Pinning window-raise here would be just as unobservable as it was for
-  // resize_window, for the same reason, so this sticks to the one exception
-  // the task actually calls for: switch_tab must still change the active tab.
+  // The task only requires pinning the tab-activation half (below), which is
+  // asserted unconditionally. switch_tab also raises winResize's WINDOW to
+  // last-focused -- per background.js:1361 and per focus-investigation.md's
+  // measurement table ("switch_tab ... Yes (intended)") -- and that half is
+  // asserted too, but only when this run's regime can show it: see
+  // anyWindowReallyFocused() and the long comment above the resize_window
+  // spy for why that side effect is environment-dependent rather than
+  // something this test can force.
+  const switchFocusObservable = await anyWindowReallyFocused();
 
   const switchResult = await callHandler("switch_tab", { tabId: c2TabId, __session: SESSION_RESIZE });
   check("switch_tab succeeded", switchResult.__ok === true, JSON.stringify(switchResult));
@@ -323,6 +431,20 @@ async function run() {
     activeAfterSwitch === c2TabId,
     `expected ${c2TabId}, got ${activeAfterSwitch}`
   );
+
+  if (switchFocusObservable) {
+    const raisedWindow = await waitForLastFocused(winResize.windowId);
+    check(
+      "switch_tab DOES also raise the target tab's window (the intended exception, observable in this run's regime)",
+      raisedWindow,
+      `winResize (${winResize.windowId}) never became last-focused`
+    );
+  } else {
+    console.log(
+      "SKIP  switch_tab window-raise effect check -- this run's Chromium process does not currently hold " +
+      "real OS-level window focus, so this exception's window-raise half would not be observable here either."
+    );
+  }
 }
 
 try {

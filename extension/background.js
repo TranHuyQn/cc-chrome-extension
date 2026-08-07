@@ -1237,9 +1237,18 @@ const handlers = {
     try {
       await ensureDebugger(tab.id, ["Page"]);
     } catch (err) {
+      // Two different causes land here and need different advice. A
+      // chrome:// tab already failed before this change too (chrome.debugger
+      // simply cannot attach there, ever — "Cannot access a chrome:// URL"),
+      // so that is not a regression, just a message that must not blame
+      // DevTools for something DevTools had nothing to do with. Anything
+      // else (most commonly: DevTools, or another extension, already has
+      // this tab's debugger) IS the real trade-off this fix accepts.
+      const hint = /cannot access a chrome:\/\/ url/i.test(err.message || "")
+        ? "This is a browser-internal page; chrome.debugger cannot attach to chrome:// pages at all, regardless of this tool."
+        : "Close DevTools (or any other debugger session) on this tab and try again.";
       throw new Error(
-        `Cannot take a screenshot without activating the tab: the debugger could not attach (${err.message}). ` +
-        "Close DevTools (or any other debugger session) on this tab and try again.",
+        `Cannot take a screenshot without activating the tab: the debugger could not attach (${err.message}). ${hint}`,
         { cause: err }
       );
     }
