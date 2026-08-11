@@ -357,16 +357,76 @@ async function run() {
     `expected ${userTabId2}, got ${activeAfterResize}`
   );
 
-  // Positive assertion: resize_window must still actually resize the window.
+  // Positive assertion, deterministic half: a "fix" that stopped resizing
+  // altogether -- dropping width/height along with `state` -- must be caught
+  // everywhere, including on a machine whose window manager overrides bounds.
+  // This reads the same spy as the check above, so it is the real guard.
+  check(
+    "resize_window still asks Chrome for the requested width and height",
+    updateCalls.some((u) => u.width === RESIZE_W && u.height === RESIZE_H),
+    JSON.stringify(updateCalls)
+  );
+
+  // Positive assertion, OS-observable half: the window really ends up that
+  // size. This is the one part of the suite the machine's window manager gets
+  // a vote in -- macOS 26 tiles Chrome's windows on its own as soon as a few
+  // exist (measured on the machine this was written against: full-height
+  // columns, 500x1169 at left 480/960/1440 on a 1920x1200 display), and a
+  // tiled window ignores bounds changes: Chrome accepts the width/height,
+  // returns no error, and nothing moves. That is the environment, not this
+  // branch's fix -- the pre-fix handler (unconditional state:"normal") misses
+  // the same assertion identically on the same machine.
+  //
+  // So a mismatch is not reported until a CONTROL has separated the two
+  // causes: ask chrome.windows.update for a distinctive size DIRECTLY, with no
+  // handler in the path. If the direct call cannot move the window either, the
+  // window manager is deciding the bounds and there is nothing here to assert;
+  // if it CAN, then the API works on this machine and resize_window failing to
+  // use it is a real bug, reported as one. Only ever runs after the mismatch,
+  // i.e. exactly when the window is already pinned by the WM, and it sends
+  // width/height only -- never `state` -- so it cannot raise a window ahead of
+  // the switch_tab section below (bounds alone raise nothing; that is
+  // focus-investigation.md's isolated finding and what this suite pins).
+  const PROBE_W = 640;
+  const PROBE_H = 480;
   const winResizeBounds = await sw.evaluate(async (id) => {
     const w = await chrome.windows.get(id);
     return { width: w.width, height: w.height, state: w.state };
   }, winResize.windowId);
-  check(
-    "resize_window still actually resizes the (background) window",
-    winResizeBounds.width === RESIZE_W && winResizeBounds.height === RESIZE_H,
-    JSON.stringify(winResizeBounds)
-  );
+  if (winResizeBounds.width === RESIZE_W && winResizeBounds.height === RESIZE_H) {
+    check("resize_window still actually resizes the (background) window", true);
+  } else {
+    const directResizeWorks = await sw.evaluate(async ([id, pw, ph, settle]) => {
+      const before = await chrome.windows.get(id);
+      await chrome.windows.update(id, { width: pw, height: ph });
+      // Settle before reading, for the same span the assertion above waited.
+      // A tiled window accepts the new bounds and reports them back
+      // immediately -- measured: an immediate get() returns the requested
+      // 640x480 -- and only snaps back to its tile a moment later (measured:
+      // 500x1169 again 500ms on, same left/top). Reading without this wait is
+      // what made an earlier version of this control claim the window manager
+      // was innocent.
+      await new Promise((r) => setTimeout(r, settle));
+      const after = await chrome.windows.get(id);
+      await chrome.windows.update(id, { width: before.width, height: before.height });
+      return after.width === pw && after.height === ph;
+    }, [winResize.windowId, PROBE_W, PROBE_H, 500]);
+    if (directResizeWorks) {
+      check(
+        "resize_window still actually resizes the (background) window",
+        false,
+        `${JSON.stringify(winResizeBounds)} -- and a direct chrome.windows.update({width:${PROBE_W},height:${PROBE_H}}) ` +
+        "on the same window DID move it, so the window manager is not what stopped resize_window"
+      );
+    } else {
+      console.log(
+        "SKIP  resize_window real-bounds check -- this machine's window manager pins this window's bounds: a direct " +
+        `chrome.windows.update({width:${PROBE_W},height:${PROBE_H}}), with no handler in the path, could not move it ` +
+        `either (window is ${winResizeBounds.width}x${winResizeBounds.height}). macOS 26 window tiling does this. The ` +
+        "requested-size assertion above is what gates this case here."
+      );
+    }
+  }
 
   // The minimized case, briefly: a fix that just deletes the `state` field
   // outright (rather than sending it conditionally) would silently leave a
@@ -376,7 +436,19 @@ async function run() {
   const minTab = await callHandler("new_tab", { url: TEST_URL, __session: SESSION_RESIZE });
   check("session tab for the minimized-window case created and grouped", minTab.__ok === true, JSON.stringify(minTab));
   await sw.evaluate(async (id) => { await chrome.windows.update(id, { state: "minimized" }); }, winMin.windowId);
-  await sleep(200);
+  // Poll, don't sleep: the minimize lands asynchronously and a fixed 200ms was
+  // measured too short here. resize_window reads chrome.windows.get() to decide
+  // whether to send state:"normal", so calling it while Chrome still reports
+  // the window as "normal" means the field is (correctly, on that reading)
+  // omitted -- and Chrome then rejects the bounds of a window that is on its
+  // way off-screen with "Bounds must be at least 50% within visible screen
+  // space", which looks exactly like a broken handler and is not one.
+  let winMinReady = "normal";
+  for (let i = 0; i < 40 && winMinReady !== "minimized"; i++) {
+    winMinReady = await sw.evaluate(async (id) => (await chrome.windows.get(id)).state, winMin.windowId);
+    if (winMinReady !== "minimized") await sleep(50);
+  }
+  check("the window under test really is minimized before resize_window is called", winMinReady === "minimized", `state=${winMinReady}`);
   const minResult = await callHandler("resize_window", {
     tabId: minTab.result.tabId,
     width: RESIZE_W,
