@@ -591,7 +591,7 @@ function buildMcpServer(getBridge, getBridgeNow, statusExtra = {}, sessionRef = 
 
   tool(
     "switch_tab",
-    "Switch to (activate and focus) a tab by id. Only accepts a tab in this session's own tab group.",
+    "Make a tab the visible one inside its own window. You do NOT need this before using other tools — every tool takes a tabId and works on a background tab — so only call it when the user asks to be shown something. It deliberately does not bring Chrome to the front over the app the user is working in. Only accepts a tab in this session's own tab group.",
     { tabId: z.number().int().describe("Tab id to activate (from list_tabs); must be in this session's tab group") },
     async (args) => textResult(await call("switch_tab", args))
   );

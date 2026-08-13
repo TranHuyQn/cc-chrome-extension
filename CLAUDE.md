@@ -87,6 +87,21 @@ Chrome terminates the worker mid-sequence and a ghost frame would survive on the
 A handler that captures pixels must call `await clearBorder(tab.id)` before the capture and
 `paintBorder(tab.id)` in a `finally`, the way `take_screenshot` does.
 
+**No handler may take focus.** A handler must never pass `active: true` to `chrome.tabs.update`
+or `focused: true` to `chrome.windows.update`, and must never send `state: "normal"` to a window
+that is not actually minimized — that field alone raises a window even as a same-value
+transition. The one narrow exception is `switch_tab`, which may activate its own target tab
+inside that tab's window and may still not raise the window. This is the property the owner
+cares about most: the original Claude in Chrome extension activates the tab and raises the
+window on essentially every tool call (anthropics/claude-code#39696, #39707, #31119), and this
+project deliberately does not. `test/focus.test.mjs` ends with a sweep that calls **every**
+handler and asserts both halves — the arguments actually passed to those two APIs (deterministic
+everywhere) and the owner's active tab (observable). The sweep reads `Object.keys(handlers)`
+live, so a new handler that is not listed in it fails the suite rather than being silently
+uncovered. Three separate cases in that file failed this rule at some point — `take_screenshot`,
+`resize_window` and `switch_tab` — so the sweep exists precisely because reading the handlers
+by hand missed it three times.
+
 ## Injected page functions
 
 `pageReadPage`, `pageClick`, `pageFill`, `pageFind`, `pageGetText`, `pageScroll`, `pageWaitCheck` in

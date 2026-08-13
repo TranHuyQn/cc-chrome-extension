@@ -178,6 +178,12 @@ và không lọt vào ảnh `take_screenshot`. Một số trang extension không
 - Tab đó mở **trong nền, không giành focus của bạn** — Chrome không tự nhảy
   sang tab hay cửa sổ đó, bạn cứ tiếp tục làm việc trên tab đang xem trong khi
   Claude thao tác ở tab riêng của nó. Cần xem nó thì gọi `switch_tab`.
+- **Không một tool nào kéo cửa sổ Chrome lên trước ứng dụng bạn đang dùng.**
+  Kể cả `switch_tab`: nó chỉ đổi tab đang hiện *bên trong* cửa sổ chứa tab đó,
+  nên lúc bạn quay lại Chrome sẽ thấy đúng tab Claude muốn cho xem, còn đang
+  gõ ở terminal hay editor thì không bị giật ra. `test/focus.test.mjs` chạy
+  **toàn bộ** handler và bắt lỗi ngay nếu có tool nào activate tab của bạn
+  hoặc gọi `chrome.windows.update({focused:true})`.
 - **Mọi tool chỉ thao tác được trên tab đang nằm trong nhóm của phiên mình.**
   Gọi tool với `tabId` của một tab ngoài nhóm sẽ bị từ chối kèm tên nhóm và
   cách xử lý (kéo tab vào nhóm, hoặc mở tab mới bằng `new_tab`).

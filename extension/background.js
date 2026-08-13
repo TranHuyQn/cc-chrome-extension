@@ -1360,7 +1360,9 @@ const handlers = {
     const url = params.url ? normalizeTargetUrl(params.url) : "about:blank";
     assertNavigableUrl(url);
     // active: false — tabs Claude opens must not steal the user's focus.
-    // switch_tab is the tool for actually bringing a tab to the front.
+    // switch_tab is the tool for making a tab the visible one in its window;
+    // nothing here, switch_tab included, brings Chrome forward over another
+    // application any more.
     const tab = await chrome.tabs.create({ url, active: false });
     if (params.url) await waitForTabComplete(tab.id);
     await addTabToSessionGroup(tab, params.__session);
@@ -1383,8 +1385,15 @@ const handlers = {
   async switch_tab(params) {
     if (!params.tabId) throw new Error("tabId is required");
     const target = await resolveTab(params);
+    // Activates the tab inside its own window and stops there. The window
+    // raise this used to do (chrome.windows.update({focused:true})) pulled the
+    // owner out of whatever application they were in, every call -- the same
+    // complaint filed against the original Claude in Chrome extension
+    // (anthropics/claude-code#39696, #39707). It was documented here as an
+    // intended exception for two revisions; the owner ruled it a defect. Tab
+    // activation stays because it IS the tool: when the owner next looks at
+    // that window, the tab they asked for is the one showing.
     const tab = await chrome.tabs.update(target.id, { active: true });
-    await chrome.windows.update(tab.windowId, { focused: true });
     return { tabId: tab.id, url: tab.url, title: tab.title };
   },
 
@@ -1447,9 +1456,11 @@ const handlers = {
     // alone -- even width/height with no `state` steal nothing -- raises
     // whatever window it's sent to, 3/3, EVEN when the window is already
     // normal (a same-value transition). Sending it unconditionally on every
-    // call is exactly what made resize_window the one handler (besides
-    // switch_tab, whose whole job is to do this) that could bring a
-    // background window forward while the owner was working in another one.
+    // call is exactly what made resize_window one of the two handlers that
+    // could bring a background window forward while the owner was working in
+    // another one. switch_tab was the other, and it no longer does either --
+    // no handler raises a window now, which test/focus.test.mjs's all-handler
+    // sweep asserts against every one of them.
     const win = await chrome.windows.get(tab.windowId);
     await chrome.windows.update(tab.windowId, {
       width: params.width || 1280,

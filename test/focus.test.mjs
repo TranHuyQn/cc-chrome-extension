@@ -13,7 +13,7 @@
 // Usage: HEADED=1 node test/focus.test.mjs
 
 import { createServer } from "node:http";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +44,11 @@ const TEST_PAGE = `<!DOCTYPE html>
 <body>
 <h1 style="color:#fff;background:#e8710a;padding:24px;margin:0">Focus test page</h1>
 <p>Some paragraph text so the rendered pixels are not a flat fill.</p>
+<!-- Targets for the all-handlers sweep at the end of this file. They sit
+     BELOW the header on purpose: the screenshot assertion samples a pixel at
+     the top-left and must keep landing in the #e8710a header. -->
+<button id="btn">Click me</button>
+<input id="name"><input id="email"><input type="file" id="up">
 <div style="height:400px;background:linear-gradient(45deg,#123,#e8710a)"></div>
 </body></html>`;
 
@@ -484,39 +489,232 @@ async function run() {
   // Reuses winResize/c2TabId from the resize_window case above, which is
   // currently the background window with an inactive session tab.
   //
-  // The task only requires pinning the tab-activation half (below), which is
-  // asserted unconditionally. switch_tab also raises winResize's WINDOW to
-  // last-focused -- per background.js:1361 and per focus-investigation.md's
-  // measurement table ("switch_tab ... Yes (intended)") -- and that half is
-  // asserted too, but only when this run's regime can show it: see
-  // anyWindowReallyFocused() and the long comment above the resize_window
-  // spy for why that side effect is environment-dependent rather than
-  // something this test can force.
+  // The exception is now NARROW, and the narrowing is the point. switch_tab
+  // may change which TAB is active inside its own window -- that is the whole
+  // tool. It may not raise that window over whatever application the owner is
+  // actually looking at. Earlier revisions of this file pinned the window
+  // raise as intended behaviour, on the strength of focus-investigation.md's
+  // measurement table ("switch_tab ... Yes (intended)"); the owner ruled that
+  // the raise is a defect, not a feature, so the assertion is inverted here
+  // rather than deleted -- a later "restore the old behaviour" edit has to
+  // fail a test to land.
   const switchFocusObservable = await anyWindowReallyFocused();
+  const lastFocusedBeforeSwitch = await lastFocusedId();
+
+  await sw.evaluate(() => {
+    globalThis.__switchCalls = [];
+    globalThis.__origWindowsUpdateSwitch = chrome.windows.update;
+    chrome.windows.update = (...args) => {
+      globalThis.__switchCalls.push(args[1]);
+      return globalThis.__origWindowsUpdateSwitch.apply(chrome.windows, args);
+    };
+  });
 
   const switchResult = await callHandler("switch_tab", { tabId: c2TabId, __session: SESSION_RESIZE });
   check("switch_tab succeeded", switchResult.__ok === true, JSON.stringify(switchResult));
 
+  const switchCalls = await sw.evaluate(() => globalThis.__switchCalls);
+  await sw.evaluate(() => { chrome.windows.update = globalThis.__origWindowsUpdateSwitch; });
+
   const activeAfterSwitch = await activeTabIdOf(winResize.windowId);
   check(
-    "switch_tab DOES activate the target tab (the intended exception, still working after the fix)",
+    "switch_tab DOES activate the target tab (the narrow exception, and the tool's entire job)",
     activeAfterSwitch === c2TabId,
     `expected ${c2TabId}, got ${activeAfterSwitch}`
   );
 
+  // Deterministic half: the raise is gone from the arguments, so this holds on
+  // every machine regardless of whether the effect would have been visible.
+  check(
+    "switch_tab does not ask Chrome to focus the window (no chrome.windows.update({focused:true}))",
+    switchCalls.every((u) => !u || u.focused !== true),
+    JSON.stringify(switchCalls)
+  );
+
   if (switchFocusObservable) {
-    const raisedWindow = await waitForLastFocused(winResize.windowId);
     check(
-      "switch_tab DOES also raise the target tab's window (the intended exception, observable in this run's regime)",
-      raisedWindow,
-      `winResize (${winResize.windowId}) never became last-focused`
+      "switch_tab does not raise the target tab's window over the user's",
+      (await lastFocusedId()) === lastFocusedBeforeSwitch,
+      `last-focused moved from ${lastFocusedBeforeSwitch} to ${await lastFocusedId()} (switch target window is ${winResize.windowId})`
     );
   } else {
     console.log(
       "SKIP  switch_tab window-raise effect check -- this run's Chromium process does not currently hold " +
-      "real OS-level window focus, so this exception's window-raise half would not be observable here either."
+      "real OS-level window focus, so a raise would not be observable here. The argument assertion above " +
+      "gates this case instead."
     );
   }
+
+  // ===========================================================================
+  // SWEEP: no handler at all may activate a tab or raise a window
+  // ===========================================================================
+  //
+  // The three cases above were found by reading all 22 handlers by hand. That
+  // method is what classified switch_tab's window raise as intended for two
+  // revisions, and it has to be repeated in full every time a handler is
+  // added. This sweep asserts the property directly against every handler
+  // instead, and fails when a NEW handler is added without being listed here
+  // (see the coverage check below) -- so the guarantee cannot quietly decay.
+  //
+  // Deterministic half: one spy over chrome.tabs.update and
+  // chrome.windows.update. A handler is caught by the arguments it passes,
+  // whether or not this machine's window manager would have shown the effect
+  // (macOS 26 tiling, and the OS-focus regime described above, make the
+  // visible effect unreliable -- the arguments are not).
+  //
+  // switch_tab is the single exception and it is narrow: it may activate its
+  // own target tab; it still may not raise a window.
+  const SESSION_SWEEP = "cccc-focus-sweep-session";
+  const winSweepSession = await createWindow();
+  check("sweep session window created", typeof winSweepSession.windowId === "number");
+  const sweepTab = await callHandler("new_tab", { url: TEST_URL, __session: SESSION_SWEEP });
+  check("sweep session tab created and grouped", sweepTab.__ok === true, JSON.stringify(sweepTab));
+  const sweepTabId = sweepTab.result.tabId;
+  // close_tab needs its own victim: closing sweepTabId would strand the rest.
+  const doomedTab = await callHandler("new_tab", { url: TEST_URL, __session: SESSION_SWEEP });
+  check("sweep throwaway tab created", doomedTab.__ok === true, JSON.stringify(doomedTab));
+
+  // The owner's window, created last so it is unambiguously last-focused, and
+  // given a second tab so that a handler activating "some other tab in this
+  // window" is visible rather than a no-op.
+  const winSweepUser = await createWindow();
+  const userSecondTab = await sw.evaluate(async ([winId, url]) => {
+    const t = await chrome.tabs.create({ windowId: winId, url, active: true });
+    return t.id;
+  }, [winSweepUser.windowId, TEST_URL]);
+  check("owner's window is last-focused before the sweep", await waitForLastFocused(winSweepUser.windowId));
+  const userActiveBefore = await activeTabIdOf(winSweepUser.windowId);
+  check("owner's second tab is the active one before the sweep", userActiveBefore === userSecondTab,
+    `expected ${userSecondTab}, got ${userActiveBefore}`);
+
+  const uploadPath = join(userDataDir, "focus-sweep-upload.txt");
+  writeFileSync(uploadPath, "focus sweep fixture\n");
+
+  // resize_window is called with the window's CURRENT size: this sweep is
+  // about focus, not geometry, and a different size can be refused outright
+  // ("Bounds must be at least 50% within visible screen space") depending on
+  // where the window manager has parked the window -- measured on macOS 26,
+  // which tiles these windows. A no-op resize still runs the whole handler,
+  // which is what the focus assertions below need. Real resizing has its own
+  // dedicated case earlier in this file.
+  // Resolved lazily, immediately before the call, and not from a value read
+  // when the sweep was built: Chrome refuses ANY bounds update -- a same-size
+  // one included -- when the resulting rect would sit more than half
+  // off-screen, and macOS 26's tiling moves these windows around while the
+  // sweep runs. Measured: the window read left:22 top:52 1282x846 when the
+  // sweep was built and the call ~19 handlers later was still refused with
+  // "Bounds must be at least 50% within visible screen space". So park the
+  // window at a known-good origin first, then ask for the size it actually
+  // has. Geometry is not what this sweep asserts -- running the handler is.
+  const resizeParams = async () => {
+    const w = await sw.evaluate(async (id) => {
+      try {
+        await chrome.windows.update(id, { left: 0, top: 0 });
+      } catch {
+        // Parking is best effort; the assertion below reports the real bounds.
+      }
+      const win = await chrome.windows.get(id);
+      return { width: win.width, height: win.height, left: win.left, top: win.top };
+    }, winSweepSession.windowId);
+    return { tabId: t, width: w.width, height: w.height, __bounds: w };
+  };
+
+  const t = sweepTabId;
+  const SWEEP = [
+    ["status", {}],
+    ["list_tabs", {}],
+    ["read_page", { tabId: t }],
+    ["get_page_text", { tabId: t }],
+    ["find", { query: "Focus", tabId: t }],
+    ["wait_for", { selector: "h1", tabId: t }],
+    ["scroll", { direction: "down", tabId: t }],
+    ["click", { selector: "#btn", tabId: t }],
+    ["fill", { selector: "#name", value: "abc", tabId: t }],
+    ["fill_form", { fields: [{ selector: "#email", value: "a@b.c" }], tabId: t }],
+    ["javascript_eval", { code: "1+1", tabId: t }],
+    ["press_key", { key: "Escape", tabId: t }],
+    ["type_text", { text: "hi", tabId: t }],
+    ["upload_file", { selector: "#up", filePath: uploadPath, tabId: t }],
+    ["read_console_messages", { tabId: t }],
+    ["read_network_requests", { tabId: t }],
+    ["take_screenshot", { tabId: t }],
+    ["navigate", { url: TEST_URL, tabId: t }],
+    ["resize_window", resizeParams],
+    ["new_tab", { url: TEST_URL }],
+    ["switch_tab", { tabId: t }],
+    ["close_tab", { tabId: doomedTab.result.tabId }],
+  ];
+
+  // Coverage, read off the live handlers object rather than a list kept by
+  // hand: adding a handler without adding it here fails right here.
+  /* eslint-disable no-undef -- handlers is a service-worker global */
+  const allHandlers = await sw.evaluate(() => Object.keys(handlers));
+  /* eslint-enable no-undef */
+  const uncovered = allHandlers.filter((h) => h !== "attach_tab" && !SWEEP.some(([n]) => n === h));
+  check(
+    "the sweep covers every handler in background.js (attach_tab excluded: not an MCP tool, panel-only)",
+    uncovered.length === 0,
+    `not covered: ${uncovered.join(", ")}`
+  );
+
+  await sw.evaluate(() => {
+    globalThis.__sweepCalls = [];
+    globalThis.__origTabsUpdateSweep = chrome.tabs.update;
+    globalThis.__origWindowsUpdateSweep = chrome.windows.update;
+    chrome.tabs.update = (...args) => {
+      globalThis.__sweepCalls.push({ api: "tabs.update", target: args[0], props: args[1] });
+      return globalThis.__origTabsUpdateSweep.apply(chrome.tabs, args);
+    };
+    chrome.windows.update = (...args) => {
+      globalThis.__sweepCalls.push({ api: "windows.update", target: args[0], props: args[1] });
+      return globalThis.__origWindowsUpdateSweep.apply(chrome.windows, args);
+    };
+  });
+
+  for (const [method, paramsOrFn] of SWEEP) {
+    const params = typeof paramsOrFn === "function" ? await paramsOrFn() : paramsOrFn;
+    const { __bounds, ...callParams } = params; // diagnostics only, never sent
+    await sw.evaluate(() => { globalThis.__sweepCalls = []; });
+    const res = await callHandler(method, { ...callParams, __session: SESSION_SWEEP });
+    const calls = await sw.evaluate(() => globalThis.__sweepCalls);
+
+    // A handler that threw would make every assertion below vacuously true.
+    check(
+      `sweep: ${method} ran`,
+      res.__ok === true,
+      `${JSON.stringify(res)}${__bounds ? ` (window was at ${JSON.stringify(__bounds)})` : ""}`
+    );
+
+    const activated = calls.filter((c) => c.api === "tabs.update" && c.props && c.props.active === true);
+    const raised = calls.filter(
+      (c) => c.api === "windows.update" && c.props && (c.props.focused === true || c.props.state === "normal")
+    );
+    // No window in this sweep is minimized, so state:"normal" here is a raise
+    // and nothing else -- resize_window's legitimate un-minimise path has its
+    // own dedicated case earlier in this file.
+    check(`sweep: ${method} does not raise a window`, raised.length === 0, JSON.stringify(raised));
+    if (method === "switch_tab") {
+      check(
+        "sweep: switch_tab activates only its own target tab (the one allowed exception)",
+        activated.length === 1 && activated[0].target === t,
+        JSON.stringify(activated)
+      );
+    } else {
+      check(`sweep: ${method} does not activate any tab`, activated.length === 0, JSON.stringify(activated));
+    }
+
+    const userActiveNow = await activeTabIdOf(winSweepUser.windowId);
+    check(
+      `sweep: ${method} leaves the owner's active tab alone`,
+      userActiveNow === userActiveBefore,
+      `expected ${userActiveBefore}, got ${userActiveNow}`
+    );
+  }
+
+  await sw.evaluate(() => {
+    chrome.tabs.update = globalThis.__origTabsUpdateSweep;
+    chrome.windows.update = globalThis.__origWindowsUpdateSweep;
+  });
 }
 
 try {
