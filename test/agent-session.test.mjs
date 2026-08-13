@@ -368,6 +368,15 @@ function makeSession(extra = {}) {
     JSON.stringify(win.args),
   );
   check("win32: leaves flags unquoted", win.args.includes("-p"), JSON.stringify(win.args));
+
+  const winSpaced = buildSpawn("C:\\Users\\Huy Tran\\claude.cmd", ["-p"], "win32");
+  check(
+    "win32: quotes the COMMAND too, not just the args",
+    winSpaced.command === '"C:\\Users\\Huy Tran\\claude.cmd"',
+    winSpaced.command,
+  );
+  const winPlain = buildSpawn("claude", ["-p"], "win32");
+  check("win32: a bare command name needs no quoting", winPlain.command === "claude", winPlain.command);
   check("winQuote escapes an embedded double quote", winQuote('a"b') === '"a\\"b"', winQuote('a"b'));
 }
 

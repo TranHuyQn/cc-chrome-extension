@@ -427,6 +427,15 @@ rmSync(fakeHome, { recursive: true, force: true });
 {
   const linuxBin = mkdtempSync(join(tmpdir(), "cc-linux-stub-"));
   writeFileSync(join(linuxBin, "uname"), "#!/usr/bin/env bash\necho Linux\n", { mode: 0o755 });
+  // Its own `claude` stub, not the one in binDir: that lives under fakeHome,
+  // which is deleted well before this block runs. On a machine with the real
+  // CLI installed the assertion below still passed — resolving /opt/homebrew/
+  // bin/claude instead — so it was green for the wrong reason, and only CI, on
+  // a runner with no claude at all, showed the unit coming out with an empty
+  // CC_CHROME_CLAUDE_BIN line. Owning the stub makes the check mean the same
+  // thing on every machine.
+  const linuxClaude = join(linuxBin, "claude");
+  writeFileSync(linuxClaude, "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
 
   // Writes the unit with a stubbed systemd version and returns its contents.
   const writeUnitAs = (systemdVersion, envOverrides = {}) => {
@@ -474,7 +483,7 @@ rmSync(fakeHome, { recursive: true, force: true });
   check("linux: systemd 245 gets file logging", modern.body.includes("StandardOutput=append:"), modern.body);
   check(
     "linux: the unit bakes in the absolute path to claude",
-    /Environment="CC_CHROME_CLAUDE_BIN=.+\/claude"/.test(modern.body),
+    modern.body.includes(`Environment="CC_CHROME_CLAUDE_BIN=${linuxClaude}"`),
     modern.body,
   );
   check("linux: systemd 245's log hint is the log file", (modern.logHint || "").endsWith("logs/bridge.err.log"), modern.logHint);

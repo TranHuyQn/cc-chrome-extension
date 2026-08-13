@@ -36,7 +36,16 @@ export function buildSpawn(bin, args, platform = process.platform) {
   if (platform !== "win32") {
     return { command: bin, args, options: { shell: false } };
   }
-  return { command: bin, args: args.map(winQuote), options: { shell: true, windowsHide: true } };
+  // The COMMAND is quoted too, not just the args: shell:true makes Node join
+  // them into one cmd.exe command line, so an unquoted path with a space
+  // (C:\Users\Huy Tran\...\claude.cmd, or anything under a %TEMP% that contains
+  // one) would be split and reported as "not recognized as an internal or
+  // external command".
+  return {
+    command: winQuote(bin),
+    args: args.map(winQuote),
+    options: { shell: true, windowsHide: true },
+  };
 }
 
 // A background service does not inherit an interactive shell's PATH. Measured
