@@ -197,14 +197,18 @@ automatically, so it is a manual step on every release: run `npm run build:relea
   by presence. Deliberately **not** overridable by an env var — a switch that
   re-enables this is a switch someone will flip. `/ws` is unaffected: the
   extension bridge is *meant* to work through a proxy.
-- The panel's MCP Bearer token travels in the spawned `claude` child's argv
-  (inside `--mcp-config`, built by `AgentSession.mcpConfig()` in
-  `server/agent.js`), so it is readable via `ps`/`/proc/<pid>/cmdline` by any
-  other local user on the same machine, for the child's lifetime. Stated the
-  same way the `Origin` caveat above is stated, not omitted: this is a
-  deliberate tradeoff, not an oversight. The panel already requires a loopback
-  bridge, so the exposure is same-machine only, and that machine already holds
-  the token in `~/.ccchrome.json` and `chrome.storage`.
+- The panel's MCP Bearer token reaches the spawned `claude` child through a
+  **file**, not argv: `AgentSession.mcpConfigPath()` in `server/agent.js`
+  writes `.mcp-config-<sessionId>.json` (mode 0600) into the session's own cwd
+  and passes that path to `--mcp-config`. Do not put the config back inline.
+  It was inline until 3.6.0, which meant the token was readable via
+  `ps`/`/proc/<pid>/cmdline` by any other local user for the child's lifetime,
+  and it is also what made the Windows spawn impossible — Windows has to go
+  through `cmd.exe` (Node refuses to spawn `claude.cmd` without a shell since
+  CVE-2024-27980) and `cmd` treats the JSON's `"` as quoting toggles. The mode
+  is re-applied on every write because `writeFileSync`'s `mode` only applies at
+  creation. Nothing prunes these files; they live in `PANEL_CWD`, which nothing
+  prunes either.
 - Historical note, now moot: earlier versions had a second `stdio` mode
   bridge that ignored path routing entirely, so a hand-typed
   `ws://127.0.0.1:9876/ws?token=anything` would dial `/panel` on it and evict

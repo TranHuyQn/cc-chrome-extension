@@ -6,9 +6,9 @@
 
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, rmSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { AgentSession } from "../server/agent.js";
+import { AgentSession, buildSpawn, winQuote } from "../server/agent.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(root, "test", "fixtures", "claude-stream.ndjson");
@@ -341,6 +341,76 @@ function makeSession(extra = {}) {
   check("that turn is reported as a failed turn, with the CLI's own reason",
     end?.ok === false && /No conversation found/.test(end?.error || ""),
     JSON.stringify(end));
+  session.dispose();
+}
+
+// ---------------------------------------------------------------------------
+// Windows: spawning claude, and keeping the MCP config out of argv
+// ---------------------------------------------------------------------------
+//
+// buildSpawn is a pure function taking the platform as an argument, so BOTH
+// branches are testable from any machine. The Windows branch would otherwise
+// only ever run on Windows, which is exactly how it went unnoticed that Node
+// refuses to spawn a .cmd without a shell (CVE-2024-27980) while `claude` on
+// Windows IS claude.cmd.
+{
+  const posix = buildSpawn("claude", ["-p", "--mcp-config", "/tmp/a b.json"], "linux");
+  check("posix: spawns the binary directly", posix.command === "claude", posix.command);
+  check("posix: passes args untouched", posix.args[2] === "/tmp/a b.json", JSON.stringify(posix.args));
+  check("posix: no shell", posix.options.shell !== true, JSON.stringify(posix.options));
+
+  const win = buildSpawn("claude", ["-p", "--mcp-config", "C:\\Users\\Huy Tran\\a.json"], "win32");
+  check("win32: uses a shell so PATHEXT finds claude.cmd", win.options.shell === true, JSON.stringify(win.options));
+  check("win32: hides the console window", win.options.windowsHide === true, JSON.stringify(win.options));
+  check(
+    "win32: quotes a path containing a space",
+    win.args.includes('"C:\\Users\\Huy Tran\\a.json"'),
+    JSON.stringify(win.args),
+  );
+  check("win32: leaves flags unquoted", win.args.includes("-p"), JSON.stringify(win.args));
+  check("winQuote escapes an embedded double quote", winQuote('a"b') === '"a\\"b"', winQuote('a"b'));
+}
+
+// The MCP config carries the bridge's Bearer token. Inline in argv it is
+// readable by `ps`/Task Manager for the child's lifetime, and its JSON quotes
+// are unquotable through cmd.exe -- both fixed by writing it to a 0600 file.
+{
+  // Built directly rather than through makeSession(): this case is about the
+  // token, and makeSession does not set one.
+  const session = new AgentSession({
+    sessionId: "99999999-8888-7777-6666-555555555555",
+    mcpUrl: "http://127.0.0.1:8787/mcp",
+    token: "paneltoken123",
+    allowedTools: "mcp__chrome",
+    cwd: workdir,
+    claudeBin: process.execPath,
+    claudeArgsPrefix: [fakeClaude],
+    onEvent: () => {},
+    log: () => {},
+  });
+  const p = session.mcpConfigPath();
+  check("mcp config is a path, not inline JSON", !p.trim().startsWith("{"), p);
+  check("mcp config file exists", existsSync(p), p);
+  const cfg = JSON.parse(readFileSync(p, "utf8"));
+  check("mcp config names the chrome server", !!cfg.mcpServers?.chrome, JSON.stringify(cfg));
+  check(
+    "mcp config carries the bearer token",
+    cfg.mcpServers.chrome.headers.Authorization === "Bearer paneltoken123",
+    JSON.stringify(cfg),
+  );
+  check(
+    "the token is not in argv any more",
+    !session.buildArgs().some((a) => String(a).includes("paneltoken123")),
+    JSON.stringify(session.buildArgs()),
+  );
+  check("--mcp-config points at that file", session.buildArgs().includes(p), JSON.stringify(session.buildArgs()));
+  if (process.platform !== "win32") {
+    check(
+      "mcp config file is owner-only (0600)",
+      (statSync(p).mode & 0o777) === 0o600,
+      (statSync(p).mode & 0o777).toString(8),
+    );
+  }
   session.dispose();
 }
 

@@ -18,7 +18,7 @@
 // nothing here is testing transcript translation (agent-session.test.mjs does
 // that against real fixtures), only that a turn runs end to end.
 
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 
 const argv = process.argv.slice(2);
 const configIndex = argv.indexOf("--mcp-config");
@@ -26,7 +26,14 @@ if (configIndex === -1) {
   process.stderr.write("fake-claude-mcp: no --mcp-config in argv\n");
   process.exit(2);
 }
-const config = JSON.parse(argv[configIndex + 1]);
+// --mcp-config takes either a path or inline JSON, and the real CLI accepts
+// both. AgentSession switched to the path form (the token used to be visible
+// in argv, and its JSON quotes could not survive cmd.exe on Windows), so this
+// stand-in has to accept both too or it stops standing in for anything.
+const configArg = argv[configIndex + 1];
+const config = JSON.parse(
+  configArg.trimStart().startsWith("{") ? configArg : readFileSync(configArg, "utf8"),
+);
 const { url, headers } = config.mcpServers.chrome;
 
 process.stdin.resume();

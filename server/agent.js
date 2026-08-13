@@ -11,6 +11,33 @@
 // across turns even though the process does not.
 
 import { spawn } from "node:child_process";
+import { writeFileSync, chmodSync } from "node:fs";
+import { join } from "node:path";
+
+// cmd.exe quoting, kept to the one rule actually needed here: wrap in double
+// quotes, escape any double quote inside. Everything this quotes is
+// repo-controlled — flags, absolute paths, a UUID-validated session id — and
+// the chat prompt never reaches argv at all (it goes over stdin), so this does
+// not have to survive hostile input, only spaces in %USERPROFILE%.
+export function winQuote(s) {
+  return /^[A-Za-z0-9_\-.:\\/=]+$/.test(String(s)) ? String(s) : `"${String(s).replace(/"/g, '\\"')}"`;
+}
+
+// Node >= 18.20/20.12 refuses to spawn a .cmd without a shell (the fix for
+// CVE-2024-27980), and on Windows `claude` IS claude.cmd — so the panel's very
+// first turn died with ENOENT there. shell:true is only safe because
+// mcpConfigPath() moved the one argument containing JSON quotes out of argv
+// and into a file; cmd.exe treats `"` as a quoting toggle and would have
+// shredded it.
+//
+// Takes the platform as an argument so both branches are testable from any
+// machine, which is the only reason the Windows branch has coverage at all.
+export function buildSpawn(bin, args, platform = process.platform) {
+  if (platform !== "win32") {
+    return { command: bin, args, options: { shell: false } };
+  }
+  return { command: bin, args: args.map(winQuote), options: { shell: true, windowsHide: true } };
+}
 
 export class AgentSession {
   constructor({
@@ -80,16 +107,39 @@ export class AgentSession {
   // lifetime of the child process. That is a deliberate tradeoff carried over
   // from the probe, not an oversight — see the task-2 fix-round report for
   // the file-based-config alternative this was weighed against.
-  mcpConfig() {
-    return JSON.stringify({
-      mcpServers: {
-        chrome: {
-          type: "http",
-          url: this.mcpUrl,
-          headers: { Authorization: `Bearer ${this.token}` },
+  // Written to a file rather than passed inline as JSON. Two reasons, both
+  // real: cmd.exe re-parses double quotes when spawning through a shell (which
+  // Windows needs — see buildSpawn), and the inline form put the bridge's
+  // Bearer token in the child's argv, readable via `ps` / Task Manager by any
+  // other local user for the child's lifetime. A 0600 file in the session's
+  // own cwd has neither problem.
+  //
+  // Written once per session and reused: `claude` reads it at startup on every
+  // turn, so it has to outlive the first child.
+  mcpConfigPath() {
+    if (this._mcpConfigPath) return this._mcpConfigPath;
+    const file = join(this.cwd, `.mcp-config-${this.sessionId || "panel"}.json`);
+    writeFileSync(
+      file,
+      JSON.stringify({
+        mcpServers: {
+          chrome: {
+            type: "http",
+            url: this.mcpUrl,
+            headers: { Authorization: `Bearer ${this.token}` },
+          },
         },
-      },
-    });
+      }),
+      { mode: 0o600 },
+    );
+    // `mode` only applies when the file is CREATED. A file left by an earlier
+    // run keeps whatever mode it had, so repair it unconditionally — the same
+    // reason install.sh chmods on every run. Skipped on Windows, where POSIX
+    // modes mean nothing and install.ps1's icacls on the install dir is what
+    // restricts access.
+    if (process.platform !== "win32") chmodSync(file, 0o600);
+    this._mcpConfigPath = file;
+    return file;
   }
 
   buildArgs() {
@@ -114,7 +164,7 @@ export class AgentSession {
       // that flag only pins the *MCP* config; it does nothing about plugins,
       // hooks, or any other user-level setting.
       "--setting-sources", "project",
-      "--mcp-config", this.mcpConfig(),
+      "--mcp-config", this.mcpConfigPath(),
       // Every built-in tool off: this agent has no business reading or writing
       // the user's filesystem, and the browser tools all arrive over MCP.
       "--tools", "",
@@ -135,10 +185,12 @@ export class AgentSession {
     this.lastStderrLine = null;
     this.emit({ type: "turn_start" });
 
-    const child = spawn(this.claudeBin, this.buildArgs(), {
+    const { command, args, options } = buildSpawn(this.claudeBin, this.buildArgs());
+    const child = spawn(command, args, {
       cwd: this.cwd,
       env: { ...process.env, ...this.env },
       stdio: ["pipe", "pipe", "pipe"],
+      ...options,
     });
     this.child = child;
     this.started = true;
