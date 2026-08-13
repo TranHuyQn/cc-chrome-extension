@@ -1,0 +1,75 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: npm run lint
+
+  # The .ps1 files cannot be syntax-checked on the maintainer's macOS machine
+  # (no pwsh) and test/install-windows.test.mjs SKIPS off Windows, so without
+  # this job a PowerShell syntax error could sit in the tree looking green.
+  powershell-syntax:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse every .ps1
+        shell: powershell
+        run: |
+          $bad = 0
+          Get-ChildItem scripts\*.ps1 | ForEach-Object {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) {
+              Write-Host "FAIL  $($_.Name)"
+              $errors | ForEach-Object { Write-Host "      $($_.Message)" }
+              $bad++
+            } else {
+              Write-Host "PASS  $($_.Name)"
+            }
+          }
+          if ($bad -gt 0) { exit 1 }
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: npm install
+        working-directory: server
+
+      # Browser-free suites only. The playwright ones need a real Chromium with
+      # the extension loaded, and on macOS additionally HEADED=1 and a visible
+      # window (see CLAUDE.md), so they stay a manual step. build.test.mjs is
+      # excluded on purpose too: it runs `npm run build`, which needs key.pem —
+      # gitignored, and regenerating it would change the extension id.
+      - run: node test/agent-session.test.mjs
+      - run: node test/ratelimit.test.mjs
+      - run: node test/session-ttl.test.mjs
+      - run: node test/reconnect-grace.test.mjs
+      - run: node test/panel-auth.test.mjs
+      - run: node test/panel-protocol.test.mjs
+
+      # install.test.mjs drives bash and the unix service layer;
+      # install-windows.test.mjs is its counterpart and skips cleanly on Linux.
+      # Each runs where it means something.
+      - run: node test/install.test.mjs
+        if: runner.os == 'Linux'
+      - run: node test/install-windows.test.mjs
+        if: runner.os == 'Windows'
