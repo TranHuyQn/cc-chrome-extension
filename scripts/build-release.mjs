@@ -40,7 +40,10 @@ mkdirSync(stage, { recursive: true });
 // symlink as a symlink, unchanged.
 execFileSync("cp", ["-R", join(root, "server"), join(stage, "server")]);
 execFileSync("cp", ["-R", join(root, "extension"), join(stage, "extension")]);
-for (const f of ["install.sh", "uninstall.sh", "service-unit.sh"]) {
+for (const f of [
+  "install.sh", "uninstall.sh", "service-unit.sh",
+  "install.ps1", "uninstall.ps1", "service-task.ps1",
+]) {
   copyFileSync(join(root, "scripts", f), join(stage, f));
 }
 copyFileSync(join(root, ".claude", "commands", "ccchrome.md"), join(stage, "ccchrome.md"));
@@ -65,5 +68,11 @@ console.log("wrote dist/cc-chrome-bridge.tar.gz");
 // exist on its own before the tarball it downloads is ever fetched, so
 // packing it exclusively inside cc-chrome-bridge.tar.gz would make that
 // command 404 no matter how carefully a release is published by hand.
+// The same argument applies to install.ps1 and the Windows one-liner
+// `irm .../releases/latest/download/install.ps1 | iex`, so THREE assets have
+// to be attached to every GitHub Release, not two. test/build.test.mjs asserts
+// both standalone copies exist and match their source byte for byte.
 copyFileSync(join(root, "scripts", "install.sh"), join(dist, "install.sh"));
 console.log("wrote dist/install.sh");
+copyFileSync(join(root, "scripts", "install.ps1"), join(dist, "install.ps1"));
+console.log("wrote dist/install.ps1");

@@ -162,6 +162,17 @@ check(
   existsSync(distInstallPath) && readFileSync(distInstallPath, "utf8") === readFileSync(join(root, "scripts", "install.sh"), "utf8")
 );
 
+// Same argument, Windows half: the documented Windows install is
+// `irm .../releases/latest/download/install.ps1 | iex`, which fetches that one
+// file before any tarball exists locally. Forgetting to publish it makes the
+// command 404 with nothing to read.
+const distInstallPs1Path = join(root, "dist", "install.ps1");
+check("install.ps1 is produced as a standalone release asset (dist/install.ps1)", existsSync(distInstallPs1Path));
+check(
+  "dist/install.ps1 is byte-identical to scripts/install.ps1",
+  existsSync(distInstallPs1Path) && readFileSync(distInstallPs1Path, "utf8") === readFileSync(join(root, "scripts", "install.ps1"), "utf8")
+);
+
 const listing = execFileSync("tar", ["-tzf", tarPath], { encoding: "utf8" });
 // Exact entry names, not substring matching against the raw listing — a
 // substring check would also pass on e.g. "server/index.js.bak".
@@ -180,6 +191,9 @@ for (const required of [
   "install.sh",
   "uninstall.sh",
   "service-unit.sh",
+  "install.ps1",
+  "uninstall.ps1",
+  "service-task.ps1",
   "ccchrome.md",
 ]) {
   check(`tarball contains ${required}`, entries.has(required), listing.slice(0, 500));

@@ -2,15 +2,18 @@
 
 Extension thay thế cho **Claude in Chrome** chính thức, dành cho team dùng chung tài khoản Claude **chỉ với Claude Code** (không đăng nhập được claude.ai). Extension gốc bắt buộc đăng nhập claude.ai trong browser; bản bridge này thì **không cần bất kỳ đăng nhập nào** — Claude Code điều khiển Chrome thông qua một MCP server chạy local trên máy bạn.
 
-> **Nâng lên 3.5.0 — đổi hẳn cách cài đặt, đọc trước khi nâng cấp.** Không còn
-> server dùng chung: mỗi người tự chạy bridge trên máy mình, cài bằng một
-> lệnh `curl … | bash` (xem [Cài đặt](#cài-đặt) bên dưới), chạy như một dịch
-> vụ nền tự khởi động lại cùng máy — không còn phụ thuộc việc `claude` có
-> đang chạy hay không. Mô hình server dùng chung cũ (VPS, pairing secret,
-> `/ccchrome connect`) vẫn còn trong code cho ai cố tình muốn dùng (xem
-> [Triển khai lên VPS](#triển-khai-lên-vps-cho-cả-team)), nhưng không còn là
-> đường mặc định và slash command `/ccchrome` không còn hỗ trợ pairing qua đó
-> nữa. Hai thay đổi hành vi cần biết:
+> **1.0.0 là bản phát hành đầu tiên.** Mọi số hiệu 2.x/3.x xuất hiện trong
+> lịch sử git chỉ tồn tại nội bộ, chưa từng phát hành ra ngoài — đừng tìm
+> chúng trên GitHub Releases.
+>
+> Cách cài: **mỗi người tự chạy bridge trên máy mình**, cài bằng một lệnh
+> (`curl … | bash` trên macOS/Linux, `irm … | iex` trên Windows — xem
+> [Cài đặt](#cài-đặt)), chạy như một dịch vụ nền tự khởi động lại cùng máy,
+> không phụ thuộc việc `claude` có đang chạy hay không. Mô hình server dùng
+> chung (VPS, pairing secret, `/ccchrome connect`) vẫn còn trong code cho ai
+> cố tình muốn dùng (xem [Triển khai lên VPS](#triển-khai-lên-vps-cho-cả-team)),
+> nhưng không phải đường mặc định và slash command `/ccchrome` không hỗ trợ
+> pairing qua đó. Hai điều cần biết:
 > - `navigate` giờ **từ chối** đưa tab tới `chrome:`, `chrome-extension:`,
 >   `devtools:`, `edge:` hay `about:` khác `about:blank` — trước đây có thể
 >   đỗ một tab ở `chrome://...`, giờ thì không.
@@ -54,11 +57,19 @@ ghi vào thư mục home của bạn.
 
 ### 1. Một lệnh
 
+**macOS / Linux:**
+
 ```bash
 curl -fsSL https://github.com/TranHuyQn/cc-chrome-extension/releases/latest/download/install.sh | bash
 ```
 
-Lệnh này tải và chạy thẳng một script bash từ GitHub Releases — biết vậy trước khi chạy. Muốn xem
+**Windows** (PowerShell thường, **không** cần "Run as administrator"):
+
+```powershell
+irm https://github.com/TranHuyQn/cc-chrome-extension/releases/latest/download/install.ps1 | iex
+```
+
+Lệnh này tải và chạy thẳng một script từ GitHub Releases — biết vậy trước khi chạy. Muốn xem
 trước thì tách làm hai bước:
 
 ```bash
@@ -67,10 +78,24 @@ less install.sh        # đọc trước khi chạy
 bash install.sh
 ```
 
+```powershell
+irm https://github.com/TranHuyQn/cc-chrome-extension/releases/latest/download/install.ps1 -OutFile install.ps1
+notepad install.ps1    # đọc trước khi chạy
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
 Script tự làm hết: tải gói phát hành (mã nguồn `server/` + `extension/` kèm sẵn `node_modules`, không
-cần bạn tự `npm install`), sinh token, cài **dịch vụ nền** tự khởi động cùng máy (LaunchAgent trên
-macOS, `systemd --user` trên Linux) chạy bridge tại `http://127.0.0.1:8787`, và đăng ký MCP server
-`chrome` với Claude Code (`claude mcp add --scope user --transport http chrome ...`).
+cần bạn tự `npm install`), sinh token, cài **dịch vụ nền** tự khởi động cùng máy chạy bridge tại
+`http://127.0.0.1:8787`, và đăng ký MCP server `chrome` với Claude Code
+(`claude mcp add --scope user --transport http chrome ...`).
+
+Dịch vụ nền đó là **của riêng tài khoản bạn** và lên **khi bạn đăng nhập**, trên cả ba hệ điều hành —
+LaunchAgent (macOS), `systemd --user` (Linux), scheduled task trigger "At log on" (Windows). Không
+có cái nào chạy trước khi đăng nhập, và cũng không cần: Chrome chỉ tồn tại sau khi bạn đăng nhập.
+
+> **WSL không được hỗ trợ.** Chrome chạy ở Windows host còn bridge sẽ nằm trong WSL — hai bên hàng
+> rào mạng khác nhau — và `systemctl --user` thường không có sẵn trong WSL. Cài bằng `install.ps1`
+> trên chính Windows.
 
 Máy đã cài rồi mà chạy lại đúng lệnh trên: script tự nhận ra là **nâng cấp**, giữ nguyên token cũ
 (khỏi phải dán lại URL vào extension), chỉ thay mã nguồn dưới `~/.cc-chrome-bridge/` và khởi động lại
@@ -81,7 +106,7 @@ dịch vụ nền (phần server).
 > cho tới khi bạn tự bấm **Reload** trên thẻ extension ở `chrome://extensions` — Chrome không tự đọc
 > lại thư mục. Bỏ qua bước này nghĩa là bạn **âm thầm vẫn chạy extension của bản cũ**, kể cả khi
 > server đã lên bản mới: nếu bản cũ thiếu một bản vá bảo mật (như hai chốt `navigate`/`javascript_eval`
-> thêm ở 3.5.0, xem [Lưu ý bảo mật](#lưu-ý-bảo-mật)), bạn vẫn thiếu nó cho tới khi Reload. Luôn vào
+> thêm ở bản mới, xem [Lưu ý bảo mật](#lưu-ý-bảo-mật)), bạn vẫn thiếu nó cho tới khi Reload. Luôn vào
 > `chrome://extensions` bấm **Reload** trên "Claude Code Chrome Bridge" sau mỗi lần chạy lại lệnh cài.
 
 ### 2. Hai việc phải tự làm trong Chrome
@@ -112,7 +137,14 @@ có sống không và extension đã nối chưa.
 bash ~/.cc-chrome-bridge/uninstall.sh
 ```
 
-Xem trước sẽ xoá gì mà không đụng file nào: `bash ~/.cc-chrome-bridge/uninstall.sh --dry-run`.
+Trên Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.cc-chrome-bridge\uninstall.ps1"
+```
+
+Xem trước sẽ xoá gì mà không đụng file nào: `bash ~/.cc-chrome-bridge/uninstall.sh --dry-run`
+(bản `.ps1` chưa có `--dry-run`).
 
 Script dừng dịch vụ nền, gỡ đăng ký MCP server `chrome`, xoá token và mã nguồn dưới
 `~/.cc-chrome-bridge/`. Hai thứ nó **không** đụng tới, và tự in ra khi chạy xong:
@@ -134,6 +166,18 @@ Script dừng dịch vụ nền, gỡ đăng ký MCP server `chrome`, xoá token
 - **Đổi phiên bản Node (nvm/volta/fnm)**: dịch vụ nền ghi đường dẫn tuyệt đối tới `node` lúc cài, nên
   đổi phiên bản Node sau đó làm dịch vụ crash-loop âm thầm. Chạy lại lệnh cài ở mục 1 để ghi lại đường
   dẫn `node` hiện tại.
+- **Trên Windows**: xem dịch vụ còn sống không bằng
+  ```powershell
+  Get-ScheduledTask ccchrome-bridge | Select-Object State
+  ```
+  `State` phải là **Running**. Nếu là `Ready` thì bridge đang không chạy — khởi động lại bằng
+  `Start-ScheduledTask ccchrome-bridge`, và xem log ở
+  `%USERPROFILE%\.cc-chrome-bridge\logs\bridge.err.log`.
+- **Trên Linux, dịch vụ không tự lên sau khi khởi động lại máy**: `systemd --user` cần một phiên đăng
+  nhập thật. Nếu bạn cài qua ssh hoặc không đăng nhập vào giao diện đồ hoạ, chạy
+  `sudo loginctl enable-linger $USER` rồi cài lại. Máy dùng systemd cũ hơn 240 (ví dụ Ubuntu 18.04)
+  thì log không ghi ra file mà vào journal — đọc bằng `journalctl --user -u ccchrome-bridge -e`;
+  script cài in đúng chỗ xem log cho máy của bạn.
 
 ## Tools cung cấp cho Claude Code
 
@@ -156,10 +200,10 @@ Script dừng dịch vụ nền, gỡ đăng ký MCP server `chrome`, xoá token
 
 ## Nhóm tab theo phiên
 
-**Nâng cấp:** 3.0.0 bắt buộc cài lại extension cho cả team — xem ghi chú ở
+**Nâng cấp:** cài lại extension cho cả team — xem ghi chú ở
 đầu file, extension cũ ghép server mới vẫn chạy được nhưng không có cách ly.
 
-Kể từ 3.0.0, mỗi phiên Claude Code (mỗi lần chạy `claude`, hoặc mỗi kết nối
+Mỗi phiên Claude Code (mỗi lần chạy `claude`, hoặc mỗi kết nối
 MCP ở chế độ `--http`) có **một tab group riêng** trong Chrome, đặt tên
 `Claude · xxxx` (4 ký tự đầu của session id) và tô màu cam để phân biệt với
 tab cá nhân.
@@ -174,7 +218,7 @@ và không lọt vào ảnh `take_screenshot`. Một số trang extension không
 
 - Tab do `navigate` (không kèm `tabId`) hoặc `new_tab` mở ra sẽ **tự động vào
   nhóm của phiên đó** — không còn chiếm tab đang mở trước mặt bạn như trước
-  2.x nữa.
+  trước đây nữa.
 - Tab đó mở **trong nền, không giành focus của bạn** — Chrome không tự nhảy
   sang tab hay cửa sổ đó, bạn cứ tiếp tục làm việc trên tab đang xem trong khi
   Claude thao tác ở tab riêng của nó. Cần xem nó thì gọi `switch_tab`.
@@ -196,7 +240,7 @@ và không lọt vào ảnh `take_screenshot`. Một số trang extension không
   khi Claude mở tab đầu tiên** trong phiên đó (qua `navigate` hoặc `new_tab`).
   Trước đó bạn chưa có nhóm nào để kéo tab vào.
 - Extension cần thêm quyền `tabGroups` (đã có trong `extension/manifest.json`
-  từ 3.0.0) để tạo và quản lý các nhóm này.
+  ) để tạo và quản lý các nhóm này.
 
 ### Hai điều cần biết trước khi dùng
 
@@ -217,7 +261,7 @@ Claude ở một cửa sổ riêng.
 
 ## Khung chat (side panel)
 
-Từ 3.4.0, extension có một khung chat nhúng ngay trong Chrome (side panel) —
+Extension có một khung chat nhúng ngay trong Chrome (side panel) —
 gõ thẳng vào đó thay vì phải mở terminal chạy `claude`. Mỗi lượt chat, server
 chạy một tiến trình `claude` mới (headless, `--tools ""`, chỉ có tool
 `mcp__chrome`) rồi stream kết quả về khung chat qua một WebSocket riêng
@@ -225,7 +269,7 @@ chạy một tiến trình `claude` mới (headless, `--tools ""`, chỉ có too
 
 ### Bật khung chat
 
-Từ 3.5.0, cài bằng `install.sh` là **có sẵn luôn** — bridge do dịch vụ nền
+Cài bằng `install.sh` (hoặc `install.ps1`) là **có sẵn luôn** — bridge do dịch vụ nền
 chạy đã bind đúng `127.0.0.1` theo mặc định (xem [Cài đặt](#cài-đặt)), và đó
 là điều kiện duy nhất khung chat cần ngoài bridge đang sống. Không có bước
 bật riêng: cài xong, dán URL vào popup extension như bình thường (bước 2 ở
@@ -311,13 +355,13 @@ Biến môi trường riêng cho khung chat: `CC_CHROME_PANEL_TOOLS` — xem b�
 
 ## Triển khai lên VPS cho cả team
 
-> ⚠️ **Mô hình cũ — không còn là mặc định từ 3.5.0.** Từ 3.5.0 mỗi người tự
+> ⚠️ **Mô hình cũ — không còn là mặc định.** Giờ mỗi người tự
 > cài bridge trên máy mình (xem [Cài đặt](#cài-đặt) ở trên) — không cần VPS,
 > không cần pairing secret nào cả. Mục này giữ lại cho ai **cố tình** muốn
 > chạy một server dùng chung cho cả team (ví dụ: máy cá nhân của member
 > không đủ mạnh, hoặc muốn quản lý token tập trung). Hai endpoint sinh
 > installer tự động (`GET /install.sh`, `GET /uninstall.sh`) đã bị xoá khỏi
-> server ở 3.5.0 — chúng sinh script theo URL của server, nên với model VPS
+> server — chúng sinh script theo URL của server, nên với model VPS
 > giờ chỉ còn hợp cho việc dùng chung, những endpoint đó sẽ đưa nhầm người
 > dùng vào một kiến trúc không còn tồn tại. Slash command `/ccchrome` cũng
 > không còn `connect`/`disconnect`/`local` — dùng `curl` thẳng tới `/pair`
@@ -423,11 +467,11 @@ Một người mở nhiều phiên Claude Code cùng lúc vẫn ổn — tất c
 - **Check origin làm được gì và không làm được gì.** Bridge **bắt buộc** handshake WebSocket phải có header `Origin: chrome-extension://…` (thiếu origin cũng bị từ chối). Việc này chặn được kết nối cross-origin phát sinh từ trong browser — một trang web bất kỳ mở `new WebSocket("ws://127.0.0.1:8787")` sẽ gửi origin `https://…` và bị từ chối — và nâng rào với client local nghiệp dư. Nhưng `Origin` là header do **client tự đặt**, không có gì bảo chứng: một process viết riêng cho việc này (script Node dùng `ws`, hay `curl`) chỉ cần gửi thêm một dòng header là qua được. Test `test/e2e-http.mjs` của chính repo này chứng minh điều đó — nó nối vào server bằng client `ws` thuần Node với origin giả và được chấp nhận như extension thật. **Đừng coi check origin là hàng rào chống được process local có chủ đích.**
 - **Bridge cài bằng `install.sh` chỉ nghe trên loopback (`127.0.0.1`) theo mặc định.** Máy khác trong LAN không tới được `/ws`/`/mcp`. Hàng rào thật với ai đang đứng trên chính máy bạn là **token** (`~/.ccchrome.json`), không phải bind address hay check origin ở trên — nói thẳng, mô hình đe dọa thực tế ở mức này là *"phần mềm khác đang chạy sẵn trên máy bạn"*, và biện pháp giảm thiểu thật sự là **dùng một Chrome profile riêng cho automation**, để dù có bị lợi dụng thì cũng không có tab nào đăng nhập tài khoản cá nhân trong đó.
 - **Ở mô hình VPS dùng chung (xem [Triển khai lên VPS](#triển-khai-lên-vps-cho-cả-team)), hàng rào thật cũng là token**, không phải check origin. Server bind `0.0.0.0` **có chủ ý** để reverse proxy (Caddy trong `deploy/`) tới được — nghĩa là `/ws` và `/mcp` sẽ tới được từ internet qua proxy đó. Vì vậy hai điều sau là **bắt buộc, không phải khuyến nghị**: (1) TLS phải terminate ở proxy, dùng `wss://`/`https://` — token đi trong subprotocol/header, để plaintext là lộ token trên đường truyền; (2) **đừng bao giờ expose port 8787 trần ra internet** (compose dùng `expose` chứ không `ports`; bản systemd đặt `CC_CHROME_HOST=127.0.0.1`) — 8787 lộ ra ngoài thì ai cũng tự đặt được `X-Forwarded-For` và rate limit của `/pair` mất tác dụng. Token bị lộ thì thu hồi bằng `DELETE /pair`.
-- **`navigate` và `javascript_eval` (cùng `press_key`, `type_text`, `upload_file`) đều từ chối trang của chính extension.** `navigate` không đưa được tab tới `chrome-extension://<id>/...` (hay `chrome:`, `devtools:`, `edge:`, `about:` khác `about:blank`); bốn tool còn lại từ chối chạy nếu tab lỡ đã nằm trên một trang như vậy. Trước đây (tới hết 3.4.0) hai chốt này không tồn tại — một model có thể `navigate` một tab vào `chrome-extension://<id>/popup.html` rồi `javascript_eval` ngay trên đó, chạy trong realm đặc quyền của extension với `chrome.tabs.*` không giới hạn, phá vỡ hoàn toàn cách ly theo tab group. `take_screenshot` là ngoại lệ **có chủ đích**, không phải sót: chụp ảnh không sửa gì trên trang, còn bốn tool kia đều mutate.
+- **`navigate` và `javascript_eval` (cùng `press_key`, `type_text`, `upload_file`) đều từ chối trang của chính extension.** `navigate` không đưa được tab tới `chrome-extension://<id>/...` (hay `chrome:`, `devtools:`, `edge:`, `about:` khác `about:blank`); bốn tool còn lại từ chối chạy nếu tab lỡ đã nằm trên một trang như vậy. Trong các bản nội bộ trước 1.0.0, hai chốt này không tồn tại — một model có thể `navigate` một tab vào `chrome-extension://<id>/popup.html` rồi `javascript_eval` ngay trên đó, chạy trong realm đặc quyền của extension với `chrome.tabs.*` không giới hạn, phá vỡ hoàn toàn cách ly theo tab group. `take_screenshot` là ngoại lệ **có chủ đích**, không phải sót: chụp ảnh không sửa gì trên trang, còn bốn tool kia đều mutate.
 - `CC_CHROME_EXTENSION_ID=<id>` thu hẹp thêm (chỉ chấp nhận đúng một extension ID) nhưng **không đóng được lỗ trên** — origin vẫn là chuỗi do client tự khai, chỉ là phải đoán đúng thêm một ID. Và pin này **chỉ dùng được khi cả team cài bản `.crx` đã ký** (kéo thả trên Linux, hoặc enterprise policy trên Windows/macOS): cài kiểu **zip + Load unpacked** như hướng dẫn ở trên sinh ID **theo đường dẫn thư mục**, khác nhau trên máy từng người — đặt pin trong trường hợp đó sẽ khoá cả team ra ngoài.
-- Extension có quyền `<all_urls>` + `debugger` (giống extension gốc của Anthropic) — nhưng khác với bản gốc, mọi tool bị giới hạn trong tab group của phiên (xem [Nhóm tab theo phiên](#nhóm-tab-theo-phiên)): Claude chỉ thao tác được trên tab **đang nằm trong nhóm đó**, kể cả tab đã đăng nhập, chứ không phải mọi trang đang mở trong Chrome. Kéo một tab vào nhóm là tự tay cấp quyền đó cho nó. Khuyến nghị dùng một Chrome profile riêng cho automation nếu không muốn Claude đụng vào tài khoản cá nhân. Quyền `tabGroups` (thêm từ 3.0.0) chỉ dùng để tạo/quản lý nhóm này, không mở rộng thêm gì Claude thấy được.
-- Khi tool dùng debugger API (`take_screenshot` — **từ 3.5.0 là mọi lần chụp, không chỉ `fullPage`** —, eval, phím, console, network), Chrome hiện thanh thông báo *"... started debugging this browser"* — bình thường, đừng bấm Cancel khi đang chạy.
-- **Đánh đổi thật của thay đổi 3.5.0, không phải giả thuyết:** trước đây `take_screenshot` (chế độ mặc định, không `fullPage`) chụp được cả khi tab đó đang mở sẵn DevTools. Từ 3.5.0 thì không — DevTools (hay bất kỳ debugger nào khác) đã giữ tab đó thì `chrome.debugger.attach` thất bại và `take_screenshot` báo lỗi thay vì chụp, vì cách cũ để chụp được trong trường hợp đó (`chrome.tabs.update(...,{active:true})` rồi `captureVisibleTab`) chính là thứ đã cướp tab đang active của người dùng mà bản vá này xoá đi — không có đường quay lại nó. Đóng DevTools trên tab đó rồi thử lại.
+- Extension có quyền `<all_urls>` + `debugger` (giống extension gốc của Anthropic) — nhưng khác với bản gốc, mọi tool bị giới hạn trong tab group của phiên (xem [Nhóm tab theo phiên](#nhóm-tab-theo-phiên)): Claude chỉ thao tác được trên tab **đang nằm trong nhóm đó**, kể cả tab đã đăng nhập, chứ không phải mọi trang đang mở trong Chrome. Kéo một tab vào nhóm là tự tay cấp quyền đó cho nó. Khuyến nghị dùng một Chrome profile riêng cho automation nếu không muốn Claude đụng vào tài khoản cá nhân. Quyền `tabGroups` chỉ dùng để tạo/quản lý nhóm này, không mở rộng thêm gì Claude thấy được.
+- Khi tool dùng debugger API (`take_screenshot` — **mọi lần chụp, không chỉ `fullPage`** —, eval, phím, console, network), Chrome hiện thanh thông báo *"... started debugging this browser"* — bình thường, đừng bấm Cancel khi đang chạy.
+- **Đánh đổi thật, không phải giả thuyết:** trong các bản nội bộ trước đây `take_screenshot` (chế độ mặc định, không `fullPage`) chụp được cả khi tab đó đang mở sẵn DevTools. Giờ thì không — DevTools (hay bất kỳ debugger nào khác) đã giữ tab đó thì `chrome.debugger.attach` thất bại và `take_screenshot` báo lỗi thay vì chụp, vì cách cũ để chụp được trong trường hợp đó (`chrome.tabs.update(...,{active:true})` rồi `captureVisibleTab`) chính là thứ đã cướp tab đang active của người dùng mà bản vá này xoá đi — không có đường quay lại nó. Đóng DevTools trên tab đó rồi thử lại.
 - **Token MCP của khung chat nằm trong argv của tiến trình `claude` được spawn.** Mỗi lượt chat, server dựng chuỗi `--mcp-config '{"mcpServers":{"chrome":{...,"headers":{"Authorization":"Bearer <token>"}}}}'` rồi truyền thẳng vào dòng lệnh con — nghĩa là bất kỳ user local nào khác trên máy chạy bridge cũng đọc được token đó bằng `ps` hoặc `/proc/<pid>/cmdline` trong suốt vòng đời tiến trình. Đây là đánh đổi có chủ ý, không phải sơ suất bỏ sót. Rủi ro chỉ phát sinh khi máy đó đã có user local khác — và máy đó vốn đã giữ sẵn token này trong `~/.ccchrome.json` và `chrome.storage` của extension rồi, nên không mở thêm mặt trận rủi ro mới.
 - **`install.sh` cũng đưa token vào argv, đúng một lần, khi đăng ký MCP server.** Bước `claude mcp add ... --header "Authorization: Bearer <token>"` truyền token thẳng vào dòng lệnh của tiến trình `claude` con, nên user local khác đọc được bằng `ps`/`/proc/<pid>/cmdline` trong suốt vòng đời lệnh đó. Cùng loại đánh đổi có chủ ý như trên, chỉ khác là vòng đời ngắn (một lệnh, không phải mỗi lượt chat) — và cũng chỉ trên chính máy vốn đã giữ token trong `~/.ccchrome.json`.
 

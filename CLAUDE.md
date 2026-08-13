@@ -10,7 +10,7 @@ executes it with `chrome.tabs` / `chrome.scripting` / `chrome.debugger` and retu
 
 One runtime mode: `mainHttp()` in `server/index.js` runs an HTTP + WebSocket server, bound to
 `127.0.0.1` by default (port `8787`), that every Claude Code session and the extension both talk to.
-There is no `mainStdio()` — stdio mode (single process on stdout, no auth) was removed in 3.5.0. The
+There is no `mainStdio()` — stdio mode (single process on stdout, no auth) was removed before 1.0.0. The
 distribution model changed with it: `scripts/install.sh` installs a per-user background service (see
 "Setup and commands" below) instead of everyone pointing at one shared server; `deploy/` still runs
 the old shared-server shape for anyone who deliberately wants it (see the warning at the top of
@@ -54,6 +54,18 @@ visible window.
 developing or testing this repo — `npm test` starts and stops its own server instances directly): it
 installs a per-user background service via `scripts/service-unit.sh` (LaunchAgent on macOS,
 `systemd --user` on Linux) and registers the MCP server with Claude Code over `--transport http`.
+`scripts/install.ps1` is the Windows counterpart, backed by `scripts/service-task.ps1`, which
+registers a Task Scheduler task triggered at logon. All three are the same model — a per-user job
+that starts when the user logs in — and Windows is deliberately NOT a Windows Service: that would run
+in session 0 with no user profile, leaving the side panel's spawned `claude` with no logged-in
+account, and it would need administrator rights. No installer here ever requires elevation.
+
+Platform coverage is asymmetric and it matters when reading a green run: `test/install.test.mjs`
+drives bash and shadows `uname`/`systemctl` to exercise the Linux branch from any machine, while
+`test/install-windows.test.mjs` **skips with exit 0 off Windows**. A green `npm test` on macOS has
+therefore never executed a line of the `.ps1` files. `.github/workflows/ci.yml` is what does —
+including a `powershell-syntax` job, because a syntax error in a `.ps1` would otherwise be invisible
+on a machine with no `pwsh`.
 `npm run build:release` (`scripts/build-release.mjs`) is what packages a release for GitHub — see
 "Publishing a GitHub Release" below.
 
@@ -78,7 +90,7 @@ page" messages for the tone).
 A new handler in `extension/background.js` must get its tab through `resolveTab(params)` (see
 "Security invariants" below) instead of calling `chrome.tabs.get`/`query` itself. `resolveTab` is a
 thin wrapper around `resolveTabInGroup`, which is the one place the in-group restriction is
-enforced — skipping it silently reopens the hole `close_tab` and `switch_tab` had before 3.0.0.
+enforced — skipping it silently reopens a hole `close_tab` and `switch_tab` once had.
 
 `resolveTab()` also paints the orange "Claude is driving this tab" frame, so a handler that
 uses it gets the indicator for free and must not paint one itself. The frame removes itself
@@ -127,16 +139,20 @@ They run in a different realm, so:
 
 ## Publishing a GitHub Release
 
-`npm run build:release` (`scripts/build-release.mjs`) writes exactly two things to `dist/`:
+`npm run build:release` (`scripts/build-release.mjs`) writes exactly three things to `dist/`:
 `cc-chrome-bridge.tar.gz` (the full install payload — `server/`, `extension/`, `node_modules`,
-`uninstall.sh`, `service-unit.sh`, `ccchrome.md`) and, standalone, `install.sh`. **Both files must be
-uploaded as release assets**, not just the tarball — the documented one-line install
-(`curl -fsSL .../releases/latest/download/install.sh | bash`, in `README.md` and
-`.claude/commands/ccchrome.md`) fetches `install.sh` on its own, before it ever downloads the tarball
-that `install.sh` itself pulls at `CC_CHROME_RELEASE_URL`. Forgetting the standalone `install.sh`
-asset makes that curl command 404 silently — there is no CI workflow that does this upload
-automatically, so it is a manual step on every release: run `npm run build:release`, then attach both
-`dist/cc-chrome-bridge.tar.gz` and `dist/install.sh` to the GitHub Release.
+`uninstall.sh`, `service-unit.sh`, `uninstall.ps1`, `service-task.ps1`, `ccchrome.md`) and,
+standalone, `install.sh` and `install.ps1`. **All three must be uploaded as release assets**, not
+just the tarball — each documented one-line install fetches its own script first, before the tarball
+that script then pulls at `CC_CHROME_RELEASE_URL`:
+`curl -fsSL .../releases/latest/download/install.sh | bash` and
+`irm .../releases/latest/download/install.ps1 | iex`, both in `README.md` and
+`.claude/commands/ccchrome.md`. A missing standalone asset makes its command 404 silently, and the
+Windows user sees literally nothing happen. No CI workflow does this upload, so it is a manual step
+on every release: run `npm run build:release`, then attach `dist/cc-chrome-bridge.tar.gz`,
+`dist/install.sh` and `dist/install.ps1` to the GitHub Release. `test/build.test.mjs` asserts both
+standalone copies exist and are byte-identical to their sources, but nothing can assert that a human
+attached them.
 
 ## Security invariants — do not relax without being asked
 
@@ -177,7 +193,7 @@ automatically, so it is a manual step on every release: run `npm run build:relea
   opens) a tab inside that group instead of whatever tab the user has active. A new or edited
   handler must call `resolveTab()` and must never call `chrome.tabs.query`/`get`/`remove`/`update`
   on a caller-supplied tab id directly — before
-  3.0.0, `close_tab` and `switch_tab` did exactly that, which meant either tool could close or focus
+  tab-group isolation landed, `close_tab` and `switch_tab` did exactly that, which meant either tool could close or focus
   *any* tab in the browser, not just the caller's own. That bypass is why the rule exists now.
 - The side panel gets its own `/panel` websocket rather than sharing `/ws`,
   because `registry.attach()` closes the previous connection on token collision
@@ -212,7 +228,7 @@ automatically, so it is a manual step on every release: run `npm run build:relea
 - Historical note, now moot: earlier versions had a second `stdio` mode
   bridge that ignored path routing entirely, so a hand-typed
   `ws://127.0.0.1:9876/ws?token=anything` would dial `/panel` on it and evict
-  the extension's own connection. `mainStdio()` was removed in 3.5.0 — there
+  the extension's own connection. `mainStdio()` was removed before 1.0.0 — there
   is exactly one server process now, it always does path-based routing
   between `/ws` and `/panel`, and nothing in this repo listens on 9876 by
   default any more. `extension/sidepanel.js` and `extension/popup.js` still
@@ -234,7 +250,7 @@ automatically, so it is a manual step on every release: run `npm run build:relea
   window's active tab. An earlier revision let the panel name a `windowId`,
   reasoning that refusing `tabId` was enough. It was not — window ids are small
   sequential integers, so anything holding the panel token could enumerate them
-  and pull every window's active tab into its own group, which is the pre-3.0.0
+  and pull every window's active tab into its own group, which is the pre-isolation
   hole with lasting access instead of a single action.
 
 - A panel replays **two** ids on `start`, and both are caller-supplied:
@@ -249,7 +265,7 @@ automatically, so it is a manual step on every release: run `npm run build:relea
   stored ids per window (`panelSession.<windowId>` in `chrome.storage.local`)
   for the same reason: one extension-global key made two windows resume one
   conversation.
-- **Closed in 3.5.0:** `chrome.debugger.attach` still succeeds on this
+- **Closed before 1.0.0:** `chrome.debugger.attach` still succeeds on this
   extension's *own* `chrome-extension://<id>/sidepanel.html` and `popup.html`
   (Chrome blocks attach on `chrome://` but not on `chrome-extension://`), so
   the guard has to be at the tool level, not the debugger API. `navigate` calls
