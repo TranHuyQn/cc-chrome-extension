@@ -53,6 +53,14 @@ jobs:
       - run: npm install
       - run: npm install
         working-directory: server
+      # Three package.json files, and installing at the root is not enough
+      # (CLAUDE.md says so). test/ owns the MCP client SDK that session-ttl and
+      # the e2e suites import; without this, session-ttl fails with
+      # ERR_MODULE_NOT_FOUND. --ignore-scripts skips Playwright's browser
+      # download, which is ~200MB this job never uses: every suite it runs is
+      # browser-free.
+      - run: npm install --ignore-scripts
+        working-directory: test
 
       # Browser-free suites only. The playwright ones need a real Chromium with
       # the extension loaded, and on macOS additionally HEADED=1 and a visible

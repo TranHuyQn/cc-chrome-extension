@@ -1,4 +1,4 @@
-# Gỡ Claude Code Chrome Bridge khỏi máy Windows này. Không cần quyền admin.
+﻿# Gỡ Claude Code Chrome Bridge khỏi máy Windows này. Không cần quyền admin.
 #
 # Counterpart of scripts/uninstall.sh. The order is install.ps1's in reverse,
 # and the first step is confirmed rather than assumed: deleting the tree out

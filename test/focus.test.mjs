@@ -460,6 +460,16 @@ async function run() {
   const winMin = await createWindow();
   const minTab = await callHandler("new_tab", { url: TEST_URL, __session: SESSION_RESIZE });
   check("session tab for the minimized-window case created and grouped", minTab.__ok === true, JSON.stringify(minTab));
+  // Park it at the top-left corner while it is still normal. Chrome validates
+  // the RESULT of a bounds update against the visible screen and refuses
+  // anything that would sit more than half off it ("Bounds must be at least 50%
+  // within visible screen space") — and where the window manager has parked
+  // these windows varies by run and by which display is attached (measured:
+  // full-height columns 1169px tall on one run, 948px on another after the
+  // external monitor changed). Without this, the resize_window call below is
+  // refused for a reason that has nothing to do with what this case tests,
+  // which is that a minimized window still gets state:"normal".
+  await sw.evaluate(async (id) => { await chrome.windows.update(id, { left: 0, top: 0 }); }, winMin.windowId);
   await sw.evaluate(async (id) => { await chrome.windows.update(id, { state: "minimized" }); }, winMin.windowId);
   // Poll, don't sleep: the minimize lands asynchronously and a fixed 200ms was
   // measured too short here. resize_window reads chrome.windows.get() to decide

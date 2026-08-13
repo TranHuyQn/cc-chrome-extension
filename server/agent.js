@@ -11,7 +11,7 @@
 // across turns even though the process does not.
 
 import { spawn } from "node:child_process";
-import { writeFileSync, chmodSync } from "node:fs";
+import { writeFileSync, chmodSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 // cmd.exe quoting, kept to the one rule actually needed here: wrap in double
@@ -117,12 +117,6 @@ export class AgentSession {
     this.onEvent(event);
   }
 
-  // NOTE on exposure: this JSON string (Bearer token included) is passed as
-  // an --mcp-config argv value, so it is visible in `ps`/`/proc/<pid>/cmdline`
-  // to any other local user on the same machine as the bridge server for the
-  // lifetime of the child process. That is a deliberate tradeoff carried over
-  // from the probe, not an oversight — see the task-2 fix-round report for
-  // the file-based-config alternative this was weighed against.
   // Written to a file rather than passed inline as JSON. Two reasons, both
   // real: cmd.exe re-parses double quotes when spawning through a shell (which
   // Windows needs — see buildSpawn), and the inline form put the bridge's
@@ -201,6 +195,22 @@ export class AgentSession {
     this.lastStderrLine = null;
     this.emit({ type: "turn_start" });
 
+    // Checked before spawning, not left to the spawn's own error. A missing
+    // binary only reports ENOENT when Node launches it directly; on Windows
+    // buildSpawn goes through cmd.exe, which swallows that into exit code 1
+    // and "The system cannot find the path specified" — so the actionable
+    // message below would never have appeared on the one platform that needs
+    // it most. CI caught this on windows-latest.
+    //
+    // Only applies to a path-shaped claudeBin, which is what the installers
+    // bake in (CC_CHROME_CLAUDE_BIN). A bare "claude" still has to be resolved
+    // through PATH by the OS, and its ENOENT is handled in the error listener.
+    if (/[\\/]/.test(this.claudeBin) && !existsSync(this.claudeBin)) {
+      this.finished = true;
+      this.emit({ type: "turn_end", ok: false, error: this.missingClaudeMessage() });
+      return;
+    }
+
     const { command, args, options } = buildSpawn(this.claudeBin, this.buildArgs());
     const child = spawn(command, args, {
       cwd: this.cwd,
@@ -239,11 +249,7 @@ export class AgentSession {
       // so it says which command is missing and what to do about it — the
       // installer is what bakes the absolute path in (CC_CHROME_CLAUDE_BIN),
       // so re-running it is the fix after installing or moving the CLI.
-      const message = err.code === "ENOENT"
-        ? `Không chạy được lệnh 'claude' (${this.claudeBin}). Dịch vụ nền không dùng PATH của terminal, ` +
-          "nên nó cần đường dẫn tuyệt đối do script cài ghi vào. Cài Claude Code rồi chạy lại lệnh cài " +
-          "đặt bridge để ghi lại đường dẫn."
-        : err.message;
+      const message = err.code === "ENOENT" ? this.missingClaudeMessage() : err.message;
       this.emit({ type: "turn_end", ok: false, error: message });
     });
 
@@ -340,10 +346,49 @@ export class AgentSession {
     // ignored the same way rather than throwing.
   }
 
+  // One wording, two callers: the pre-flight check in send() and the spawn
+  // error listener. It is what the user reads in the panel's chat log, so it
+  // names the command, says why PATH is not the answer, and gives the fix.
+  missingClaudeMessage() {
+    return (
+      `Không chạy được lệnh 'claude' (${this.claudeBin}). Dịch vụ nền không dùng PATH của terminal, ` +
+      "nên nó cần đường dẫn tuyệt đối do script cài ghi vào. Cài Claude Code rồi chạy lại lệnh cài " +
+      "đặt bridge để ghi lại đường dẫn."
+    );
+  }
+
+  // Kills the child AND anything it started. On Windows the child is cmd.exe
+  // (buildSpawn has to go through a shell so PATHEXT finds claude.cmd), so
+  // `claude` is a GRANDchild: child.kill() takes down the shell and leaves the
+  // CLI running, the turn never ends, and the panel's stop button does nothing.
+  // CI caught exactly that — "not busy after stop" failed on windows-latest and
+  // passed everywhere else. taskkill /T is the tree kill; /F because a console
+  // app ignores the polite request.
+  killChild(signal) {
+    if (!this.child) return;
+    if (process.platform === "win32" && this.child.pid) {
+      // Fire-and-forget: the `close` handler is what actually finishes the
+      // turn, and a failure here (child already gone) must not throw into the
+      // caller. detached+unref so this helper cannot outlive the server.
+      try {
+        const killer = spawn("taskkill", ["/pid", String(this.child.pid), "/T", "/F"], {
+          stdio: "ignore",
+          windowsHide: true,
+        });
+        killer.on("error", () => {});
+        killer.unref();
+      } catch {
+        this.child.kill(signal);
+      }
+      return;
+    }
+    this.child.kill(signal);
+  }
+
   stop() {
     if (!this.child) return false;
     this.stopping = true;
-    this.child.kill("SIGTERM");
+    this.killChild("SIGTERM");
     return true;
   }
 
@@ -357,7 +402,7 @@ export class AgentSession {
     // still translates into delta/message/tool events, which on the
     // start-while-busy path would land in the *new* conversation.
     this.disposed = true;
-    if (this.child) this.child.kill("SIGKILL");
+    this.killChild("SIGKILL");
     this.child = null;
   }
 }

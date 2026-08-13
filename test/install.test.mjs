@@ -130,6 +130,27 @@ function run(script, args = [], envOverrides = {}) {
   return r.stdout;
 }
 
+// --- every .ps1 must start with a UTF-8 BOM ---------------------------------
+//
+// Windows PowerShell 5.1 — the interpreter every Windows 10/11 has, and the one
+// the documented install command lands on — reads a BOM-less file as the
+// machine's ANSI code page, not UTF-8. These scripts print Vietnamese, so
+// without the BOM every accented string turns to mojibake AND the mangled bytes
+// break the quoting: CI caught install.ps1 and uninstall.ps1 failing to PARSE at
+// all ("Unexpected token 'â†’ Dá»«ng dá»‹ch vá»¥'", "The string is missing the
+// terminator"). The installer did not run one line on Windows.
+//
+// Checked here rather than in the Windows-only suite on purpose: this is a
+// property of bytes in the repo, so it should fail on any machine, including the
+// Mac where these files get edited.
+{
+  const BOM = "﻿";
+  for (const f of readdirSync(join(root, "scripts")).filter((n) => n.endsWith(".ps1"))) {
+    const body = readFileSync(join(root, "scripts", f), "utf8");
+    check(`${f} starts with a UTF-8 BOM (PowerShell 5.1 needs it to read UTF-8)`, body.startsWith(BOM));
+  }
+}
+
 // --- install ---------------------------------------------------------------
 
 const out = run("install.sh");

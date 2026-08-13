@@ -1,4 +1,4 @@
-# Claude Code Chrome Bridge — cài đặt trên máy Windows của bạn.
+﻿# Claude Code Chrome Bridge — cài đặt trên máy Windows của bạn.
 #
 # Chạy:  irm https://github.com/TranHuyQn/cc-chrome-extension/releases/latest/download/install.ps1 | iex
 #

@@ -1,4 +1,4 @@
-# Shared by install.ps1 and uninstall.ps1. Dot-sourced, never run directly:
+﻿# Shared by install.ps1 and uninstall.ps1. Dot-sourced, never run directly:
 # both need the same task name and paths, and two copies of that knowledge is
 # the surest way to have them disagree. This is the Windows counterpart of
 # scripts/service-unit.sh — keep the two in step.
