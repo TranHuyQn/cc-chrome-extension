@@ -35,8 +35,16 @@ function Protect-CcPath([string]$Path) {
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     Die "chưa có 'node'. Cài Node.js 18 trở lên rồi chạy lại."
 }
-$nodeMajor = [int](& node -p 'process.versions.node.split(".")[0]')
-if ($nodeMajor -lt 18) { Die "cần Node.js 18 trở lên, máy đang có $(& node -v)." }
+# Parsed from `node -v` ("v20.20.2") rather than by evaluating JS. Windows
+# PowerShell 5.1 STRIPS embedded double quotes when it builds a native
+# command's argument list, so `node -p 'x.split(".")[0]'` reaches node as
+# x.split(.)[0] — a syntax error, empty stdout, [int]$null = 0, and this check
+# rejected Node 20 with "cần Node.js 18 trở lên, máy đang có v20.20.2". CI
+# caught it. Nothing below may pass a double quote to a native command.
+$nodeVersion = (& node -v) -join ''
+$nodeMajor = 0
+if ($nodeVersion -match '^v(\d+)\.') { $nodeMajor = [int]$Matches[1] }
+if ($nodeMajor -lt 18) { Die "cần Node.js 18 trở lên, máy đang có $nodeVersion." }
 
 $upgrade = Test-Path $StateFile
 Say "Claude Code Chrome Bridge — $(if ($upgrade) { 'nâng cấp' } else { 'cài đặt' })"
@@ -131,10 +139,23 @@ if ($upgrade) {
     }
 }
 if (-not $token) {
-    # Generated through node, which is already a hard requirement above, rather
-    # than adding a second source of randomness.
-    $token = & node -e 'process.stdout.write(require("crypto").randomBytes(16).toString("hex"))'
+    # .NET's CSPRNG, not `node -e`: see the note on the version check above —
+    # PowerShell 5.1 strips the double quotes out of a native command's
+    # arguments, so `require("crypto")` reached node as require(crypto) and the
+    # token came back EMPTY. That failure is silent and worse than a crash: it
+    # would install a bridge whose credential is the empty string.
+    $bytes = New-Object byte[] 16
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    $token = -join ($bytes | ForEach-Object { $_.ToString('x2') })
     if (-not $upgrade) { Say "→ Sinh token mới" }
+}
+# Belt and braces: never write a credential that is not hex. The bound is 16,
+# not 32, to match the upgrade branch above and install.sh — a token carried
+# over from an older install is kept as-is, and rejecting it here would break
+# exactly the users who already work.
+if ($token -notmatch '^[0-9a-f]{16,}$') {
+    Die "token không hợp lệ, không ghi gì cả (sinh token thất bại?)."
 }
 
 # -Encoding ASCII, not the PS 5.1 default: Set-Content's default writes UTF-16
