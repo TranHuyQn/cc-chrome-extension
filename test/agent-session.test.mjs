@@ -8,7 +8,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFileSync, mkdtempSync, rmSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { AgentSession, buildSpawn, winQuote } from "../server/agent.js";
+import { AgentSession, buildSpawn, winQuote, claudeBinFromEnv } from "../server/agent.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(root, "test", "fixtures", "claude-stream.ndjson");
@@ -411,6 +411,51 @@ function makeSession(extra = {}) {
       (statSync(p).mode & 0o777).toString(8),
     );
   }
+  session.dispose();
+}
+
+// A background service does not inherit an interactive shell's PATH: launchd
+// hands the bridge /usr/bin:/bin:/usr/sbin:/sbin (measured on the owner's Mac,
+// with claude at /opt/homebrew/bin/claude), systemd --user and Task Scheduler
+// are no better. So spawning a bare `claude` fails with ENOENT for every panel
+// chat turn once the bridge runs as the installed service — which is exactly
+// how it is meant to run. The installer resolves claude once and bakes the
+// absolute path into the unit as CC_CHROME_CLAUDE_BIN; this is the server end
+// of that contract.
+{
+  const previous = process.env.CC_CHROME_CLAUDE_BIN;
+  process.env.CC_CHROME_CLAUDE_BIN = "/opt/homebrew/bin/claude";
+  check(
+    "claudeBinFromEnv() prefers the absolute path the installer baked in",
+    claudeBinFromEnv() === "/opt/homebrew/bin/claude",
+    claudeBinFromEnv(),
+  );
+  delete process.env.CC_CHROME_CLAUDE_BIN;
+  check(
+    "claudeBinFromEnv() falls back to a bare claude when nothing was baked in",
+    claudeBinFromEnv() === "claude",
+    claudeBinFromEnv(),
+  );
+  if (previous === undefined) delete process.env.CC_CHROME_CLAUDE_BIN;
+  else process.env.CC_CHROME_CLAUDE_BIN = previous;
+}
+
+// ENOENT on the claude binary is the one spawn failure with a specific,
+// actionable cause, and "spawn claude ENOENT" names neither the cause nor the
+// fix. It reaches the user in the panel's chat log, so it has to say what to do.
+{
+  const { session, events } = makeSession({});
+  session.claudeBin = "/nonexistent/claude-not-here";
+  session.claudeArgsPrefix = [];
+  session.send("hello");
+  for (let i = 0; i < 200 && !events.some((e) => e.type === "turn_end"); i++) await sleep(50);
+  const end = events.find((e) => e.type === "turn_end");
+  check("a missing claude binary ends the turn rather than hanging", !!end, JSON.stringify(events.map((e) => e.type)));
+  check(
+    "the error names the missing command and how to fix it",
+    /claude/.test(end?.error || "") && /chạy lại lệnh cài|cài lại|install/i.test(end?.error || ""),
+    JSON.stringify(end),
+  );
   session.dispose();
 }
 

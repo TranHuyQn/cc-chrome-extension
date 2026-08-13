@@ -27,7 +27,7 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { TokenStore } from "./tokens.js";
 import { RateLimiter, clientIp } from "./ratelimit.js";
-import { AgentSession } from "./agent.js";
+import { AgentSession, claudeBinFromEnv } from "./agent.js";
 import { isLoopbackHost, isLoopbackAddress, forwardedHeadersIn } from "./loopback.js";
 
 const PORT = Number(process.env.CC_CHROME_PORT || 8787);
@@ -1085,6 +1085,11 @@ async function mainHttp() {
         // child unable to reach /mcp at all.
         mcpUrl: `http://${hostForUrl(HOST)}:${PORT}/mcp?panel=${panel.id}`,
         allowedTools: PANEL_ALLOWED_TOOLS,
+        // Absolute path baked in by the installer. A bare "claude" resolves
+        // through PATH, and this process runs as a background service whose
+        // PATH is the OS default — /usr/bin:/bin:/usr/sbin:/sbin under launchd,
+        // where no package manager's bin directory appears.
+        claudeBin: claudeBinFromEnv(),
         cwd: PANEL_CWD,
         systemPrompt: PANEL_SYSTEM_PROMPT,
         resuming,

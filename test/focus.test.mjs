@@ -231,19 +231,39 @@ async function run() {
   // CSS point (15,15) -- comfortably inside the header's 24px padding, now
   // that TEST_PAGE zeroes the default body margin -- converted to device
   // pixels via the same dpr the dimensions check above already validated.
-  const decodedShot = shotResult.__ok
-    ? await decodePngPixel(base64, Math.round(15 * shotViewport.dpr), Math.round(15 * shotViewport.dpr))
-    : null;
+  // Decoded once for its dimensions, then re-sampled at the scale the image
+  // itself proves. The page's own devicePixelRatio is NOT authoritative here:
+  // measured on this machine, a tab reported dpr 1 while CDP captured at 2 —
+  // the window had landed on the Retina display rather than the external one,
+  // and a background tab's reading does not have to match the display its
+  // pixels are finally rasterised for. That made this assertion fail on a
+  // capture that was entirely correct (the sampled pixel was the right colour).
+  //
+  // So the property asserted is the one actually under test — the PNG is the
+  // captured viewport, not a blank or stub-sized image — expressed as: both
+  // axes scale from the CSS viewport by the SAME integer factor between 1 and
+  // 3. A stub of any other size fails that; a legitimate 1x or 2x capture
+  // passes it on either display.
+  const firstDecode = shotResult.__ok ? await decodePngPixel(base64, 0, 0) : null;
+  const scaleX = firstDecode ? firstDecode.width / shotViewport.width : 0;
+  const scaleY = firstDecode ? firstDecode.height / shotViewport.height : 0;
   check(
-    "the PNG's own dimensions match the captured tab's real viewport (device pixels = CSS viewport * dpr), " +
+    "the PNG's own dimensions are the captured tab's viewport at a whole-number device scale, " +
     "not a blank/stub-sized image",
-    !!decodedShot &&
-      decodedShot.width > 0 &&
-      decodedShot.height > 0 &&
-      decodedShot.width === Math.round(shotViewport.width * shotViewport.dpr) &&
-      decodedShot.height === Math.round(shotViewport.height * shotViewport.dpr),
-    JSON.stringify({ decodedShot, shotViewport })
+    !!firstDecode &&
+      Number.isInteger(scaleX) && scaleX >= 1 && scaleX <= 3 &&
+      scaleY === scaleX,
+    JSON.stringify({ firstDecode, shotViewport, scaleX, scaleY })
   );
+  if (firstDecode && scaleX !== shotViewport.dpr) {
+    console.log(
+      `NOTE  the page reported devicePixelRatio ${shotViewport.dpr} but the capture is ${scaleX}x ` +
+      "-- a display mismatch, not a capture fault; the pixel sample below uses the capture's own scale."
+    );
+  }
+  const decodedShot = firstDecode
+    ? await decodePngPixel(base64, Math.round(15 * scaleX), Math.round(15 * scaleX))
+    : null;
   check(
     "a pixel near the top-left decodes to the #e8710a header background TEST_PAGE actually served " +
     "on the SESSION tab -- not blank, and not the user's about:blank tab",

@@ -71,8 +71,20 @@ cc_log_hint() {
 #   side; XML text nodes don't word-split), but a literal `&`, `<`, or `>`
 #   in `${dir}` (e.g. an "R&D" folder) would produce an invalid plist. Known
 #   and out of scope for this task.
+#
+# - `claude` gets the same treatment as `node`, for the same reason and one
+#   step later: the side panel spawns it once per chat turn, and a service's
+#   PATH does not include a package manager's bin directory. Measured on
+#   macOS: launchd gives this process PATH=/usr/bin:/bin:/usr/sbin:/sbin while
+#   claude sits in /opt/homebrew/bin, so every panel turn failed with
+#   "spawn claude ENOENT" until the path was baked in here. Left unset when
+#   claude is not installed yet — server/agent.js then falls back to the bare
+#   name, and its ENOENT message tells the user to install the CLI and re-run
+#   this installer.
 cc_write_unit() {
-  local dir="$1" port="$2" unit label; unit="$(cc_unit_path)"; label="$(cc_unit_label)"
+  local dir="$1" port="$2" unit label claude_bin
+  unit="$(cc_unit_path)"; label="$(cc_unit_label)"
+  claude_bin="$(command -v claude || true)"
   mkdir -p "$(dirname "$unit")" "${dir}/logs"
   if [ "$(cc_platform)" = macos ]; then
     cat > "$unit" <<PLIST
@@ -92,6 +104,7 @@ cc_write_unit() {
     <key>CC_CHROME_HOST</key><string>127.0.0.1</string>
     <key>CC_CHROME_PORT</key><string>${port}</string>
     <key>CC_CHROME_TOKENS_FILE</key><string>${dir}/tokens.json</string>
+$([ -n "$claude_bin" ] && printf '    <key>CC_CHROME_CLAUDE_BIN</key><string>%s</string>' "$claude_bin")
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -122,6 +135,7 @@ ExecStart="$(command -v node)" "${dir}/server/index.js" --http
 Environment="CC_CHROME_HOST=127.0.0.1"
 Environment="CC_CHROME_PORT=${port}"
 Environment="CC_CHROME_TOKENS_FILE=${dir}/tokens.json"
+$([ -n "$claude_bin" ] && printf 'Environment="CC_CHROME_CLAUDE_BIN=%s"' "$claude_bin")
 Restart=always
 RestartSec=3
 ${logging}

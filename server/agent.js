@@ -39,6 +39,22 @@ export function buildSpawn(bin, args, platform = process.platform) {
   return { command: bin, args: args.map(winQuote), options: { shell: true, windowsHide: true } };
 }
 
+// A background service does not inherit an interactive shell's PATH. Measured
+// on macOS: launchd hands this process PATH=/usr/bin:/bin:/usr/sbin:/sbin while
+// claude lives at /opt/homebrew/bin/claude, so every panel chat turn died with
+// "spawn claude ENOENT" the moment the bridge ran as the installed service —
+// which is the only way it is meant to run. systemd --user and Task Scheduler
+// give the same treatment.
+//
+// The installers resolve `claude` once, at install time, and bake the absolute
+// path into the unit as CC_CHROME_CLAUDE_BIN — exactly what service-unit.sh
+// already did for `node`, and for the same reason. The bare-name fallback is
+// what a developer running the bridge by hand in a terminal gets, where PATH is
+// real.
+export function claudeBinFromEnv() {
+  return process.env.CC_CHROME_CLAUDE_BIN || "claude";
+}
+
 export class AgentSession {
   constructor({
     sessionId,
@@ -218,7 +234,17 @@ export class AgentSession {
       // first of the two may emit turn_end.
       if (this.finished) return;
       this.finished = true;
-      this.emit({ type: "turn_end", ok: false, error: err.message });
+      // ENOENT here has one cause and one fix, and "spawn claude ENOENT" names
+      // neither. This message is what the user reads in the panel's chat log,
+      // so it says which command is missing and what to do about it — the
+      // installer is what bakes the absolute path in (CC_CHROME_CLAUDE_BIN),
+      // so re-running it is the fix after installing or moving the CLI.
+      const message = err.code === "ENOENT"
+        ? `Không chạy được lệnh 'claude' (${this.claudeBin}). Dịch vụ nền không dùng PATH của terminal, ` +
+          "nên nó cần đường dẫn tuyệt đối do script cài ghi vào. Cài Claude Code rồi chạy lại lệnh cài " +
+          "đặt bridge để ghi lại đường dẫn."
+        : err.message;
+      this.emit({ type: "turn_end", ok: false, error: message });
     });
 
     child.on("close", (code) => {

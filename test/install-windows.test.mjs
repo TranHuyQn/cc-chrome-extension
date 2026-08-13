@@ -90,6 +90,19 @@ check(
   cmdBody.includes("bridge.log") && cmdBody.includes("bridge.err.log"),
   cmdBody,
 );
+// Only asserted when a claude CLI is actually on the runner's PATH: the
+// installer bakes in what it can resolve, and a machine without the CLI is a
+// legitimate state (server/agent.js falls back and says what to do). The
+// property that matters is that a bare name is never what gets baked in.
+if (spawnSync("where.exe", ["claude"], { encoding: "utf8" }).status === 0) {
+  check(
+    "the launcher bakes in the absolute path to claude",
+    /set CC_CHROME_CLAUDE_BIN=.+claude/i.test(cmdBody),
+    cmdBody,
+  );
+} else {
+  console.log("SKIP  claude CLI is not installed on this machine, so there is no path to bake in");
+}
 // Run(..., 0, True): 0 hides the console window, True makes wscript wait. With
 // False the task reads as finished while node still runs, which breaks both
 // the already-running check and restart-on-failure.

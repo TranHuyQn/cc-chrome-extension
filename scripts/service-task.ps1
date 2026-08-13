@@ -30,6 +30,15 @@ function Write-CcLauncher {
         [Parameter(Mandatory)][int]$Port
     )
     $node = (Get-Command node -ErrorAction Stop).Source
+    # `claude` gets the same treatment as `node`, for the same reason and one
+    # step later: the side panel spawns it once per chat turn, and a scheduled
+    # task does not inherit the PATH an interactive shell has. Measured on
+    # macOS, where the equivalent gap made every panel turn fail with "spawn
+    # claude ENOENT". Left unset when claude is not installed yet —
+    # server/agent.js falls back to the bare name and its error message tells
+    # the user to install the CLI and re-run this installer.
+    $claude = (Get-Command claude -ErrorAction SilentlyContinue)
+    $claudeLine = if ($claude) { "set CC_CHROME_CLAUDE_BIN=$($claude.Source)" } else { '' }
     $logs = Join-Path $InstallDir 'logs'
     New-Item -ItemType Directory -Force -Path $logs | Out-Null
 
@@ -41,6 +50,7 @@ function Write-CcLauncher {
 set CC_CHROME_HOST=127.0.0.1
 set CC_CHROME_PORT=$Port
 set CC_CHROME_TOKENS_FILE=$InstallDir\tokens.json
+$claudeLine
 "$node" "$InstallDir\server\index.js" --http >> "$logs\bridge.log" 2>> "$logs\bridge.err.log"
 "@
     Set-Content -Path (Join-Path $InstallDir 'bridge.cmd') -Value $cmd -Encoding ASCII

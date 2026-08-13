@@ -162,6 +162,16 @@ const unit = process.platform === "darwin"
   : join(fakeHome, ".config", "systemd", "user", "ccchrome-bridge.service");
 check("writes the service unit", existsSync(unit));
 check("the unit points at the installed server", readFileSync(unit, "utf8").includes(join(installDir, "server", "index.js")));
+// The side panel spawns `claude` once per chat turn, and a service's PATH is
+// the OS default — measured under launchd: /usr/bin:/bin:/usr/sbin:/sbin, with
+// no package manager's bin directory in it. Without the absolute path baked in
+// here, every panel turn fails with "spawn claude ENOENT". The stub `claude` on
+// this test's PATH is what the installer resolves.
+check(
+  "the unit bakes in the absolute path to claude, not a bare command name",
+  existsSync(unit) && readFileSync(unit, "utf8").includes(join(binDir, "claude")),
+  existsSync(unit) ? readFileSync(unit, "utf8") : "(no unit)",
+);
 
 const calls = existsSync(claudeLog) ? readFileSync(claudeLog, "utf8") : "";
 check("registers the MCP server with Claude Code", /mcp add .*chrome/.test(calls), calls);
@@ -441,6 +451,11 @@ rmSync(fakeHome, { recursive: true, force: true });
   check("linux: the unit points at the installed server", modern.body.includes(join(modern.dir, "server", "index.js")), modern.body);
   check("linux: the unit binds the bridge to loopback", modern.body.includes('Environment="CC_CHROME_HOST=127.0.0.1"'), modern.body);
   check("linux: systemd 245 gets file logging", modern.body.includes("StandardOutput=append:"), modern.body);
+  check(
+    "linux: the unit bakes in the absolute path to claude",
+    /Environment="CC_CHROME_CLAUDE_BIN=.+\/claude"/.test(modern.body),
+    modern.body,
+  );
   check("linux: systemd 245's log hint is the log file", (modern.logHint || "").endsWith("logs/bridge.err.log"), modern.logHint);
 
   // The regression this pair exists for: `append:` is 240+, and an older
