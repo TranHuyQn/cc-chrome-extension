@@ -29,7 +29,17 @@ function Die($m) { Write-Host "Lỗi: $m" -ForegroundColor Red; exit 1 }
 # /inheritance:r drops the inherited entries and /grant:r adds this user back —
 # that is what `chmod 600` buys on unix.
 function Protect-CcPath([string]$Path) {
-    & icacls $Path /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" *> $null
+    # (OI)(CI) are INHERITANCE flags and belong only on a directory. Put them on
+    # a file and the ACE becomes inherit-only, granting nothing on the file
+    # itself — which locked out the owner: the upgrade run could not rewrite
+    # tokens.json ("Access to the path is denied"), uninstall could not delete
+    # it, and it even read back as non-existent. CI caught all three.
+    $grant = if ((Get-Item $Path -Force).PSIsContainer) {
+        "${env:USERNAME}:(OI)(CI)F"
+    } else {
+        "${env:USERNAME}:F"
+    }
+    & icacls $Path /inheritance:r /grant:r $grant *> $null
 }
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {

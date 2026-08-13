@@ -73,6 +73,12 @@ check("the token is at least 16 hex chars", /^[0-9a-f]{16,}$/.test(state.token |
 check("the state file records the port", state.port === 8787, String(state.port));
 
 const tokensPath = join(installDir, "tokens.json");
+// Asserted separately, and before parsing: the ACL the installer applies has
+// locked the owner out of this file before (inheritance flags on a file make
+// the ACE inherit-only), and the symptom was existsSync reading false — which
+// the ternary below would have quietly turned into an empty-object comparison
+// rather than a pointed failure.
+check("tokens.json is readable by the user who installed it", existsSync(tokensPath), tokensPath);
 const tokens = existsSync(tokensPath) ? JSON.parse(readFileSync(tokensPath, "utf8")) : {};
 check(
   "tokens.json holds exactly the state token and nothing else",
