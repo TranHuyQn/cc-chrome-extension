@@ -380,5 +380,97 @@ rmSync(fakeHome, { recursive: true, force: true });
   }
 }
 
+// ---------------------------------------------------------------------------
+// The Linux branch of service-unit.sh, exercised from whatever machine runs
+// this suite
+// ---------------------------------------------------------------------------
+//
+// The unit-writing code is three `if [ "$(cc_platform)" = macos ]` branches,
+// so on a Mac the Linux half of it had zero coverage and shipped unverified —
+// which is how a hardcoded ~/.config and a systemd-240-only directive both got
+// in. cc_platform() and cc_systemd_version() reach the outside world through
+// exactly two commands, `uname` and `systemctl`, so shadowing those two on
+// PATH runs the real script down its real Linux path. Nothing here needs an
+// actual Linux box; what it cannot check is whether systemd then ACCEPTS the
+// unit, which is what Huy's run on real hardware is for.
+{
+  const linuxBin = mkdtempSync(join(tmpdir(), "cc-linux-stub-"));
+  writeFileSync(join(linuxBin, "uname"), "#!/usr/bin/env bash\necho Linux\n", { mode: 0o755 });
+
+  // Writes the unit with a stubbed systemd version and returns its contents.
+  const writeUnitAs = (systemdVersion, envOverrides = {}) => {
+    const home = mkdtempSync(join(tmpdir(), "cc-linux-home-"));
+    const dir = join(home, ".cc-chrome-bridge");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(linuxBin, "systemctl"),
+      `#!/usr/bin/env bash\n[ "$1" = "--version" ] && echo "systemd ${systemdVersion} (${systemdVersion}.4-4ubuntu3)"\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    const env = {
+      ...baseEnv,
+      HOME: home,
+      PATH: `${linuxBin}:${baseEnv.PATH}`,
+      ...envOverrides,
+    };
+    const r = spawnSync(
+      "bash",
+      ["-c", `. "${join(root, "scripts", "service-unit.sh")}"; cc_write_unit "$1" 8787; echo "UNIT_PATH=$(cc_unit_path)"; echo "LOG_HINT=$(cc_log_hint "$1")"`, "bash", dir],
+      { env, encoding: "utf8" },
+    );
+    const unitPath = (r.stdout.match(/UNIT_PATH=(.*)/) || [])[1];
+    const logHint = (r.stdout.match(/LOG_HINT=(.*)/) || [])[1];
+    return {
+      status: r.status,
+      stderr: r.stderr,
+      home,
+      dir,
+      unitPath,
+      logHint,
+      body: unitPath && existsSync(unitPath) ? readFileSync(unitPath, "utf8") : "",
+    };
+  };
+
+  const modern = writeUnitAs(245);
+  check("linux: cc_write_unit exits 0", modern.status === 0, modern.stderr);
+  check(
+    "linux: the unit lands under ~/.config/systemd/user when XDG_CONFIG_HOME is unset",
+    modern.unitPath === join(modern.home, ".config", "systemd", "user", "ccchrome-bridge.service"),
+    modern.unitPath,
+  );
+  check("linux: the unit points at the installed server", modern.body.includes(join(modern.dir, "server", "index.js")), modern.body);
+  check("linux: the unit binds the bridge to loopback", modern.body.includes('Environment="CC_CHROME_HOST=127.0.0.1"'), modern.body);
+  check("linux: systemd 245 gets file logging", modern.body.includes("StandardOutput=append:"), modern.body);
+  check("linux: systemd 245's log hint is the log file", (modern.logHint || "").endsWith("logs/bridge.err.log"), modern.logHint);
+
+  // The regression this pair exists for: `append:` is 240+, and an older
+  // systemd rejects the WHOLE unit rather than ignoring the directive, so the
+  // bridge would never start and the log file the installer points at would
+  // never be created either.
+  const old = writeUnitAs(237);
+  check("linux: cc_write_unit exits 0 on old systemd", old.status === 0, old.stderr);
+  check("linux: systemd 237 gets no append: directive", !old.body.includes("append:"), old.body);
+  check("linux: systemd 237 still gets ExecStart and Restart", old.body.includes("ExecStart=") && old.body.includes("Restart=always"), old.body);
+  check(
+    "linux: systemd 237's log hint points at the journal, not a file that will never exist",
+    (old.logHint || "").startsWith("journalctl --user"),
+    old.logHint,
+  );
+
+  // XDG_CONFIG_HOME: systemd --user reads $XDG_CONFIG_HOME/systemd/user, so a
+  // unit written to ~/.config regardless is invisible to it.
+  const xdgRoot = mkdtempSync(join(tmpdir(), "cc-xdg-"));
+  const xdg = writeUnitAs(245, { XDG_CONFIG_HOME: xdgRoot });
+  check(
+    "linux: XDG_CONFIG_HOME decides where the unit goes",
+    xdg.unitPath === join(xdgRoot, "systemd", "user", "ccchrome-bridge.service"),
+    xdg.unitPath,
+  );
+  check("linux: the unit really exists at that path", xdg.body.includes("ExecStart="), xdg.unitPath);
+
+  rmSync(linuxBin, { recursive: true, force: true });
+  rmSync(xdgRoot, { recursive: true, force: true });
+}
+
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

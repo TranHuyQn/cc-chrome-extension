@@ -249,12 +249,20 @@ elif cc_service_start; then
   # I7: a slow/failed health check must not abort before the slash command
   # and MCP registration below, and before the closing instructions print —
   # those are what let the user finish the install by hand.
-  [ "$ok" = yes ] || say "→ Cảnh báo: bridge không phản hồi sau 20 giây. Xem log: $INSTALL_DIR/logs/bridge.err.log"
+  [ "$ok" = yes ] || say "→ Cảnh báo: bridge không phản hồi sau 20 giây. Xem log: $(cc_log_hint "$INSTALL_DIR")"
 else
   # I7: `launchctl bootstrap`/`systemctl --user` fail in ordinary, common
   # situations (stale bootstrap state, WSL/containers, ssh without
   # lingering). Warn and keep going instead of dying with raw tool output.
-  say "→ Cảnh báo: không khởi động được dịch vụ nền. Xem log: $INSTALL_DIR/logs/bridge.err.log"
+  say "→ Cảnh báo: không khởi động được dịch vụ nền. Xem log: $(cc_log_hint "$INSTALL_DIR")"
+  # systemd --user needs a real login session. Over ssh, or on a machine where
+  # the user is not logged in graphically, `systemctl --user` fails outright
+  # and the service also would not come back after a reboot even if it had —
+  # lingering is what fixes both, and it is not guessable from the error text.
+  if [ "$(uname -s)" = Linux ]; then
+    say "   Nếu bạn cài qua ssh hoặc muốn dịch vụ chạy cả khi chưa đăng nhập:"
+    say "   sudo loginctl enable-linger \"$(id -un)\"  rồi chạy lại script này."
+  fi
   # N3: quoted so the command stays copy-pasteable when $INSTALL_DIR contains a space.
   say "   Bạn có thể tự chạy: node \"$INSTALL_DIR/server/index.js\" --http"
 fi

@@ -19,7 +19,38 @@ cc_unit_path() {
   if [ "$(cc_platform)" = macos ]; then
     echo "$HOME/Library/LaunchAgents/com.ccchrome.bridge.plist"
   else
-    echo "$HOME/.config/systemd/user/ccchrome-bridge.service"
+    # XDG_CONFIG_HOME, not a hardcoded ~/.config: systemd --user reads
+    # $XDG_CONFIG_HOME/systemd/user and only falls back to ~/.config when the
+    # variable is unset. Writing to ~/.config regardless put the unit somewhere
+    # systemd never looks for anyone who sets that variable, so `systemctl
+    # --user enable` failed with "Unit not found" and install.sh's warn-and-
+    # continue left them with no service at all and no obvious cause.
+    echo "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/ccchrome-bridge.service"
+  fi
+}
+
+# Numeric systemd version (e.g. 245), or 0 when it cannot be determined.
+# `systemctl --version` prints "systemd 245 (245.4-4ubuntu3...)" on the first
+# line; anything unparseable is reported as 0 so callers take the conservative
+# branch rather than assuming a modern systemd.
+cc_systemd_version() {
+  local v
+  v="$(systemctl --version 2>/dev/null | head -1 | awk '{print $2}')"
+  case "$v" in
+    ''|*[!0-9]*) echo 0 ;;
+    *) echo "$v" ;;
+  esac
+}
+
+# Where this platform's install actually writes the bridge's stderr, as a
+# sentence the user can act on. Lives here because it depends on the same
+# branch cc_write_unit takes, and install.sh/uninstall.sh must not guess.
+cc_log_hint() {
+  local dir="$1"
+  if [ "$(cc_platform)" = macos ] || [ "$(cc_systemd_version)" -ge 240 ]; then
+    echo "$dir/logs/bridge.err.log"
+  else
+    echo "journalctl --user -u ccchrome-bridge -e"
   fi
 }
 
@@ -70,6 +101,17 @@ cc_write_unit() {
 </plist>
 PLIST
   else
+    # `append:` is systemd 240+ (Dec 2018). An older systemd does not fail
+    # softly on it: it refuses to load the whole unit, so the bridge silently
+    # never starts on e.g. Ubuntu 18.04 (237). Below that, drop the two lines
+    # and let output go to the journal, which every version has — cc_log_hint
+    # tells the user which of the two applies to their machine so the
+    # "where are the logs" answer is never wrong.
+    local logging=""
+    if [ "$(cc_systemd_version)" -ge 240 ]; then
+      logging="StandardOutput=append:${dir}/logs/bridge.log
+StandardError=append:${dir}/logs/bridge.err.log"
+    fi
     cat > "$unit" <<UNIT
 [Unit]
 Description=Claude Code Chrome Bridge
@@ -82,8 +124,7 @@ Environment="CC_CHROME_PORT=${port}"
 Environment="CC_CHROME_TOKENS_FILE=${dir}/tokens.json"
 Restart=always
 RestartSec=3
-StandardOutput=append:${dir}/logs/bridge.log
-StandardError=append:${dir}/logs/bridge.err.log
+${logging}
 
 [Install]
 WantedBy=default.target
