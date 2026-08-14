@@ -1,14 +1,31 @@
 ﻿# Claude Code Chrome Bridge — cài đặt trên máy Windows của bạn.
 #
-# Chạy:  irm https://github.com/TranHuyQn/cc-chrome-extension/releases/latest/download/install.ps1 | iex
+# Chạy:
+#   irm <url>/install.ps1 -OutFile "$env:TEMP\install.ps1"
+#   powershell -ExecutionPolicy Bypass -File "$env:TEMP\install.ps1"
 #
 # Script này KHÔNG cần quyền admin và chỉ ghi vào thư mục người dùng của bạn.
+#
+# NOT `irm ... | iex`, and the two reasons are structural rather than
+# stylistic. This file begins with a UTF-8 BOM because Windows PowerShell 5.1
+# reads a BOM-less file as the ANSI code page, which mangles every Vietnamese
+# string here badly enough that the file no longer parses. Piping to iex hands
+# that BOM to the parser as a literal character — "The term 'ï»¿#' is not
+# recognized". And Invoke-RestMethod decodes a GitHub release asset (served as
+# application/octet-stream) as ISO-8859-1, so every accented character would
+# arrive corrupted even without the BOM. -OutFile writes the bytes untouched
+# and -File reads them the way this file needs; that is also the path CI
+# exercises.
 #
 # Counterpart of scripts/install.sh; the step order is the same, including the
 # parts where the order is the whole point: stage and verify the new tree
 # BEFORE touching the installed one, stop the service only once a replacement
 # is ready, and overwrite tokens.json rather than merging it.
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1's console defaults to the machine's OEM code page, so
+# the Vietnamese below renders as mojibake even when the file is read correctly.
+# Best effort: some hosts have no console attached and this throws.
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
 $Port = if ($env:CC_CHROME_PORT) { [int]$env:CC_CHROME_PORT } else { 8787 }
 $InstallDir = Join-Path $env:USERPROFILE '.cc-chrome-bridge'

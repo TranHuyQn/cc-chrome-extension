@@ -5,6 +5,10 @@
 # from under a running bridge is the surest way to leave a zombie holding port
 # 8787 with the old token still valid.
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1's console defaults to the machine's OEM code page, so
+# the Vietnamese below renders as mojibake even when the file is read correctly.
+# Best effort: some hosts have no console attached and this throws.
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
 $InstallDir = Join-Path $env:USERPROFILE '.cc-chrome-bridge'
 $StateFile = Join-Path $env:USERPROFILE '.ccchrome.json'

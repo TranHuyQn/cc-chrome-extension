@@ -55,8 +55,18 @@ curl -fsSL https://github.com/TranHuyQn/cc-chrome-extension/releases/latest/down
 **Windows** (PowerShell thường, **không** cần "Run as administrator"):
 
 ```powershell
-irm https://github.com/TranHuyQn/cc-chrome-extension/releases/latest/download/install.ps1 | iex
+irm https://github.com/TranHuyQn/cc-chrome-extension/releases/latest/download/install.ps1 -OutFile "$env:TEMP\install.ps1"
+powershell -ExecutionPolicy Bypass -File "$env:TEMP\install.ps1"
 ```
+
+> **Hai dòng chứ không phải `irm … | iex`, và đây là bắt buộc.** `install.ps1`
+> bắt đầu bằng BOM UTF-8 vì Windows PowerShell 5.1 không có BOM thì đọc file
+> theo bảng mã ANSI, làm hỏng mọi chuỗi tiếng Việt tới mức file không parse
+> nổi. Nhưng `| iex` lại đưa chính BOM đó vào parser như một ký tự thường —
+> `The term 'ï»¿#' is not recognized`. Thêm nữa, `irm` giải mã asset của GitHub
+> (`application/octet-stream`) theo ISO-8859-1 nên chữ có dấu vỡ hết kể cả khi
+> không có BOM. `-OutFile` ghi nguyên byte, `-File` đọc đúng — đó cũng là
+> đường CI kiểm mỗi lần push.
 
 > ⚠️ **Đường Windows chưa được nghiệm thu trên máy thật.** CI (`windows-latest`) chạy
 > trọn `install.ps1` và `uninstall.ps1` mỗi lần push và đang xanh, nhưng nó chạy với
