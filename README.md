@@ -69,6 +69,14 @@ curl -fsSL https://github.com/TranHuyQn/cc-chrome-extension/releases/latest/down
 irm https://github.com/TranHuyQn/cc-chrome-extension/releases/latest/download/install.ps1 | iex
 ```
 
+> ⚠️ **Đường Windows chưa được nghiệm thu trên máy thật.** CI (`windows-latest`) chạy
+> trọn `install.ps1` và `uninstall.ps1` mỗi lần push và đang xanh, nhưng nó chạy với
+> `CC_CHROME_SKIP_SERVICE=1` — nghĩa là **ba thứ chưa ai kiểm**: đăng ký scheduled
+> task có cần nâng quyền không, có hiện cửa sổ console đen không, và task có thật sự
+> ở trạng thái `Running` không. Side panel chat trên Windows cũng chưa chạy thật lần
+> nào. macOS và Linux thì đã dùng thật. Nếu bạn là người thử Windows đầu tiên, báo lại
+> kết quả ba mục trên.
+
 Lệnh này tải và chạy thẳng một script từ GitHub Releases — biết vậy trước khi chạy. Muốn xem
 trước thì tách làm hai bước:
 

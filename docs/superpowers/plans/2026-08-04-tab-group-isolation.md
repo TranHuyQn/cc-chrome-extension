@@ -573,5 +573,5 @@ git commit -m "chore: release 3.0.0 with per-session tab group isolation"
 - [ ] **Step 1:** `npm run lint` sạch; `HEADED=1 npm test` — 6 suite xanh, ghi lại số PASS từng suite.
 - [ ] **Step 2:** `npm run build` — artifact v3.0.0, ghi lại Extension ID, xác nhận `key.pem` là bản cũ (không sinh mới).
 - [ ] **Step 3:** `docker build -f deploy/Dockerfile -t cc-bridge:3.0.0 .` và chạy thử `/health` trả `"version":"3.0.0"`.
-- [ ] **Step 4:** Đưa lên home server: copy repo, `docker compose up -d --build` trong `deploy/cloudflare`, kiểm `/health` qua `https://cccx.beelyai.com/health`.
-- [ ] **Step 5:** Báo Huy: cài lại extension từ `https://cccx.beelyai.com/extension.zip`, vì bản 2.x không có isolation.
+- [ ] **Step 4:** Đưa lên home server: copy repo, `docker compose up -d --build` trong `deploy/cloudflare`, kiểm `/health` qua `https://cccx.example.com/health`.
+- [ ] **Step 5:** Báo Huy: cài lại extension từ `https://cccx.example.com/extension.zip`, vì bản 2.x không có isolation.
