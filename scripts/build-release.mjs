@@ -65,7 +65,24 @@ rmSync(join(stage, "server", "node_modules", ".bin"), { recursive: true, force: 
 // doubles in member count with junk files, invisible from macOS's own `tar
 // -tzf` (which hides and merges them on read) but extracted for real, and
 // permanently installed, on Linux.
-execFileSync("tar", ["-czf", join(dist, "cc-chrome-bridge.tar.gz"), "-C", stage, "."], {
+//
+// --no-xattrs (plus --no-acls for the same reason) stops bsdtar from also
+// embedding a PAX extended header per entry for whatever xattrs the staged
+// files happen to carry — most visibly `com.apple.provenance`, which recent
+// macOS stamps onto files itself and COPYFILE_DISABLE does not touch (that
+// variable only governs the legacy AppleDouble resource-fork copy above, a
+// different mechanism). Those headers are silently accepted and dropped by
+// macOS's own bsdtar on read, but GNU tar on Linux — every `install.sh`
+// target — logs "Ignoring unknown extended header keyword
+// 'LIBARCHIVE.xattr.com.apple.provenance'" once per affected entry. Harmless
+// (the entry still extracts), but noisy enough on every install to look like
+// a broken release. Deliberately not `--no-fflags` too: GNU tar (unlike
+// bsdtar) doesn't recognize that option, and this script's own `npm test`
+// path needs to run under either tar depending on the contributor's OS.
+execFileSync("tar", [
+  "--no-xattrs", "--no-acls",
+  "-czf", join(dist, "cc-chrome-bridge.tar.gz"), "-C", stage, ".",
+], {
   stdio: "inherit",
   env: { ...process.env, COPYFILE_DISABLE: "1" },
 });
