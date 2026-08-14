@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Claude Code Chrome Bridge",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Bridge extension that lets Claude Code control Chrome through a local MCP server (no claude.ai login required).",
   "background": {
     "service_worker": "background.js"

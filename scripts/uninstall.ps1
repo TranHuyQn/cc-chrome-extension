@@ -49,11 +49,24 @@ Say "Gỡ Claude Code Chrome Bridge"
 #    thật. Stop/Unregister đều nuốt lỗi, nên exit code của chúng không nói lên
 #    được điều gì — phải hỏi lại hệ thống.
 Say "→ Dừng dịch vụ nền…"
-Stop-CcTask
+Stop-CcTask -InstallDir $InstallDir
 Unregister-CcTask
 if (Test-CcTaskLoaded) {
     Say "→ Cảnh báo: không xoá được scheduled task '$(Get-CcTaskName)'."
     Say "   Xoá tay trong Task Scheduler rồi chạy lại script này. Chưa xoá file nào cả."
+    exit 1
+}
+# The task being gone is NOT the same as the bridge being gone: the task runs
+# wscript, and node.exe is its grandchild. Checking only the task let a live
+# server survive the uninstall, still holding port 8787 and an open handle on
+# logs\bridge.err.log — the delete below then failed on that one file, halfway
+# through. Verify the process too, and stop before touching anything if it is
+# somehow still there.
+$alive = @(Get-CcBridgeProcess -InstallDir $InstallDir)
+if ($alive.Count -gt 0) {
+    Say "→ Cảnh báo: bridge vẫn đang chạy (PID $($alive.ProcessId -join ', ')) dù scheduled task đã bị xoá."
+    Say "   Đóng nó rồi chạy lại script này. Chưa xoá file nào cả:"
+    Say "   Get-CimInstance Win32_Process -Filter `"Name='node.exe'`" | Where-Object { `$_.CommandLine -like '*cc-chrome-bridge*' } | ForEach-Object { taskkill /pid `$_.ProcessId /T /F }"
     exit 1
 }
 

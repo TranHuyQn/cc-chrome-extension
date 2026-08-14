@@ -108,9 +108,40 @@ function Test-CcTaskLoaded {
 
 function Start-CcTask { Start-ScheduledTask -TaskName (Get-CcTaskName) }
 
+# The bridge process itself, found by its command line rather than by asking
+# Task Scheduler — which cannot tell us: the task's action is wscript.exe, and
+# node.exe is its GRANDchild (wscript -> bridge.cmd -> node). Get-ScheduledTask
+# reports no PID for any of them.
+function Get-CcBridgeProcess {
+    param([string]$InstallDir = (Join-Path $env:USERPROFILE '.cc-chrome-bridge'))
+    $needle = Join-Path $InstallDir 'server\index.js'
+    Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine -like "*$needle*" }
+}
+
+# Stopping the TASK is not stopping the BRIDGE. Stop-ScheduledTask ends the task
+# instance (wscript), and node.exe — two levels down — keeps running: still
+# holding port 8787, still holding an open handle on logs\bridge.err.log. The
+# task then reads as gone while the process it started is very much alive, so
+# uninstall deleted the tree out from under a live server and failed on the log
+# file ("The process cannot access the file because it is being used by another
+# process"), and an upgrade could have swapped the code under a process that
+# kept serving the old one on the same port.
+#
+# taskkill /T for the tree, /F because a console app ignores the polite request
+# — the same reason AgentSession.killChild() uses it for the panel's children.
 function Stop-CcTask {
+    param([string]$InstallDir = (Join-Path $env:USERPROFILE '.cc-chrome-bridge'))
     if (Test-CcTaskLoaded) {
         Stop-ScheduledTask -TaskName (Get-CcTaskName) -ErrorAction SilentlyContinue
+    }
+    foreach ($proc in @(Get-CcBridgeProcess -InstallDir $InstallDir)) {
+        & taskkill /pid $proc.ProcessId /T /F *> $null
+    }
+    # Killing is asynchronous; the handle on the log file outlives the API call.
+    foreach ($i in 1..40) {
+        if (-not (Get-CcBridgeProcess -InstallDir $InstallDir)) { break }
+        Start-Sleep -Milliseconds 250
     }
 }
 

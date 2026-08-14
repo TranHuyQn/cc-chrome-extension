@@ -11,7 +11,7 @@
 //
 // Usage: node test/install-windows.test.mjs
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
@@ -178,11 +178,45 @@ check("it takes the upgrade path", /nâng cấp/.test(second.stdout), second.std
 const state2 = JSON.parse(readFileSync(join(fakeHome, ".ccchrome.json"), "utf8"));
 check("the upgrade keeps the same token", state2.token === state.token, `${state.token} -> ${state2.token}`);
 
+// Start the bridge the way the scheduled task does — through bridge.cmd, so
+// node inherits the same stdout/stderr redirection into logs\. That handle is
+// the whole point: stopping the TASK does not stop node (the task runs
+// wscript, node is its grandchild), and the uninstall then failed deleting
+// logs\bridge.err.log with "The process cannot access the file because it is
+// being used by another process" — halfway through, with a live server still
+// holding port 8787. Reported from a real Windows machine.
+const bridge = spawn("cmd.exe", ["/c", join(installDir, "bridge.cmd")], {
+  env,
+  detached: true,
+  stdio: "ignore",
+});
+bridge.unref();
+const errLog = join(installDir, "logs", "bridge.err.log");
+for (let i = 0; i < 60 && !existsSync(errLog); i++) {
+  spawnSync("powershell.exe", ["-NoProfile", "-Command", "Start-Sleep -Milliseconds 250"]);
+}
+check("the bridge really started before the uninstall runs", existsSync(errLog), errLog);
+
+const countBridgeProcs = () => {
+  const r = spawnSync(
+    "powershell.exe",
+    ["-NoProfile", "-Command",
+      `@(Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -like '*${installDir.replace(/\\/g, "\\\\")}*' }).Count`],
+    { encoding: "utf8" },
+  );
+  return Number((r.stdout || "").trim());
+};
+check("that bridge is visible as a running node process", countBridgeProcs() > 0, String(countBridgeProcs()));
+
 const un = ps(join(installDir, "uninstall.ps1"));
 check("uninstall.ps1 exits 0", un.status === 0, `${un.stdout}\n${un.stderr}`);
 check("uninstall removes the token file", !existsSync(join(fakeHome, ".ccchrome.json")));
 check("uninstall unregisters the MCP server", !existsSync(mcpMarker), mcpMarker);
 check("uninstall removes the installed tree", !existsSync(join(installDir, "server")));
+// The assertion the reported bug would have failed: the task is not the
+// process, and deleting the tree while node still holds the log file is what
+// broke the uninstall in the middle.
+check("uninstall stops the running bridge, not just its scheduled task", countBridgeProcs() === 0, String(countBridgeProcs()));
 check("uninstall removes the slash command", !existsSync(join(fakeHome, ".claude", "commands", "ccchrome.md")));
 
 // Idempotent: uninstalling twice must not error on things that are already
@@ -190,6 +224,9 @@ check("uninstall removes the slash command", !existsSync(join(fakeHome, ".claude
 const un2 = ps(join(root, "scripts", "uninstall.ps1"));
 check("uninstall.ps1 is idempotent", un2.status === 0, `${un2.stdout}\n${un2.stderr}`);
 
+// Never leave a bridge behind on the runner if an assertion above failed.
+spawnSync("powershell.exe", ["-NoProfile", "-Command",
+  `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -like '*${installDir.replace(/\\/g, "\\\\")}*' } | ForEach-Object { taskkill /pid $_.ProcessId /T /F }`]);
 rmSync(fakeHome, { recursive: true, force: true });
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

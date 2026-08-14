@@ -150,7 +150,10 @@ if ($env:CC_CHROME_SKIP_SERVICE) {
     Say "  (bỏ qua bước dừng dịch vụ — CC_CHROME_SKIP_SERVICE)"
 } else {
     Say "→ Dừng dịch vụ đang chạy (nếu có)…"
-    Stop-CcTask
+    # -InstallDir so the running bridge is killed too, not just the task: an
+    # upgrade that leaves the old node alive would swap the code underneath it
+    # while it keeps serving the previous version on the same port.
+    Stop-CcTask -InstallDir $InstallDir
 }
 
 # 3. Đưa mã nguồn đã kiểm tra vào vị trí thật.
