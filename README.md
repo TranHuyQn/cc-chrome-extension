@@ -70,9 +70,10 @@ powershell -ExecutionPolicy Bypass -File "$env:TEMP\install.ps1"
 
 > **Windows đã chạy thật trên máy thật** (Windows 11, PowerShell 5.1, 1.0.3): cài xong
 > **không cần quyền admin**, bridge tự lên và `/health` trả lời, extension nối được,
-> tool trình duyệt chạy, và khung chat side panel trả lời được. Hai thứ **chưa ai xác
-> nhận**: dịch vụ có tự lên lại sau khi **khởi động lại máy** không, và **gỡ cài đặt**
-> có sạch không. Nếu bạn thử, báo lại giúp.
+> tool trình duyệt chạy, khung chat side panel trả lời được, và **sau khi khởi động lại
+> máy thì dịch vụ tự lên, extension nối lại bình thường** — tức scheduled task trigger
+> "At log on" làm đúng việc của nó. Còn **gỡ cài đặt** thì chưa ai chạy thật; nếu bạn
+> thử, báo lại giúp.
 
 Lệnh này tải và chạy thẳng một script từ GitHub Releases — biết vậy trước khi chạy. Muốn xem
 trước thì tách làm hai bước:
