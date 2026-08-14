@@ -40,6 +40,12 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 function listTarMembers(tarPath) {
   const buf = gunzipSync(readFileSync(tarPath));
   const names = [];
+  // Any PAX record key containing ".xattr." (`LIBARCHIVE.xattr.*`,
+  // `SCHILY.xattr.*`) is bsdtar embedding a captured extended attribute —
+  // GNU tar on Linux doesn't understand these and logs "Ignoring unknown
+  // extended header keyword" once per entry that carries one, even though
+  // the entry itself still extracts fine.
+  const xattrKeywords = [];
   let offset = 0;
   let pendingName = null;
   while (offset + 512 <= buf.length) {
@@ -54,6 +60,9 @@ function listTarMembers(tarPath) {
       const data = buf.subarray(offset + 512, offset + 512 + size).toString("utf8");
       const match = data.match(/(?:^|\n)\d+ path=([^\n]*)\n/);
       if (typeflag === "x" && match) pendingName = match[1];
+      for (const kv of data.matchAll(/(?:^|\n)\d+ ([A-Za-z0-9_.]+)=/g)) {
+        if (kv[1].includes(".xattr.")) xattrKeywords.push(kv[1]);
+      }
     } else {
       const rawName = header.subarray(0, 100).toString("utf8").split("\0")[0];
       const prefix = header.subarray(345, 500).toString("utf8").split("\0")[0];
@@ -62,7 +71,7 @@ function listTarMembers(tarPath) {
     }
     offset += 512 + dataBlocks * 512;
   }
-  return names;
+  return { names, xattrKeywords };
 }
 
 let failures = 0;
@@ -206,7 +215,7 @@ for (const required of [
 // install (`cp -R` in install.sh) extracts them for real, permanently, as
 // junk twins of every shipped file. listTarMembers() walks the raw headers
 // instead, so it sees exactly what a non-macOS extractor sees.
-const rawMembers = listTarMembers(tarPath);
+const { names: rawMembers, xattrKeywords } = listTarMembers(tarPath);
 
 // Anchor listTarMembers() against the `entries` set built from `tar -tzf`
 // above, so a walker that silently stops early (a logic bug, not a thrown
@@ -224,6 +233,13 @@ check(
 
 const appleDoubleEntries = rawMembers.filter((e) => /(^|\/)\._/.test(e));
 check("no AppleDouble (._*) junk entries", appleDoubleEntries.length === 0, appleDoubleEntries.slice(0, 10).join(", "));
+
+// --no-xattrs in build-release.mjs's tar invocation should keep bsdtar from
+// embedding captured xattrs (e.g. macOS's own `com.apple.provenance`) as PAX
+// headers. GNU tar on Linux extracts the archive fine either way, but logs
+// "Ignoring unknown extended header keyword" once per affected entry — this
+// catches a regression before every `install.sh` run prints that warning again.
+check("no macOS xattr PAX headers in the tarball", xattrKeywords.length === 0, xattrKeywords.slice(0, 10).join(", "));
 
 // No symlinks AT ALL, which is stricter than the rule this replaces ("no
 // symlink with an absolute target") and for a harder reason. Windows' bundled
