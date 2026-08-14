@@ -192,18 +192,36 @@ const bridge = spawn("cmd.exe", ["/c", join(installDir, "bridge.cmd")], {
 });
 bridge.unref();
 const errLog = join(installDir, "logs", "bridge.err.log");
-for (let i = 0; i < 60 && !existsSync(errLog); i++) {
-  spawnSync("powershell.exe", ["-NoProfile", "-Command", "Start-Sleep -Milliseconds 250"]);
+// Waited on /health, not on the log file existing: the log gets its startup
+// banner even when the server then dies (bad token file, port in use), and a
+// dead bridge would make every assertion below pass for the wrong reason.
+const bridgeUp = () => {
+  const r = spawnSync("powershell.exe", ["-NoProfile", "-Command",
+    "try { (Invoke-WebRequest -Uri http://127.0.0.1:8787/health -UseBasicParsing -TimeoutSec 2).StatusCode } catch { 0 }"],
+    { encoding: "utf8" });
+  return (r.stdout || "").trim() === "200";
+};
+let up = false;
+for (let i = 0; i < 40 && !up; i++) {
+  up = bridgeUp();
+  if (!up) spawnSync("powershell.exe", ["-NoProfile", "-Command", "Start-Sleep -Milliseconds 500"]);
 }
-check("the bridge really started before the uninstall runs", existsSync(errLog), errLog);
+check(
+  "the bridge really started and is serving before the uninstall runs",
+  up,
+  existsSync(errLog) ? readFileSync(errLog, "utf8").slice(-400) : "(no log at all)",
+);
 
+// Matched on the directory NAME, not the full path: %USERPROFILE% on a CI
+// runner resolves to an 8.3 short form (C:\Users\RUNNER~1\...) in the
+// process's command line while Node reports the long one here, so a full-path
+// pattern silently matched nothing — and made the assertion below pass on an
+// empty set, which is the failure mode this whole case exists to prevent.
 const countBridgeProcs = () => {
-  const r = spawnSync(
-    "powershell.exe",
-    ["-NoProfile", "-Command",
-      `@(Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -like '*${installDir.replace(/\\/g, "\\\\")}*' }).Count`],
-    { encoding: "utf8" },
-  );
+  const r = spawnSync("powershell.exe", ["-NoProfile", "-Command",
+    "@(Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | " +
+    "Where-Object { $_.CommandLine -like '*cc-chrome-bridge*server*index.js*' }).Count"],
+    { encoding: "utf8" });
   return Number((r.stdout || "").trim());
 };
 check("that bridge is visible as a running node process", countBridgeProcs() > 0, String(countBridgeProcs()));
@@ -226,7 +244,9 @@ check("uninstall.ps1 is idempotent", un2.status === 0, `${un2.stdout}\n${un2.std
 
 // Never leave a bridge behind on the runner if an assertion above failed.
 spawnSync("powershell.exe", ["-NoProfile", "-Command",
-  `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -like '*${installDir.replace(/\\/g, "\\\\")}*' } | ForEach-Object { taskkill /pid $_.ProcessId /T /F }`]);
+  "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | " +
+  "Where-Object { $_.CommandLine -like '*cc-chrome-bridge*' } | " +
+  "ForEach-Object { taskkill /pid $_.ProcessId /T /F }"]);
 rmSync(fakeHome, { recursive: true, force: true });
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);
