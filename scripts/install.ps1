@@ -39,6 +39,25 @@ $ReleaseUrl = if ($env:CC_CHROME_RELEASE_URL) { $env:CC_CHROME_RELEASE_URL } els
 }
 
 function Say($m) { Write-Host $m }
+
+# Runs `claude` and never throws, whatever it writes to stderr. Needed because
+# of a PowerShell rule that is easy to miss: REDIRECTING a native command's
+# stderr (`*> $null`) turns each line into an ErrorRecord, and with
+# $ErrorActionPreference = 'Stop' that becomes a terminating error. So the
+# entirely normal "No MCP server named 'chrome' in user scope" — what a first
+# install always gets from `mcp remove` — killed the script one line before it
+# registered the server and printed the ws URL. install.sh handles the same
+# case with `|| true`; this is the equivalent. $LASTEXITCODE still reports what
+# the CLI actually returned, which is what the caller checks.
+function Invoke-CcClaude([string[]]$CcArgs) {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    try {
+        & claude @CcArgs 2>&1 | Out-Null
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+}
 function Die($m) { Write-Host "Lỗi: $m" -ForegroundColor Red; exit 1 }
 
 # Owner-only, the Windows way. There is no umask here: a new file inherits its
@@ -244,9 +263,11 @@ Say "→ Đã cài lệnh /ccchrome"
 
 # 7. Đăng ký MCP với Claude Code
 if (Get-Command claude -ErrorAction SilentlyContinue) {
-    & claude mcp remove --scope user chrome *> $null
-    & claude mcp add --scope user --transport http chrome "http://127.0.0.1:$Port/mcp" `
-        --header "Authorization: Bearer $token" *> $null
+    Invoke-CcClaude @('mcp', 'remove', '--scope', 'user', 'chrome') | Out-Null
+    Invoke-CcClaude @(
+        'mcp', 'add', '--scope', 'user', '--transport', 'http', 'chrome',
+        "http://127.0.0.1:$Port/mcp", '--header', "Authorization: Bearer $token"
+    ) | Out-Null
     if ($LASTEXITCODE -eq 0) {
         Say "→ Đã đăng ký MCP server 'chrome' với Claude Code"
     } else {

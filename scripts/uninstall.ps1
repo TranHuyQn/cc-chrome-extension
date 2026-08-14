@@ -17,6 +17,21 @@ $PanelDir = Join-Path $InstallDir 'panel'
 
 function Say($m) { Write-Host $m }
 
+# Runs `claude` and never throws. Redirecting a native command's stderr turns
+# each line into an ErrorRecord, and with $ErrorActionPreference = 'Stop' that
+# is terminating — so "No MCP server named 'chrome' in user scope", which is
+# the NORMAL answer when there is nothing left to remove, would abort the
+# uninstall before it deleted anything. See the same helper in install.ps1.
+function Invoke-CcClaude([string[]]$CcArgs) {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    try {
+        & claude @CcArgs 2>&1 | Out-Null
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
 # Prefer the installed copy of the library, the same one that created the task
 # being removed; fall back to the sibling file when run straight out of a
 # checkout.
@@ -44,7 +59,7 @@ if (Test-CcTaskLoaded) {
 
 # 2. Gỡ đăng ký MCP khỏi Claude Code.
 if (Get-Command claude -ErrorAction SilentlyContinue) {
-    & claude mcp remove --scope user chrome *> $null
+    Invoke-CcClaude @('mcp', 'remove', '--scope', 'user', 'chrome') | Out-Null
     if ($LASTEXITCODE -eq 0) { Say "→ Đã gỡ đăng ký MCP server 'chrome'" }
 }
 

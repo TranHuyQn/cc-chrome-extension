@@ -12,7 +12,7 @@
 // Usage: node test/install-windows.test.mjs
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,9 +35,40 @@ function check(name, cond, detail = "") {
 const fakeHome = mkdtempSync(join(tmpdir(), "cc-win-home-"));
 const installDir = join(fakeHome, ".cc-chrome-bridge");
 
+// A stand-in `claude` on PATH. Without one, Get-Command claude fails inside
+// install.ps1 and the whole MCP registration block is skipped — which is how a
+// crash in that block reached a user through a green CI run. The stub matters
+// most for what it does WRONG on purpose: `mcp remove` with nothing registered
+// writes to stderr and exits 1, exactly like the real CLI ("No MCP server named
+// 'chrome' in user scope"), and that is the case a first install always hits.
+const stubBin = join(fakeHome, "bin");
+mkdirSync(stubBin, { recursive: true });
+const mcpMarker = join(fakeHome, "mcp-chrome-registered");
+writeFileSync(
+  join(stubBin, "claude-stub.mjs"),
+  `import { existsSync, writeFileSync, rmSync } from "node:fs";
+const marker = ${JSON.stringify(mcpMarker)};
+const a = process.argv.slice(2);
+if (a[0] === "mcp" && a[1] === "remove") {
+  if (existsSync(marker)) { rmSync(marker); process.exit(0); }
+  process.stderr.write('No MCP server named "chrome" in user scope\\n');
+  process.exit(1);
+}
+if (a[0] === "mcp" && a[1] === "add") { writeFileSync(marker, a.join(" ")); process.exit(0); }
+process.exit(0);
+`,
+);
+// Node, not batch branching: this has to be right on the first try, and it is
+// the same interpreter the suite already depends on.
+writeFileSync(
+  join(stubBin, "claude.cmd"),
+  `@echo off\r\nnode "%~dp0claude-stub.mjs" %*\r\nexit /b %ERRORLEVEL%\r\n`,
+);
+
 const env = {
   ...process.env,
   USERPROFILE: fakeHome,
+  PATH: `${stubBin};${process.env.PATH}`,
   CC_CHROME_SKIP_SERVICE: "1",
   CC_CHROME_SOURCE: root,
 };
@@ -117,6 +148,25 @@ const vbsBody = existsSync(join(installDir, "bridge-launcher.vbs"))
   : "";
 check("the shim runs hidden and waits", /,\s*0,\s*True/.test(vbsBody), vbsBody);
 
+// The regression this exists for: on a FIRST install `claude mcp remove` has
+// nothing to remove, writes to stderr and exits 1. Redirecting a native
+// command's stderr under $ErrorActionPreference='Stop' turns that into a
+// terminating error, so install.ps1 died one line before registering the
+// server — after the bridge was already installed and running, and before it
+// printed the ws URL the user needs. Reported from a real Windows machine;
+// CI could not see it because there was no `claude` on PATH at all.
+check(
+  "a first install survives `claude mcp remove` having nothing to remove",
+  /Đã đăng ký MCP server/.test(out.stdout),
+  out.stdout.slice(-600),
+);
+check("the MCP server really got registered", existsSync(mcpMarker), mcpMarker);
+check(
+  "the registration points at the loopback bridge with the generated token",
+  existsSync(mcpMarker) && readFileSync(mcpMarker, "utf8").includes("http://127.0.0.1:8787/mcp"),
+  existsSync(mcpMarker) ? readFileSync(mcpMarker, "utf8") : "(missing)",
+);
+
 check("prints the ws URL for the popup", /ws:\/\/127\.0\.0\.1:8787\/ws\?token=/.test(out.stdout), out.stdout.slice(-400));
 check("tells the user to Load unpacked", /Load unpacked/i.test(out.stdout), out.stdout.slice(-400));
 
@@ -131,6 +181,7 @@ check("the upgrade keeps the same token", state2.token === state.token, `${state
 const un = ps(join(installDir, "uninstall.ps1"));
 check("uninstall.ps1 exits 0", un.status === 0, `${un.stdout}\n${un.stderr}`);
 check("uninstall removes the token file", !existsSync(join(fakeHome, ".ccchrome.json")));
+check("uninstall unregisters the MCP server", !existsSync(mcpMarker), mcpMarker);
 check("uninstall removes the installed tree", !existsSync(join(installDir, "server")));
 check("uninstall removes the slash command", !existsSync(join(fakeHome, ".claude", "commands", "ccchrome.md")));
 
