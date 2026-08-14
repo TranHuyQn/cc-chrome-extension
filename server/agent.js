@@ -11,8 +11,9 @@
 // across turns even though the process does not.
 
 import { spawn } from "node:child_process";
-import { writeFileSync, chmodSync, existsSync, rmSync } from "node:fs";
+import { writeFileSync, chmodSync, existsSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 
 // cmd.exe quoting, kept to the one rule actually needed here: wrap in double
 // quotes, escape any double quote inside. Everything this quotes is
@@ -64,6 +65,44 @@ export function claudeBinFromEnv() {
   return process.env.CC_CHROME_CLAUDE_BIN || "claude";
 }
 
+// Hook events the panel forwards from the user's own settings, and the two it
+// deliberately drops.
+//
+// The panel spawns a fresh `claude` per TURN, not per conversation, so a
+// SessionStart hook would fire on every single message — and for a usage
+// tracker like token-slayer that means one bogus "session" per line the user
+// types. SessionEnd is dropped for the same reason. Everything else fires at
+// the same rhythm it does in a terminal.
+//
+// Measured, not assumed: hooks DO run under `claude -p`, `--settings <file>`
+// composes with `--setting-sources project`, and the Stop payload carries a
+// readable transcript_path — which is what a usage tracker reads to count the
+// turn's output tokens. So dropping SessionStart costs no usage data.
+const PANEL_HOOK_EVENTS = [
+  "UserPromptSubmit",
+  "PreToolUse",
+  "PostToolUse",
+  "Stop",
+  "SubagentStop",
+  "Notification",
+];
+
+// Only `hooks`, never `enabledPlugins`. Plugins are the reason
+// --setting-sources project exists: a plugin's SessionStart hook injected
+// cross-project memory into every spawned child, which made "Phiên mới" look
+// broken. Copying the hooks the user declared themselves gives each member
+// their own tooling — token trackers, notifiers — without reopening that door,
+// and without anyone having to hand-place a file on their machine.
+export function panelHooksFrom(userSettings) {
+  const hooks = userSettings?.hooks;
+  if (!hooks || typeof hooks !== "object") return null;
+  const kept = {};
+  for (const event of PANEL_HOOK_EVENTS) {
+    if (Array.isArray(hooks[event]) && hooks[event].length) kept[event] = hooks[event];
+  }
+  return Object.keys(kept).length ? { hooks: kept } : null;
+}
+
 export class AgentSession {
   constructor({
     sessionId,
@@ -78,6 +117,9 @@ export class AgentSession {
     // reopens and replays a remembered id is exactly this case.
     resuming = false,
     claudeBin = "claude",
+    // Overridable so a test can point at a fixture instead of whatever the
+    // machine running the suite happens to have configured.
+    userSettingsPath = join(homedir(), ".claude", "settings.json"),
     claudeArgsPrefix = [],
     env = {},
     onEvent,
@@ -91,6 +133,7 @@ export class AgentSession {
     this.cwd = cwd;
     this.systemPrompt = systemPrompt;
     this.claudeBin = claudeBin;
+    this.userSettingsPath = userSettingsPath;
     this.claudeArgsPrefix = claudeArgsPrefix;
     this.env = env;
     this.onEvent = onEvent;
@@ -161,6 +204,24 @@ export class AgentSession {
     return file;
   }
 
+  // Read at spawn time rather than at install time, so a user who edits their
+  // hooks gets them on the next message instead of after reinstalling.
+  panelSettingsPath() {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(readFileSync(this.userSettingsPath, "utf8"));
+    } catch {
+      return null; // no user settings, or unreadable/malformed — not an error here
+    }
+    const settings = panelHooksFrom(parsed);
+    if (!settings) return null;
+    const file = join(this.cwd, `.panel-settings-${this.sessionId || "panel"}.json`);
+    writeFileSync(file, JSON.stringify(settings), { mode: 0o600 });
+    if (process.platform !== "win32") chmodSync(file, 0o600);
+    this._panelSettingsPath = file;
+    return file;
+  }
+
   buildArgs() {
     const args = [
       ...this.claudeArgsPrefix,
@@ -189,6 +250,8 @@ export class AgentSession {
       "--tools", "",
       "--allowedTools", this.allowedTools,
     ];
+    const panelSettings = this.panelSettingsPath();
+    if (panelSettings) args.push("--settings", panelSettings);
     if (this.model) args.push("--model", this.model);
     if (this.systemPrompt) args.push("--append-system-prompt", this.systemPrompt);
     if (this.started) args.push("--resume", this.sessionId);
@@ -419,9 +482,10 @@ export class AgentSession {
     // after a few days — and uninstall deliberately preserves that directory,
     // so they survived it too. Best effort by design: a bridge killed outright
     // never runs this, which is what the sweep in uninstall.sh is for.
-    if (this._mcpConfigPath) {
-      try { rmSync(this._mcpConfigPath, { force: true }); } catch { /* already gone */ }
-      this._mcpConfigPath = null;
+    for (const key of ["_mcpConfigPath", "_panelSettingsPath"]) {
+      if (!this[key]) continue;
+      try { rmSync(this[key], { force: true }); } catch { /* already gone */ }
+      this[key] = null;
     }
   }
 }

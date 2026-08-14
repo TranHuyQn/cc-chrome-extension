@@ -308,8 +308,21 @@ attached them.
   `~/.claude/settings.json`. Isolating the panel this way is deliberate, not
   just a bugfix: it matches the original Claude for Chrome extension (fully
   ephemeral between sessions) and Claude's own memory feature (siloed per
-  project) — the panel agent should not see the user's global plugins, hooks,
-  or cross-project memory at all.
+  project) — the panel agent should not see the user's global plugins or
+  cross-project memory at all. Their own `hooks` are the one deliberate
+  exception, forwarded separately; see the next entry for why that does not
+  reopen this.
+- The panel forwards the user's OWN hooks into each spawned `claude` — via a
+  generated `--settings` file holding only their `hooks` block, never
+  `enabledPlugins`. That keeps a usage tracker or notifier working (measured:
+  hooks do fire under `claude -p`, `--settings` composes with
+  `--setting-sources project`, and the Stop payload carries a readable
+  `transcript_path`) without reopening the plugin door `--setting-sources
+  project` exists to close. `SessionStart` and `SessionEnd` are dropped on
+  purpose: the panel spawns one process per TURN, so forwarding them would
+  record a whole session per message typed. The file is read at spawn time, so
+  editing hooks takes effect on the next message rather than after a reinstall,
+  and it is deleted on dispose alongside the MCP config.
 - `~/.cc-chrome-bridge/panel` (`PANEL_CWD` in `server/index.js`) is the working
   directory every spawned `claude` child runs in, so it accumulates that CLI's
   own session history over time. Nothing in this repo prunes it.

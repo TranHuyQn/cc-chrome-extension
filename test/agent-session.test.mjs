@@ -6,9 +6,9 @@
 
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readFileSync, mkdtempSync, rmSync, existsSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { AgentSession, buildSpawn, winQuote, claudeBinFromEnv } from "../server/agent.js";
+import { AgentSession, buildSpawn, winQuote, claudeBinFromEnv, panelHooksFrom } from "../server/agent.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(root, "test", "fixtures", "claude-stream.ndjson");
@@ -471,6 +471,87 @@ function makeSession(extra = {}) {
     JSON.stringify(end),
   );
   session.dispose();
+}
+
+// The panel forwards the user's own hooks so a usage tracker or notifier keeps
+// working, but never their plugins — a plugin's SessionStart hook injecting
+// cross-project memory is why --setting-sources project exists. And the two
+// session-lifecycle events are dropped because the panel spawns one process per
+// TURN: keeping them would record a whole "session" per message typed.
+{
+  const userSettings = {
+    enabledPlugins: { "claude-mem@thedotmack": true },
+    hooks: {
+      SessionStart: [{ hooks: [{ type: "command", command: "session-track-start" }] }],
+      SessionEnd: [{ hooks: [{ type: "command", command: "session-end" }] }],
+      Stop: [{ hooks: [{ type: "command", command: "usage-refresh" }] }],
+      PostToolUse: [{ hooks: [{ type: "command", command: "send-hook" }] }],
+      UserPromptSubmit: [{ hooks: [{ type: "command", command: "send-hook" }] }],
+    },
+  };
+  const forwarded = panelHooksFrom(userSettings);
+  check("forwards Stop, where a usage tracker reads the turn's tokens", !!forwarded.hooks.Stop);
+  check("forwards PostToolUse and UserPromptSubmit", !!forwarded.hooks.PostToolUse && !!forwarded.hooks.UserPromptSubmit);
+  check("drops SessionStart (would fire once per message, not per session)", !forwarded.hooks.SessionStart);
+  check("drops SessionEnd for the same reason", !forwarded.hooks.SessionEnd);
+  check("never forwards enabledPlugins", !("enabledPlugins" in forwarded), JSON.stringify(Object.keys(forwarded)));
+  check("no hooks at all means no settings file", panelHooksFrom({ enabledPlugins: {} }) === null);
+  check("unreadable/absent user settings is not an error", panelHooksFrom(null) === null);
+  check(
+    "an empty event array does not produce an empty hook entry",
+    panelHooksFrom({ hooks: { Stop: [] } }) === null,
+    JSON.stringify(panelHooksFrom({ hooks: { Stop: [] } })),
+  );
+}
+
+// End to end through buildArgs: the flag reaches argv, and the file it points
+// at holds the filtered hooks and nothing else.
+{
+  const settingsFixture = join(workdir, "user-settings.json");
+  writeFileSync(settingsFixture, JSON.stringify({
+    enabledPlugins: { "claude-mem@thedotmack": true },
+    hooks: {
+      SessionStart: [{ hooks: [{ type: "command", command: "session-track-start" }] }],
+      Stop: [{ hooks: [{ type: "command", command: "usage-refresh" }] }],
+    },
+  }));
+  const session = new AgentSession({
+    sessionId: "44444444-5555-6666-7777-888888888888",
+    mcpUrl: "http://127.0.0.1:8787/mcp",
+    token: "tok3ntok3n",
+    allowedTools: "mcp__chrome",
+    cwd: workdir,
+    claudeBin: process.execPath,
+    userSettingsPath: settingsFixture,
+    onEvent: () => {},
+    log: () => {},
+  });
+  const args = session.buildArgs();
+  const idx = args.indexOf("--settings");
+  check("--settings reaches argv when the user has hooks", idx !== -1, JSON.stringify(args));
+  const written = JSON.parse(readFileSync(args[idx + 1], "utf8"));
+  check("the file carries Stop", !!written.hooks.Stop, JSON.stringify(written));
+  check("the file drops SessionStart", !written.hooks.SessionStart, JSON.stringify(written));
+  check("the file carries no plugins", !("enabledPlugins" in written), JSON.stringify(Object.keys(written)));
+  session.dispose();
+  check("dispose() removes the settings file too", !existsSync(args[idx + 1]), args[idx + 1]);
+
+  // A machine with no hooks configured must not get the flag at all.
+  const bare = join(workdir, "bare-settings.json");
+  writeFileSync(bare, JSON.stringify({ model: "opus" }));
+  const plain = new AgentSession({
+    sessionId: "55555555-6666-7777-8888-999999999999",
+    mcpUrl: "http://127.0.0.1:8787/mcp",
+    token: "tok3ntok3n",
+    allowedTools: "mcp__chrome",
+    cwd: workdir,
+    claudeBin: process.execPath,
+    userSettingsPath: bare,
+    onEvent: () => {},
+    log: () => {},
+  });
+  check("no --settings when the user configured no hooks", !plain.buildArgs().includes("--settings"), JSON.stringify(plain.buildArgs()));
+  plain.dispose();
 }
 
 rmSync(workdir, { recursive: true, force: true });
