@@ -56,7 +56,7 @@ const REQUEST_TIMEOUT_MS = Number(process.env.CC_CHROME_TIMEOUT_MS || 45000);
 // CC_CHROME_SESSION_TTL_MS.
 const graceFromEnv = Number(process.env.CC_CHROME_RECONNECT_GRACE_MS);
 const RECONNECT_GRACE_MS = Number.isFinite(graceFromEnv) && graceFromEnv >= 0 ? graceFromEnv : 25000;
-const VERSION = "1.0.1";
+const VERSION = "1.0.2";
 
 // The panel spawns `claude` on this host with the team's logged-in account, so
 // it exists only on a bridge nobody else can reach. A public deployment keeps

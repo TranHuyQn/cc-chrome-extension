@@ -225,17 +225,28 @@ check(
 const appleDoubleEntries = rawMembers.filter((e) => /(^|\/)\._/.test(e));
 check("no AppleDouble (._*) junk entries", appleDoubleEntries.length === 0, appleDoubleEntries.slice(0, 10).join(", "));
 
-// fs.cpSync resolves symlinks via realpath instead of preserving their
-// literal target, which previously rewrote relative symlinks under
-// server/node_modules/.bin/ into absolute paths naming the builder's own
-// checkout — dangling and machine-specific on every other machine.
+// No symlinks AT ALL, which is stricter than the rule this replaces ("no
+// symlink with an absolute target") and for a harder reason. Windows' bundled
+// tar.exe cannot create a symlink without Developer Mode or elevation: it
+// fails the entry, then aborts the whole extraction with "Error exit delayed
+// from previous errors", and install.ps1 reports a broken release. One shim
+// (server/node_modules/.bin/node-which) was enough to make every Windows
+// install fail at the download step. build-release.mjs drops node_modules/.bin
+// for that reason; nothing in server/ ever executes those shims.
 const verboseListing = execFileSync("tar", ["-tvzf", tarPath], { encoding: "utf8" });
-const absoluteLinks = verboseListing
+const symlinkLines = verboseListing
   .split("\n")
-  .filter((line) => line.includes(" -> "))
-  .map((line) => line.split(" -> ")[1])
-  .filter((target) => target && target.startsWith("/"));
-check("no symlink in the tarball has an absolute target", absoluteLinks.length === 0, absoluteLinks.slice(0, 5).join(", "));
+  .filter((line) => line.includes(" -> "));
+check(
+  "the tarball contains no symlinks (Windows tar.exe cannot create them)",
+  symlinkLines.length === 0,
+  symlinkLines.slice(0, 5).join(" | "),
+);
+check(
+  "node_modules/.bin is not shipped",
+  ![...entries].some((e) => e.includes("node_modules/.bin")),
+  [...entries].filter((e) => e.includes("node_modules/.bin")).slice(0, 3).join(", "),
+);
 
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

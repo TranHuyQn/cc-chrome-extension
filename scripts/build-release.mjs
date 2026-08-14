@@ -48,6 +48,17 @@ for (const f of [
 }
 copyFileSync(join(root, ".claude", "commands", "ccchrome.md"), join(stage, "ccchrome.md"));
 
+// node_modules/.bin holds npm's CLI shims, and on this dependency tree exactly
+// one of them is a symlink (`node-which` -> ../which/bin/node-which). Windows'
+// bundled tar.exe cannot create a symlink without Developer Mode or elevation,
+// so it fails the whole extraction — "Can't create ... Invalid argument", then
+// "Error exit delayed from previous errors" — and install.ps1 correctly reports
+// a broken release. Nothing in server/ ever executes a .bin shim: the runtime
+// imports its three dependencies as modules. So the directory is dropped rather
+// than dereferenced, which also keeps the archive symlink-free by construction.
+// test/build.test.mjs asserts that.
+rmSync(join(stage, "server", "node_modules", ".bin"), { recursive: true, force: true });
+
 // -C stage so paths inside the archive are relative to the install root.
 // COPYFILE_DISABLE=1 stops macOS's bsdtar from adding a ._<name> AppleDouble
 // resource-fork entry for every real entry — otherwise the archive silently
