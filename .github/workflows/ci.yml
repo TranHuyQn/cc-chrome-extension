@@ -68,7 +68,6 @@ jobs:
       # excluded on purpose too: it runs `npm run build`, which needs key.pem —
       # gitignored, and regenerating it would change the extension id.
       - run: node test/agent-session.test.mjs
-      - run: node test/ratelimit.test.mjs
       - run: node test/session-ttl.test.mjs
       - run: node test/reconnect-grace.test.mjs
       - run: node test/panel-auth.test.mjs

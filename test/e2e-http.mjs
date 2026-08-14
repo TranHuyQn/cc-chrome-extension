@@ -81,7 +81,6 @@ await new Promise((r) => pageServer.listen(HTTP_PORT, "127.0.0.1", r));
 
 // --- start bridge server in http mode --------------------------------------
 
-const PAIR_SECRET = "team-pair-secret-0123456789";
 const stateFile = join(mkdtempSync(join(tmpdir(), "cc-bridge-state-")), "tokens.json");
 
 const serverProc = spawn("node", [join(root, "server", "index.js"), "--http"], {
@@ -90,10 +89,8 @@ const serverProc = spawn("node", [join(root, "server", "index.js"), "--http"], {
     CC_CHROME_PORT: String(MCP_PORT),
     CC_CHROME_HOST: "127.0.0.1",
     CC_CHROME_TOKENS: `${TOKEN_A}=alice,${TOKEN_B}=bob`,
-    CC_CHROME_PAIR_SECRET: PAIR_SECRET,
     CC_CHROME_STATE_FILE: stateFile,
     CC_CHROME_DIST_DIR: join(root, "dist"),
-    CC_CHROME_MAX_TOKENS: "2",
     // Tool calls now wait out a service-worker restart before failing (see
     // test/reconnect-grace.test.mjs). The checks below that expect a clean
     // "not connected" failure would otherwise each sit through the 25s default.
@@ -346,83 +343,6 @@ check(
   JSON.stringify({ raceTabs, listed: raceListed.tabs.map((t) => t.tabId) })
 );
 
-// --- self-service pairing (the /ccchrome connect flow) ----------------------
-
-res = await fetch(`http://127.0.0.1:${MCP_PORT}/pair`, {
-  method: "POST",
-  headers: { authorization: "Bearer wrong-secret-000000", "content-type": "application/json" },
-  body: JSON.stringify({ name: "mallory" }),
-});
-check("pair rejects bad secret", res.status === 401, `status=${res.status}`);
-
-res = await fetch(`http://127.0.0.1:${MCP_PORT}/pair`, {
-  method: "POST",
-  headers: { authorization: `Bearer ${PAIR_SECRET}`, "content-type": "application/json" },
-  body: JSON.stringify({ name: "carol" }),
-});
-const paired = await res.json();
-check("pair issues token", res.status === 200 && paired.token?.length === 32 && paired.name === "carol", JSON.stringify(paired));
-check("pair returns urls", paired.mcpUrl?.endsWith("/mcp") && paired.wsUrl?.includes(`token=${paired.token}`), JSON.stringify(paired));
-
-res = await fetch(`http://127.0.0.1:${MCP_PORT}/pair/status`, {
-  headers: { authorization: `Bearer ${paired.token}` },
-});
-let pairStatus = await res.json();
-check("pair/status before extension", res.status === 200 && pairStatus.extensionConnected === false, JSON.stringify(pairStatus));
-
-// Paired token works for MCP immediately.
-const clientC = await mcpConnect(paired.token);
-r = await clientC.callTool({ name: "chrome_status", arguments: {} });
-check("paired token isolated (no browser yet)", toolText(r).includes('"connected": false'), toolText(r).slice(0, 200));
-
-// Re-point the extension at the paired token (simulates carol's browser).
-await sw.evaluate(async (wsUrl) => {
-  await chrome.storage.local.set({ wsUrl });
-}, `ws://127.0.0.1:${MCP_PORT}/ws?token=${paired.token}`);
-await sw.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: "reconnect" }, resolve)));
-
-let pairedConnected = false;
-for (let i = 0; i < 40; i++) {
-  const s = await (await fetch(`http://127.0.0.1:${MCP_PORT}/pair/status`, {
-    headers: { authorization: `Bearer ${paired.token}` },
-  })).json();
-  if (s.extensionConnected) { pairedConnected = true; break; }
-  await sleep(500);
-}
-check("extension connects with paired token", pairedConnected);
-
-// carol's session has its own tab group, so it proves browser control by
-// opening a tab of its own and reading it back, not by inheriting alice's.
-r = await clientC.callTool({ name: "new_tab", arguments: { url: `http://127.0.0.1:${HTTP_PORT}/` } });
-check("paired token mở được tab", !r.isError && toolText(r).includes(`127.0.0.1:${HTTP_PORT}`), toolText(r).slice(0, 200));
-r = await clientC.callTool({ name: "get_page_text", arguments: {} });
-check("browser control via paired token", toolText(r).includes("Hello VPS Bridge"), toolText(r).slice(0, 200));
-
-// Revoke: token stops working everywhere.
-res = await fetch(`http://127.0.0.1:${MCP_PORT}/pair`, {
-  method: "DELETE",
-  headers: { authorization: `Bearer ${paired.token}` },
-});
-check("pair revoke", res.status === 200, `status=${res.status}`);
-res = await fetch(`http://127.0.0.1:${MCP_PORT}/pair/status`, {
-  headers: { authorization: `Bearer ${paired.token}` },
-});
-check("revoked token rejected", res.status === 401, `status=${res.status}`);
-let revokedErr = null;
-try {
-  await mcpConnect(paired.token);
-} catch (err) {
-  revokedErr = err;
-}
-check("revoked token cannot start MCP session", revokedErr !== null, String(revokedErr));
-
-// Static tokens cannot be revoked via the API.
-res = await fetch(`http://127.0.0.1:${MCP_PORT}/pair`, {
-  method: "DELETE",
-  headers: { authorization: `Bearer ${TOKEN_A}` },
-});
-check("static token revoke refused", res.status === 400, `status=${res.status}`);
-
 // --- websocket auth moved out of the URL ------------------------------------
 
 const base = `ws://127.0.0.1:${MCP_PORT}/ws`;
@@ -624,52 +544,6 @@ if (res.status === 404) {
     renameSync(distCcchromeHidden, distCcchrome);
   }
 }
-
-// --- pairing abuse limits ---------------------------------------------------
-
-// Dynamic tokens are capped so a leaked secret cannot be turned into an
-// unbounded token factory. carol's token was revoked above, so the store is
-// empty again and the cap of 2 applies cleanly from here.
-async function pairAs(name) {
-  return await fetch(`http://127.0.0.1:${MCP_PORT}/pair`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${PAIR_SECRET}`, "content-type": "application/json" },
-    body: JSON.stringify({ name }),
-  });
-}
-check("pair below the cap succeeds", (await pairAs("cap-one")).status === 200);
-check("pair at the cap succeeds", (await pairAs("cap-two")).status === 200);
-// 503, not 429: the cap will not clear by waiting, so it must be
-// distinguishable from the rate limit below (which does carry Retry-After).
-const overCap = await pairAs("cap-three");
-check("pair beyond CC_CHROME_MAX_TOKENS is refused with 503", overCap.status === 503, `status=${overCap.status}`);
-check("token-cap refusal has no Retry-After", !overCap.headers.get("retry-after"), `retry-after=${overCap.headers.get("retry-after")}`);
-check(
-  "token-cap message names CC_CHROME_MAX_TOKENS",
-  ((await overCap.json()).error || "").includes("CC_CHROME_MAX_TOKENS"),
-  "expected the error to name the env var"
-);
-
-// The pairing secret is the one value a human chooses, so it is the one worth
-// throttling. Tokens are 128-bit random and not worth guessing.
-const attemptStatuses = [];
-let sawRateLimit = false;
-let retryAfter = null;
-for (let i = 0; i < 14; i++) {
-  const attempt = await fetch(`http://127.0.0.1:${MCP_PORT}/pair`, {
-    method: "POST",
-    headers: { authorization: "Bearer wrong-secret-000000", "content-type": "application/json" },
-    body: "{}",
-  });
-  attemptStatuses.push(attempt.status);
-  if (attempt.status === 429) {
-    sawRateLimit = true;
-    retryAfter = attempt.headers.get("retry-after");
-    break;
-  }
-}
-check("repeated bad pairing secrets get rate limited", sawRateLimit, attemptStatuses.join(","));
-check("rate limited response carries Retry-After", !!retryAfter && Number(retryAfter) > 0, `retry-after=${retryAfter}`);
 
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 

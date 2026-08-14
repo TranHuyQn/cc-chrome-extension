@@ -12,9 +12,10 @@ One runtime mode: `mainHttp()` in `server/index.js` runs an HTTP + WebSocket ser
 `127.0.0.1` by default (port `8787`), that every Claude Code session and the extension both talk to.
 There is no `mainStdio()` — stdio mode (single process on stdout, no auth) was removed before 1.0.0. The
 distribution model changed with it: `scripts/install.sh` installs a per-user background service (see
-"Setup and commands" below) instead of everyone pointing at one shared server; `deploy/` still runs
-the old shared-server shape for anyone who deliberately wants it (see the warning at the top of
-`deploy/chrome-bridge.service`).
+"Setup and commands" below) instead of everyone pointing at one shared server. The shared-server shape
+is **gone**, not deprecated — `deploy/`, the Cloudflare tunnel doc, `POST /pair` and every dynamic
+token went with it in 1.0.0. `TokenStore` now only reads tokens configured up front, which for a normal
+install is the one token `install.sh` writes to `tokens.json`.
 
 ## Setup and commands
 
@@ -176,17 +177,10 @@ attached them.
   too, so it must never reset the reconnect backoff or flip the badge to
   `connected` — only the first message actually received from the server proves
   a socket. Refusal codes jump the backoff straight to `RECONNECT_MAX_MS`.
-- `POST /pair` is rate limited per IP. `X-Forwarded-For` (and `-Proto`/`-Host`)
-  are honored only when `CC_CHROME_TRUST_PROXY=1`, otherwise a forged header
-  would bypass the limiter. `clientIp()` reads the **rightmost** entry — the one
-  the adjacent trusted proxy appended; nginx appends, so the leftmost entry is
-  attacker-controlled.
-- `/pair` distinguishes its two refusals: 429 + `Retry-After` for the rate limit
-  (waiting helps), 503 for the `CC_CHROME_MAX_TOKENS` cap (waiting does not).
-- Tokens ≥ 8 chars, pair secret ≥ 12 — the server rejects weaker values on
-  purpose. Dynamic tokens are capped by `CC_CHROME_MAX_TOKENS`.
-- The deploy path assumes TLS terminates at Caddy (`deploy/`); port 8787 is
-  never exposed directly.
+- Tokens are ≥ 8 chars; the server exits rather than run with a weaker one.
+  There is no way to mint a token at runtime — no `/pair`, no dynamic store —
+  so the only credentials that exist are the ones already in `tokens.json` or
+  `CC_CHROME_TOKENS`.
 - Every tool reaches its tab through `resolveTab(params)` in `extension/background.js`, which calls
   `resolveTabInGroup(params)` — that is the **only** place the in-group restriction is enforced: a
   tab id outside the caller's session group is refused, and a call with no tab id resolves to (or
@@ -205,10 +199,11 @@ attached them.
   by `server/loopback.js`): `HOST` is loopback, **and** `req.socket.remoteAddress`
   is loopback (IPv4-mapped `::ffff:127.0.0.1` included), **and** the upgrade
   carries no `X-Forwarded-For`/`-Proto`/`-Host`. A `HOST`-only check is not
-  enough and this repo ships the counterexample: `deploy/chrome-bridge.service`
-  sets `CC_CHROME_HOST=127.0.0.1` *because* a TLS reverse proxy sits in front of
-  it, so a bind-address gate would declare that VPS private and let anyone with
-  a token spawn `claude` on it under the host's logged-in account. A proxy's own
+  enough, and the counterexample is concrete even though this repo no longer
+  ships that deployment: a bridge set to `CC_CHROME_HOST=127.0.0.1` *because* a
+  TLS reverse proxy sits in front of it would be declared private by a
+  bind-address gate, letting anyone with a token spawn `claude` on that host
+  under its logged-in account. A proxy's own
   peer address is loopback too, which is why the forwarded headers are checked
   by presence. Deliberately **not** overridable by an env var — a switch that
   re-enables this is a switch someone will flip. `/ws` is unaffected: the

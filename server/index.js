@@ -19,14 +19,13 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { WebSocketServer } from "ws";
 import { createServer } from "node:http";
-import { randomUUID, randomBytes, timingSafeEqual } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { readFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { TokenStore } from "./tokens.js";
-import { RateLimiter, clientIp } from "./ratelimit.js";
 import { AgentSession, claudeBinFromEnv } from "./agent.js";
 import { isLoopbackHost, isLoopbackAddress, forwardedHeadersIn } from "./loopback.js";
 
@@ -645,35 +644,18 @@ function buildMcpServer(getBridge, getBridgeNow, statusExtra = {}, sessionRef = 
 }
 
 // ---------------------------------------------------------------------------
-// http mode (VPS, multi user)
+// http mode
 // ---------------------------------------------------------------------------
 
 async function mainHttp() {
   const tokens = new TokenStore(log);
-  if (tokens.size === 0 && !tokens.pairSecret) {
-    log("FATAL: http mode requires auth. Set CC_CHROME_TOKENS=\"<token>=<name>,...\" (static tokens),");
-    log("and/or CC_CHROME_PAIR_SECRET=<secret> to enable self-service pairing via POST /pair (/ccchrome connect).");
-    log("Generate strong values with: openssl rand -hex 16");
+  if (tokens.size === 0) {
+    log("FATAL: http mode requires auth. Set CC_CHROME_TOKENS=\"<token>=<name>,...\", or point");
+    log("CC_CHROME_TOKENS_FILE at the tokens.json the installer writes.");
+    log("Generate a strong value with: openssl rand -hex 16");
     process.exit(1);
   }
-  if (tokens.size) log(`Loaded ${tokens.size} token(s): ${tokens.names().join(", ")}`);
-  log(tokens.pairSecret
-    ? `Self-service pairing ENABLED (POST /pair). Dynamic tokens persist in ${tokens.stateFile}`
-    : "Self-service pairing disabled (set CC_CHROME_PAIR_SECRET to enable /ccchrome connect)");
-
-  const TRUST_PROXY = process.env.CC_CHROME_TRUST_PROXY === "1";
-  // A typo here used to become NaN, and `dynamicSize >= NaN` is always false —
-  // the cap disappeared silently. Same guard as CC_CHROME_SESSION_TTL_MS below.
-  const maxTokensFromEnv = Number(process.env.CC_CHROME_MAX_TOKENS);
-  if (process.env.CC_CHROME_MAX_TOKENS !== undefined && !(Number.isFinite(maxTokensFromEnv) && maxTokensFromEnv > 0)) {
-    log(`Ignoring invalid CC_CHROME_MAX_TOKENS=${JSON.stringify(process.env.CC_CHROME_MAX_TOKENS)}; must be a positive number. Using the default.`);
-  }
-  const MAX_TOKENS = Number.isFinite(maxTokensFromEnv) && maxTokensFromEnv > 0 ? maxTokensFromEnv : 100;
-  const pairLimiter = new RateLimiter({ limit: 10, windowMs: 15 * 60 * 1000 });
-  if (tokens.pairSecret && !TRUST_PROXY) {
-    log("Note: CC_CHROME_TRUST_PROXY is not set, so /pair rate limiting keys on the socket address.");
-    log("      Behind a reverse proxy that is the proxy itself — set CC_CHROME_TRUST_PROXY=1 there.");
-  }
+  log(`Loaded ${tokens.size} token(s): ${tokens.names().join(", ")}`);
 
   const ttlFromEnv = Number(process.env.CC_CHROME_SESSION_TTL_MS);
   if (process.env.CC_CHROME_SESSION_TTL_MS !== undefined && !(Number.isFinite(ttlFromEnv) && ttlFromEnv > 0)) {
@@ -702,32 +684,6 @@ async function mainHttp() {
   const authToken = (req) => {
     const token = bearerOf(req);
     return token && tokens.has(token) ? token : null;
-  };
-
-  const isPairSecret = (value) => {
-    if (!tokens.pairSecret || !value) return false;
-    const a = Buffer.from(value);
-    const b = Buffer.from(tokens.pairSecret);
-    return a.length === b.length && timingSafeEqual(a, b);
-  };
-
-  // Public URLs as seen by clients. x-forwarded-proto/-host are client-supplied
-  // exactly like x-forwarded-for, so they are honored under the same flag —
-  // otherwise anyone reaching this process directly could steer the URLs handed
-  // back by /pair (and printed by /ccchrome connect) at a host of their choice.
-  const firstHop = (value) => (value ? String(value).split(",")[0].trim() : "");
-  const publicOrigin = (req) => {
-    const proto = (TRUST_PROXY && firstHop(req.headers["x-forwarded-proto"])) || "http";
-    const host = (TRUST_PROXY && firstHop(req.headers["x-forwarded-host"])) || req.headers.host || `localhost:${PORT}`;
-    return { proto, host, base: `${proto}://${host}` };
-  };
-  const publicUrls = (req, token) => {
-    const { proto, host, base } = publicOrigin(req);
-    const wsProto = proto === "https" ? "wss" : "ws";
-    return {
-      mcpUrl: `${base}/mcp`,
-      wsUrl: `${wsProto}://${host}/ws?token=${token}`,
-    };
   };
 
   const json = (res, code, body) => {
@@ -802,65 +758,6 @@ async function mainHttp() {
         "cache-control": "no-store",
       });
       return res.end(body);
-    }
-
-    // --- self-service pairing (used by the /ccchrome slash command) ---------
-
-    if (url.pathname === "/pair" && req.method === "POST") {
-      if (!tokens.pairSecret) return json(res, 404, { error: "pairing disabled on this server (CC_CHROME_PAIR_SECRET not set)" });
-
-      const ip = clientIp(req, TRUST_PROXY);
-      const wait = pairLimiter.retryAfter(ip);
-      if (wait > 0) {
-        res.setHeader("retry-after", String(wait));
-        return json(res, 429, { error: `too many failed pairing attempts; retry in ${wait}s` });
-      }
-      if (!isPairSecret(bearerOf(req))) {
-        pairLimiter.fail(ip);
-        log(`Failed pairing attempt from ${ip}`);
-        return json(res, 401, { error: "bad pairing secret. Send 'Authorization: Bearer <CC_CHROME_PAIR_SECRET>'." });
-      }
-      pairLimiter.reset(ip);
-
-      // 503, not 429: the rate limit above says "wait and retry" and carries
-      // Retry-After, while this says "the server is full until a human acts".
-      // Returning 429 for both left the client unable to tell them apart.
-      if (tokens.dynamicSize >= MAX_TOKENS) {
-        return json(res, 503, { error: `token limit reached (${MAX_TOKENS} dynamic tokens, CC_CHROME_MAX_TOKENS); waiting will not help — ask the admin to revoke unused tokens or raise CC_CHROME_MAX_TOKENS` });
-      }
-
-      let body = {};
-      try {
-        body = (await readBody(req)) || {};
-      } catch {
-        return json(res, 400, { error: "invalid JSON body" });
-      }
-      const name = String(body.name || "").trim().slice(0, 40) || `user-${randomBytes(2).toString("hex")}`;
-      const token = tokens.pair(name);
-      return json(res, 200, { token, name, ...publicUrls(req, token) });
-    }
-
-    if (url.pathname === "/pair/status" && req.method === "GET") {
-      const token = authToken(req);
-      if (!token) return json(res, 401, { error: "unauthorized" });
-      return json(res, 200, {
-        name: tokens.get(token),
-        extensionConnected: !!registry.get(token),
-        ...publicUrls(req, token),
-      });
-    }
-
-    if (url.pathname === "/pair" && req.method === "DELETE") {
-      const token = authToken(req);
-      if (!token) return json(res, 401, { error: "unauthorized" });
-      try {
-        const conn = registry.get(token);
-        if (conn) try { conn.socket.close(4001, "token revoked"); } catch {}
-        tokens.revoke(token);
-        return json(res, 200, { revoked: true });
-      } catch (err) {
-        return json(res, 400, { error: err.message });
-      }
     }
 
     // --- MCP endpoint --------------------------------------------------------
@@ -1285,7 +1182,6 @@ async function mainHttp() {
       log(`  Claude Code:  claude mcp add --transport http chrome https://<domain>/mcp --header "Authorization: Bearer <token>"`);
       log(`  Extension:    wss://<domain>/ws?token=<token>  (set in the extension popup)`);
       log(`  Health:       GET /health`);
-      if (tokens.pairSecret) log(`  Pairing:      POST /pair, GET /pair/status, DELETE /pair`);
       log(`  Downloads:    GET /extension.zip, GET /extension.crx, GET /ccchrome.md (if dist/ is built)`);
     }
   });

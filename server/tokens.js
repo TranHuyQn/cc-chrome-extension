@@ -1,21 +1,20 @@
-// Token storage for http mode: static tokens configured by the admin, plus
-// dynamic tokens issued on demand by the self-service /pair endpoint.
+// Token storage for the bridge. One shape only: tokens configured up front,
+// which for a normal install means the single token the installer generates
+// and writes to ~/.cc-chrome-bridge/tokens.json.
 //
 //   CC_CHROME_TOKENS:      "token1=alice,token2=bob"  (name optional)
 //   CC_CHROME_TOKENS_FILE: path to a JSON file { "token1": "alice", ... }
-//   CC_CHROME_PAIR_SECRET: team secret; enables POST /pair
-//   CC_CHROME_STATE_FILE:  where dynamic tokens are persisted
+//
+// There is no self-service pairing and no dynamic token issuance. Both existed
+// for the shared-server deployment this project no longer has: every user runs
+// their own bridge on loopback, so there is nobody to pair with.
 
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 export class TokenStore {
   constructor(log) {
     this.log = log;
     this.static = new Map();
-    this.dynamic = new Map();
-    this.pairSecret = process.env.CC_CHROME_PAIR_SECRET || null;
-    this.stateFile = process.env.CC_CHROME_STATE_FILE || "./ccchrome-tokens.json";
 
     if (process.env.CC_CHROME_TOKENS_FILE) {
       const parsed = JSON.parse(readFileSync(process.env.CC_CHROME_TOKENS_FILE, "utf8"));
@@ -36,63 +35,21 @@ export class TokenStore {
         process.exit(1);
       }
     }
-    if (this.pairSecret && this.pairSecret.length < 12) {
-      log("FATAL: CC_CHROME_PAIR_SECRET must be at least 12 chars. Generate one with: openssl rand -hex 16");
-      process.exit(1);
-    }
-    if (this.pairSecret && existsSync(this.stateFile)) {
-      try {
-        const parsed = JSON.parse(readFileSync(this.stateFile, "utf8"));
-        for (const [token, name] of Object.entries(parsed)) this.dynamic.set(token, String(name));
-        if (this.dynamic.size) log(`Restored ${this.dynamic.size} paired token(s) from ${this.stateFile}`);
-      } catch (err) {
-        log(`WARNING: could not read state file ${this.stateFile}: ${err.message}`);
-      }
-    }
   }
 
   get size() {
-    return this.static.size + this.dynamic.size;
-  }
-
-  get dynamicSize() {
-    return this.dynamic.size;
+    return this.static.size;
   }
 
   has(token) {
-    return this.static.has(token) || this.dynamic.has(token);
+    return this.static.has(token);
   }
 
   get(token) {
-    return this.static.get(token) ?? this.dynamic.get(token);
+    return this.static.get(token);
   }
 
   names() {
-    return [...this.static.values(), ...this.dynamic.values()];
-  }
-
-  persist() {
-    try {
-      writeFileSync(this.stateFile, JSON.stringify(Object.fromEntries(this.dynamic), null, 2));
-    } catch (err) {
-      this.log(`WARNING: could not persist tokens to ${this.stateFile}: ${err.message}`);
-    }
-  }
-
-  pair(name) {
-    const token = randomBytes(16).toString("hex");
-    this.dynamic.set(token, name);
-    this.persist();
-    this.log(`Paired new token for '${name}' (${this.dynamic.size} dynamic token(s) total)`);
-    return token;
-  }
-
-  revoke(token) {
-    if (this.static.has(token)) {
-      throw new Error("This token is configured statically (CC_CHROME_TOKENS); remove it from the server config instead.");
-    }
-    const existed = this.dynamic.delete(token);
-    if (existed) this.persist();
-    return existed;
+    return [...this.static.values()];
   }
 }

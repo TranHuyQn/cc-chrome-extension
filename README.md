@@ -9,11 +9,9 @@ Extension thay thế cho **Claude in Chrome** chính thức, dành cho team dùn
 > Cách cài: **mỗi người tự chạy bridge trên máy mình**, cài bằng một lệnh
 > (`curl … | bash` trên macOS/Linux, `irm … | iex` trên Windows — xem
 > [Cài đặt](#cài-đặt)), chạy như một dịch vụ nền tự khởi động lại cùng máy,
-> không phụ thuộc việc `claude` có đang chạy hay không. Mô hình server dùng
-> chung (VPS, pairing secret, `/ccchrome connect`) vẫn còn trong code cho ai
-> cố tình muốn dùng (xem [Triển khai lên VPS](#triển-khai-lên-vps-cho-cả-team)),
-> nhưng không phải đường mặc định và slash command `/ccchrome` không hỗ trợ
-> pairing qua đó. Hai điều cần biết:
+> không phụ thuộc việc `claude` có đang chạy hay không. **Không còn mô hình
+> server dùng chung**: không VPS, không tên miền, không pairing secret — mọi
+> thứ chạy trên `127.0.0.1` của chính máy bạn. Hai điều cần biết:
 > - `navigate` giờ **từ chối** đưa tab tới `chrome:`, `chrome-extension:`,
 >   `devtools:`, `edge:` hay `about:` khác `about:blank` — trước đây có thể
 >   đỗ một tab ở `chrome://...`, giờ thì không.
@@ -39,16 +37,7 @@ Claude Code ──(MCP / Streamable HTTP + Bearer token, 127.0.0.1)──► MCP
 - **`extension/`** — Chrome extension (Manifest V3). Service worker kết nối tới MCP server qua WebSocket `ws://127.0.0.1:8787/ws`, tự động reconnect, và thực thi các lệnh điều khiển browser.
 - **`server/`** — MCP server (Node.js ≥ 18), chạy như một **dịch vụ nền** (LaunchAgent trên macOS, `systemd --user` trên Linux) chứ không phải tiến trình con của `claude` — cài bởi `scripts/install.sh`, tự khởi động lại cùng máy. Claude Code nói chuyện với nó qua MCP Streamable HTTP kèm Bearer token, cùng cổng mà extension nối WebSocket vào; mỗi tool call được chuyển tiếp tới extension và trả kết quả về.
 
-Bridge chỉ nghe trên `127.0.0.1` theo mặc định — không có dữ liệu nào gửi ra ngoài, không cần tài khoản Anthropic trong browser. (Chạy kiểu VPS dùng chung thì khác: server bind `0.0.0.0` để reverse proxy tới được — đọc kỹ [Lưu ý bảo mật](#lưu-ý-bảo-mật).)
-
-Mô hình server dùng chung (VPS, cũ, không còn là mặc định) chạy song song cho cả team trên một server duy nhất (xem [Triển khai lên VPS](#triển-khai-lên-vps-cho-cả-team)):
-
-```
-Claude Code (mỗi người) ──(MCP / Streamable HTTP + Bearer token)──► MCP server trên VPS
-Chrome Extension (mỗi người) ──(wss://vps/ws?token=...)────────────────────┘
-```
-
-Server ghép cặp theo **token**: lệnh từ Claude Code của ai điều khiển đúng Chrome của người đó. Chrome vẫn chạy trên máy từng người — VPS chỉ host phần trung gian.
+Bridge chỉ nghe trên `127.0.0.1` — không có dữ liệu nào gửi ra ngoài, không cần tài khoản Anthropic trong browser, và không có gì để lộ ra mạng. Mỗi người chạy bridge của riêng mình; không có máy chủ trung gian nào cho cả team.
 
 ## Cài đặt
 
@@ -285,8 +274,7 @@ mục Cài đặt), rồi bấm icon extension → **Mở khung chat**.
 
 Khung chat **chỉ bật khi bridge bind đúng `127.0.0.1`** — đây là chủ đích chứ
 không phải giới hạn tạm thời, xem [Lưu ý bảo mật](#lưu-ý-bảo-mật). Nếu bạn tự
-đặt `CC_CHROME_HOST` khác `127.0.0.1`/`::1` (ví dụ chạy tay theo mô hình VPS ở
-dưới), khung chat tắt hẳn — không có cờ nào bật lại được, xem mục "Khung chat
+đặt `CC_CHROME_HOST` khác `127.0.0.1`/`::1` khi chạy tay, khung chat tắt hẳn — không có cờ nào bật lại được, xem mục "Khung chat
 không làm được gì".
 
 ### Khung chat không làm được gì
@@ -323,20 +311,18 @@ Nói thẳng để khỏi hiểu nhầm:
   nối lại (hay restart bridge) không làm mất nhóm tab: khung chat nhớ và khai
   báo lại đúng nhóm cũ.
 - **Chỉ chạy được với bridge chạy trên chính máy bạn** — đúng như bridge cài
-  bằng `install.sh` mặc định, nhưng tắt hẳn nếu bạn tự chỉnh nó chạy kiểu VPS.
-  Server từ chối `/panel` (đóng socket với mã 4004) trừ
+  bằng `install.sh` mặc định. Server từ chối `/panel` (đóng socket với mã 4004) trừ
   khi **cả ba** điều kiện cùng đúng: (1) bridge bind loopback
   (`127.0.0.1`/`::1`), (2) kết nối đến từ chính máy đó — địa chỉ peer của
   socket là loopback, (3) request **không** mang header `X-Forwarded-For`,
   `X-Forwarded-Proto` hay `X-Forwarded-Host` nào. Có header đó nghĩa là có
   reverse proxy đứng trước, mà proxy thì đứng ra kết nối hộ người khác — địa
   chỉ peer lúc đó là của proxy (loopback) chứ không phải của người gọi thật.
-  Đúng cấu hình VPS trong `deploy/` rơi vào trường hợp này: unit systemd đặt
-  `CC_CHROME_HOST=127.0.0.1` **vì** có Caddy/nginx terminate TLS phía trước,
-  nên bridge đó bind loopback nhưng vẫn **không** bật khung chat — và đó là
-  chủ đích, vì sau `/panel` là một tiến trình `claude` chạy trên host bằng tài
-  khoản đang đăng nhập ở đó. Không có biến môi trường nào bật lại được: cái
-  công tắc nào bật được thì sẽ có người bật.
+  Nói cách khác: đặt bridge sau một reverse proxy terminate TLS thì nó bind
+  loopback nhưng vẫn **không** bật khung chat — và đó là chủ đích, vì sau
+  `/panel` là một tiến trình `claude` chạy trên máy đó bằng tài khoản đang
+  đăng nhập. Không có biến môi trường nào bật lại được: cái công tắc nào bật
+  được thì sẽ có người bật.
 
 ### Nếu khung chat mở chậm
 
@@ -361,108 +347,15 @@ gian — hiện chưa có gì tự dọn, tự xóa bằng tay nếu thấy phì
 Biến môi trường riêng cho khung chat: `CC_CHROME_PANEL_TOOLS` — xem bảng
 [Cấu hình](#cấu-hình).
 
-## Triển khai lên VPS cho cả team
-
-> ⚠️ **Mô hình cũ — không còn là mặc định.** Giờ mỗi người tự
-> cài bridge trên máy mình (xem [Cài đặt](#cài-đặt) ở trên) — không cần VPS,
-> không cần pairing secret nào cả. Mục này giữ lại cho ai **cố tình** muốn
-> chạy một server dùng chung cho cả team (ví dụ: máy cá nhân của member
-> không đủ mạnh, hoặc muốn quản lý token tập trung). Hai endpoint sinh
-> installer tự động (`GET /install.sh`, `GET /uninstall.sh`) đã bị xoá khỏi
-> server — chúng sinh script theo URL của server, nên với model VPS
-> giờ chỉ còn hợp cho việc dùng chung, những endpoint đó sẽ đưa nhầm người
-> dùng vào một kiến trúc không còn tồn tại. Slash command `/ccchrome` cũng
-> không còn `connect`/`disconnect`/`local` — dùng `curl` thẳng tới `/pair`
-> như hướng dẫn dưới đây.
-
-Chế độ `--http` cho phép cả team dùng chung **một** server: mỗi thành viên được cấp một token, Claude Code và extension của họ cùng dùng token đó để server ghép cặp đúng người — không ai điều khiển được browser của người khác.
-
-> **Deploy lên home server sau Cloudflare Tunnel?** Dùng hướng dẫn riêng:
-> [`docs/deploy-cloudflare-tunnel.md`](docs/deploy-cloudflare-tunnel.md). Setup đó
-> không cần Caddy (Cloudflare lo TLS) và không mở port nào ra internet, nên nó
-> dùng `deploy/cloudflare/docker-compose.yml` chứ không phải file compose dưới đây.
-
-### Trên VPS (Docker + Caddy, tự động HTTPS)
-
-```bash
-git clone <repo> && cd cc-chrome-extension/deploy
-
-# Sinh token cho từng thành viên
-openssl rand -hex 16   # chạy mỗi lần cho một người
-
-cat > .env <<'EOF'
-DOMAIN=chrome.example.com
-CC_CHROME_TOKENS=a1b2c3...=alice,d4e5f6...=bob
-EOF
-
-docker compose up -d --build
-curl https://chrome.example.com/health   # {"ok":true,...}
-```
-
-Yêu cầu: domain đã trỏ về IP VPS, mở port 80/443. Không muốn Docker thì dùng `deploy/chrome-bridge.service` (systemd) + Caddy/nginx làm TLS proxy — **bắt buộc có HTTPS/WSS**, đừng expose port 8787 trần ra internet.
-
-Sau khi build extension (`npm run build`), server VPS còn phục vụ file cài đặt tại `https://chrome.example.com/extension.zip` và `/extension.crx` (compose đã mount sẵn `dist/`) — thành viên mới chỉ cần một đường link.
-
-### Trên máy mỗi thành viên — tự lấy token qua `/pair`
-
-Không còn slash command lo việc này tự động — gọi thẳng API của server. Cần pairing secret do admin
-cấp (`CC_CHROME_PAIR_SECRET` trong `.env` ở trên):
-
-```bash
-curl -sS -X POST https://chrome.example.com/pair \
-  -H "Authorization: Bearer <pairing-secret-admin-cấp>" \
-  -H "content-type: application/json" \
-  -d '{"name": "<tên-của-bạn>"}'
-```
-
-Kết quả JSON gồm `token`, `mcpUrl`, `wsUrl`. Lỗi hay gặp: **401** secret sai; **404** server chưa bật
-pairing (`CC_CHROME_PAIR_SECRET` chưa đặt); **429** bị rate limit (đọc header `Retry-After`, chờ hết
-rồi thử lại); **503** server đã chạm trần `CC_CHROME_MAX_TOKENS` (chờ không hết — nhờ admin thu hồi
-token cũ hoặc nâng trần).
-
-Có token rồi, làm tiếp hai việc dưới ("cách thủ công"): cài extension, dán `wsUrl` vào popup, và đăng
-ký MCP server bằng `mcpUrl` + token. Kiểm tra đã nối chưa: `curl -sS -H "Authorization: Bearer <token>"
-https://chrome.example.com/pair/status` — đọc trường `extensionConnected`.
-
-Thu hồi token khi không dùng nữa: `curl -sS -X DELETE -H "Authorization: Bearer <token>"
-https://chrome.example.com/pair`.
-
-### Trên máy mỗi thành viên — cách thủ công
-
-1. Cài extension như hướng dẫn ở trên (Load unpacked)
-2. Bấm icon extension → đổi URL thành `wss://chrome.example.com/ws?token=<token-của-mình>` → **Lưu & kết nối lại** (badge chuyển `on` xanh)
-3. Đăng ký với Claude Code:
-
-```bash
-claude mcp add --scope user --transport http chrome \
-  https://chrome.example.com/mcp \
-  --header "Authorization: Bearer <token-của-mình>"
-```
-
-Một người mở nhiều phiên Claude Code cùng lúc vẫn ổn — tất cả phiên cùng token dùng chung browser của người đó.
-
-### Quản lý token
-
-- **Tự phục vụ**: đặt `CC_CHROME_PAIR_SECRET` trên server → thành viên tự lấy token bằng `POST /pair` (xem mục ngay trên); thu hồi bằng `DELETE /pair`.
-- **Thủ công**: sửa `CC_CHROME_TOKENS` trong `.env` rồi `docker compose up -d` (restart server).
-- Token dài tối thiểu 8 ký tự, pairing secret tối thiểu 12 (server từ chối giá trị yếu); nên dùng `openssl rand -hex 16`.
-- Có thể dùng file thay cho biến môi trường: `CC_CHROME_TOKENS_FILE=/path/tokens.json` với nội dung `{"<token>": "<tên>"}`.
-- `/pair` bị giới hạn 10 lần sai secret trong 15 phút cho mỗi IP; vượt thì trả **429 kèm `Retry-After`** (chờ hết giờ là dùng lại được). Nếu server đứng sau proxy mà quên đặt `CC_CHROME_TRUST_PROXY=1`, mọi người sẽ bị tính chung một IP (IP của proxy) — server có log cảnh báo lúc khởi động.
-- Chạm trần `CC_CHROME_MAX_TOKENS` là chuyện khác hẳn: `/pair` trả **503, không có `Retry-After`** — chờ bao lâu cũng không hết, phải nhờ admin thu hồi token cũ (`DELETE /pair`) hoặc nâng trần rồi restart.
-
 ## Cấu hình
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
 | `CC_CHROME_PORT` | `8787` | Port HTTP server (Streamable HTTP cho Claude Code + WebSocket cho extension đều đi qua cổng này). **Với dịch vụ nền cài bằng `install.sh`, đây KHÔNG phải biến đọc lúc chạy** — `install.sh` đọc `CC_CHROME_PORT` từ shell của bạn một lần, lúc cài, rồi ghi thẳng con số đó (literal, không phải tên biến) vào file dịch vụ (`scripts/service-unit.sh`). `export CC_CHROME_PORT=...` **sau khi** đã cài không đổi được cổng dịch vụ đang chạy — phải `export` giá trị mới rồi chạy lại lệnh cài ở mục [Cài đặt](#cài-đặt) (hoặc tự sửa file dịch vụ) để đổi cổng. |
-| `CC_CHROME_HOST` | `127.0.0.1` | Địa chỉ bind. **Với dịch vụ nền cài bằng `install.sh`, biến này không có tác dụng gì cả** — không như `CC_CHROME_PORT`, `install.sh` không đọc `CC_CHROME_HOST` từ môi trường: `scripts/service-unit.sh` ghi cứng `127.0.0.1` vào file dịch vụ, không tham số hoá. Đổi được host chỉ khi chạy `node server/index.js --http` tay (mô hình VPS ở dưới) hoặc tự sửa file dịch vụ. Quan trọng dù vậy vì `AGENT_ENABLED` (bật khung chat side panel) được tính thẳng từ giá trị host lúc chạy: bind khác `127.0.0.1`/`::1` sẽ **âm thầm tắt khung chat**, không có log cảnh báo riêng nào khác ngoài mục này. |
+| `CC_CHROME_HOST` | `127.0.0.1` | Địa chỉ bind. **Với dịch vụ nền cài bằng `install.sh`, biến này không có tác dụng gì cả** — không như `CC_CHROME_PORT`, `install.sh` không đọc `CC_CHROME_HOST` từ môi trường: `scripts/service-unit.sh` ghi cứng `127.0.0.1` vào file dịch vụ, không tham số hoá. Đổi được host chỉ khi chạy `node server/index.js --http` bằng tay hoặc tự sửa file dịch vụ. Quan trọng dù vậy vì `AGENT_ENABLED` (bật khung chat side panel) được tính thẳng từ giá trị host lúc chạy: bind khác `127.0.0.1`/`::1` sẽ **âm thầm tắt khung chat**, không có log cảnh báo riêng nào khác ngoài mục này. |
 | `CC_CHROME_TOKENS` | — | Token tĩnh: `token1=tên1,token2=tên2`. `install.sh` dùng `CC_CHROME_TOKENS_FILE` (dưới đây) thay vì biến này. |
 | `CC_CHROME_TOKENS_FILE` | — | Thay thế: file JSON `{"token": "tên"}`. `install.sh` ghi token do nó sinh vào `~/.cc-chrome-bridge/tokens.json` và trỏ dịch vụ nền vào đó. |
-| `CC_CHROME_PAIR_SECRET` | — | Bật pairing tự phục vụ (`POST /pair`) cho mô hình VPS dùng chung — xem [Triển khai lên VPS](#triển-khai-lên-vps-cho-cả-team). Cần ít nhất token tĩnh hoặc pair secret để chạy. |
-| `CC_CHROME_STATE_FILE` | `./ccchrome-tokens.json` | Nơi lưu bền vững token sinh động. |
 | `CC_CHROME_TIMEOUT_MS` | `45000` | Timeout mỗi lệnh gửi tới extension. |
-| `CC_CHROME_TRUST_PROXY` | — | Đặt `1` khi server đứng sau reverse proxy: rate-limit đọc IP thật từ `X-Forwarded-For` (**entry cuối cùng** — entry do proxy kề bên nối vào; các entry bên trái do client tự khai), và `/pair` mới tin `X-Forwarded-Proto`/`X-Forwarded-Host` khi dựng URL trả về. Không đặt thì dùng IP socket và host của chính request. Chỉ bật khi port 8787 không tới được từ đâu khác ngoài proxy đó. |
-| `CC_CHROME_MAX_TOKENS` | `100` | Trần số token động, chặn việc biến secret bị lộ thành máy phát token. Chạm trần thì `/pair` trả **503** (chờ không hết — admin phải thu hồi bớt hoặc nâng trần), khác với 429 của rate limit. Giá trị không phải số dương sẽ bị bỏ qua kèm log cảnh báo. |
 | `CC_CHROME_SESSION_TTL_MS` | `28800000` (8 tiếng) | Session MCP không hoạt động quá lâu sẽ bị đóng và dọn. |
 | `CC_CHROME_RECONNECT_GRACE_MS` | `25000` | Khi extension chưa kết nối, mỗi lệnh sẽ **chờ** ngần này rồi mới báo lỗi. Chrome huỷ service worker của extension khi cửa sổ Chrome nằm ở nền (đóng socket với mã 1001), alarm bật lại trong khoảng 30 giây — nhờ khoảng chờ này lệnh chỉ bị chậm thay vì hỏng. Phải nhỏ hơn `CC_CHROME_TIMEOUT_MS`. |
 | `CC_CHROME_PANEL_TOOLS` | `mcp__chrome` | Danh sách MCP tool (truyền thẳng vào cờ `--allowedTools` của Claude Code) mà agent trong khung chat side panel được phép gọi. Không liên quan đến cờ `--tools` — cờ đó bị khóa cứng về `""` để tắt hết tool dựng sẵn (đọc/ghi file...), biến này chỉ chọn trong số các MCP tool còn lại (mặc định chỉ nhóm `mcp__chrome`), không mở lại quyền file. Chỉ có tác dụng khi khung chat bật (xem [Khung chat](#khung-chat-side-panel)). |
@@ -474,7 +367,6 @@ Một người mở nhiều phiên Claude Code cùng lúc vẫn ổn — tất c
 
 - **Check origin làm được gì và không làm được gì.** Bridge **bắt buộc** handshake WebSocket phải có header `Origin: chrome-extension://…` (thiếu origin cũng bị từ chối). Việc này chặn được kết nối cross-origin phát sinh từ trong browser — một trang web bất kỳ mở `new WebSocket("ws://127.0.0.1:8787")` sẽ gửi origin `https://…` và bị từ chối — và nâng rào với client local nghiệp dư. Nhưng `Origin` là header do **client tự đặt**, không có gì bảo chứng: một process viết riêng cho việc này (script Node dùng `ws`, hay `curl`) chỉ cần gửi thêm một dòng header là qua được. Test `test/e2e-http.mjs` của chính repo này chứng minh điều đó — nó nối vào server bằng client `ws` thuần Node với origin giả và được chấp nhận như extension thật. **Đừng coi check origin là hàng rào chống được process local có chủ đích.**
 - **Bridge cài bằng `install.sh` chỉ nghe trên loopback (`127.0.0.1`) theo mặc định.** Máy khác trong LAN không tới được `/ws`/`/mcp`. Hàng rào thật với ai đang đứng trên chính máy bạn là **token** (`~/.ccchrome.json`), không phải bind address hay check origin ở trên — nói thẳng, mô hình đe dọa thực tế ở mức này là *"phần mềm khác đang chạy sẵn trên máy bạn"*, và biện pháp giảm thiểu thật sự là **dùng một Chrome profile riêng cho automation**, để dù có bị lợi dụng thì cũng không có tab nào đăng nhập tài khoản cá nhân trong đó.
-- **Ở mô hình VPS dùng chung (xem [Triển khai lên VPS](#triển-khai-lên-vps-cho-cả-team)), hàng rào thật cũng là token**, không phải check origin. Server bind `0.0.0.0` **có chủ ý** để reverse proxy (Caddy trong `deploy/`) tới được — nghĩa là `/ws` và `/mcp` sẽ tới được từ internet qua proxy đó. Vì vậy hai điều sau là **bắt buộc, không phải khuyến nghị**: (1) TLS phải terminate ở proxy, dùng `wss://`/`https://` — token đi trong subprotocol/header, để plaintext là lộ token trên đường truyền; (2) **đừng bao giờ expose port 8787 trần ra internet** (compose dùng `expose` chứ không `ports`; bản systemd đặt `CC_CHROME_HOST=127.0.0.1`) — 8787 lộ ra ngoài thì ai cũng tự đặt được `X-Forwarded-For` và rate limit của `/pair` mất tác dụng. Token bị lộ thì thu hồi bằng `DELETE /pair`.
 - **`navigate` và `javascript_eval` (cùng `press_key`, `type_text`, `upload_file`) đều từ chối trang của chính extension.** `navigate` không đưa được tab tới `chrome-extension://<id>/...` (hay `chrome:`, `devtools:`, `edge:`, `about:` khác `about:blank`); bốn tool còn lại từ chối chạy nếu tab lỡ đã nằm trên một trang như vậy. Trong các bản nội bộ trước 1.0.0, hai chốt này không tồn tại — một model có thể `navigate` một tab vào `chrome-extension://<id>/popup.html` rồi `javascript_eval` ngay trên đó, chạy trong realm đặc quyền của extension với `chrome.tabs.*` không giới hạn, phá vỡ hoàn toàn cách ly theo tab group. `take_screenshot` là ngoại lệ **có chủ đích**, không phải sót: chụp ảnh không sửa gì trên trang, còn bốn tool kia đều mutate.
 - `CC_CHROME_EXTENSION_ID=<id>` thu hẹp thêm (chỉ chấp nhận đúng một extension ID) nhưng **không đóng được lỗ trên** — origin vẫn là chuỗi do client tự khai, chỉ là phải đoán đúng thêm một ID. Và pin này **chỉ dùng được khi cả team cài bản `.crx` đã ký** (kéo thả trên Linux, hoặc enterprise policy trên Windows/macOS): cài kiểu **zip + Load unpacked** như hướng dẫn ở trên sinh ID **theo đường dẫn thư mục**, khác nhau trên máy từng người — đặt pin trong trường hợp đó sẽ khoá cả team ra ngoài.
 - Extension có quyền `<all_urls>` + `debugger` (giống extension gốc của Anthropic) — nhưng khác với bản gốc, mọi tool bị giới hạn trong tab group của phiên (xem [Nhóm tab theo phiên](#nhóm-tab-theo-phiên)): Claude chỉ thao tác được trên tab **đang nằm trong nhóm đó**, kể cả tab đã đăng nhập, chứ không phải mọi trang đang mở trong Chrome. Kéo một tab vào nhóm là tự tay cấp quyền đó cho nó. Khuyến nghị dùng một Chrome profile riêng cho automation nếu không muốn Claude đụng vào tài khoản cá nhân. Quyền `tabGroups` chỉ dùng để tạo/quản lý nhóm này, không mở rộng thêm gì Claude thấy được.
