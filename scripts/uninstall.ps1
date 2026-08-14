@@ -49,8 +49,11 @@ Say "Gỡ Claude Code Chrome Bridge"
 #    thật. Stop/Unregister đều nuốt lỗi, nên exit code của chúng không nói lên
 #    được điều gì — phải hỏi lại hệ thống.
 Say "→ Dừng dịch vụ nền…"
-Stop-CcTask -InstallDir $InstallDir
+# Unregister first, then kill. Stop-CcTask disables the task before killing for
+# the same reason, but removing it outright is stronger and this is the one
+# place where nothing needs the task afterwards.
 Unregister-CcTask
+Stop-CcTask -InstallDir $InstallDir
 if (Test-CcTaskLoaded) {
     Say "→ Cảnh báo: không xoá được scheduled task '$(Get-CcTaskName)'."
     Say "   Xoá tay trong Task Scheduler rồi chạy lại script này. Chưa xoá file nào cả."

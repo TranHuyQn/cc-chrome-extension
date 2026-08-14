@@ -242,11 +242,59 @@ check("uninstall removes the slash command", !existsSync(join(fakeHome, ".claude
 const un2 = ps(join(root, "scripts", "uninstall.ps1"));
 check("uninstall.ps1 is idempotent", un2.status === 0, `${un2.stdout}\n${un2.stderr}`);
 
+// ---------------------------------------------------------------------------
+// Phase 2: the real service. Everything above runs with CC_CHROME_SKIP_SERVICE,
+// so Register/Start/Stop/Unregister had never once executed here — and that is
+// exactly where the next defect was: the task carries a five-minute repetition
+// trigger, so killing the bridge while the task still exists lets Task
+// Scheduler start a fresh one, and the uninstall then finds a live server and
+// refuses to delete anything. Reported from a real machine; no amount of
+// SKIP_SERVICE testing could have reached it.
+// ---------------------------------------------------------------------------
+{
+  const envReal = { ...env };
+  delete envReal.CC_CHROME_SKIP_SERVICE;
+  const psReal = (file) =>
+    spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", file], {
+      env: envReal,
+      encoding: "utf8",
+    });
+
+  const install2 = psReal(join(root, "scripts", "install.ps1"));
+  check("real-service install exits 0", install2.status === 0, `${install2.stdout}\n${install2.stderr}`);
+
+  const taskState = () => {
+    const r = spawnSync("powershell.exe", ["-NoProfile", "-Command",
+      "(Get-ScheduledTask ccchrome-bridge -ErrorAction SilentlyContinue).State"], { encoding: "utf8" });
+    return (r.stdout || "").trim();
+  };
+  check("the scheduled task exists after a real install", taskState().length > 0, taskState());
+  // Running, not Ready: Ready means the launcher returned immediately and the
+  // task is not tracking the bridge at all, which breaks both the
+  // already-running check and restart-on-failure.
+  check("the task is Running, not Ready", taskState() === "Running", taskState());
+
+  let served = false;
+  for (let i = 0; i < 40 && !served; i++) {
+    served = bridgeUp();
+    if (!served) spawnSync("powershell.exe", ["-NoProfile", "-Command", "Start-Sleep -Milliseconds 500"]);
+  }
+  check("the real service actually serves /health", served, "no 200 from /health within 20s");
+
+  const un3 = psReal(join(installDir, "uninstall.ps1"));
+  check("uninstall of a real service exits 0", un3.status === 0, `${un3.stdout}\n${un3.stderr}`);
+  check("the scheduled task is gone", taskState().length === 0, taskState());
+  check("no bridge process survives the uninstall", countBridgeProcs() === 0, String(countBridgeProcs()));
+  check("the install dir is gone", !existsSync(join(installDir, "server")));
+}
+
 // Never leave a bridge behind on the runner if an assertion above failed.
 spawnSync("powershell.exe", ["-NoProfile", "-Command",
   "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | " +
   "Where-Object { $_.CommandLine -like '*cc-chrome-bridge*' } | " +
   "ForEach-Object { taskkill /pid $_.ProcessId /T /F }"]);
+spawnSync("powershell.exe", ["-NoProfile", "-Command",
+  "Unregister-ScheduledTask -TaskName ccchrome-bridge -Confirm:$false -ErrorAction SilentlyContinue"]);
 rmSync(fakeHome, { recursive: true, force: true });
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

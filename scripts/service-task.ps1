@@ -133,6 +133,16 @@ function Get-CcBridgeProcess {
 function Stop-CcTask {
     param([string]$InstallDir = (Join-Path $env:USERPROFILE '.cc-chrome-bridge'))
     if (Test-CcTaskLoaded) {
+        # Disabled BEFORE anything is killed, and this order is the whole point.
+        # The task carries a five-minute repetition trigger (its KeepAlive
+        # equivalent) plus -StartWhenAvailable, so a task that still exists
+        # simply starts a fresh bridge moments after taskkill removes the old
+        # one. Measured on a real machine: uninstall killed the process, found
+        # a NEW one alive a second later, and correctly refused to delete
+        # anything — while a second run, by then with the task already
+        # unregistered, killed it once and succeeded. Same code, different
+        # order of events.
+        Disable-ScheduledTask -TaskName (Get-CcTaskName) -ErrorAction SilentlyContinue | Out-Null
         Stop-ScheduledTask -TaskName (Get-CcTaskName) -ErrorAction SilentlyContinue
     }
     foreach ($proc in @(Get-CcBridgeProcess -InstallDir $InstallDir)) {
