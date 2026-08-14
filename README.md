@@ -68,12 +68,11 @@ powershell -ExecutionPolicy Bypass -File "$env:TEMP\install.ps1"
 > không có BOM. `-OutFile` ghi nguyên byte, `-File` đọc đúng — đó cũng là
 > đường CI kiểm mỗi lần push.
 
-> **Windows đã chạy thật trên máy thật** (Windows 11, PowerShell 5.1, 1.0.3): cài xong
-> **không cần quyền admin**, bridge tự lên và `/health` trả lời, extension nối được,
-> tool trình duyệt chạy, khung chat side panel trả lời được, và **sau khi khởi động lại
-> máy thì dịch vụ tự lên, extension nối lại bình thường** — tức scheduled task trigger
-> "At log on" làm đúng việc của nó. Còn **gỡ cài đặt** thì chưa ai chạy thật; nếu bạn
-> thử, báo lại giúp.
+> **Windows đã được nghiệm thu trọn vẹn trên máy thật** (Windows 11, PowerShell 5.1):
+> cài **không cần quyền admin**, bridge tự lên và `/health` trả lời, extension nối được,
+> tool trình duyệt chạy, khung chat side panel trả lời được, **khởi động lại máy thì dịch
+> vụ tự lên và extension nối lại**, và **gỡ cài đặt sạch trong một lần chạy** — task
+> biến mất, tiến trình về 0, cổng được trả lại. Cả ba nền tảng giờ đều đã chạy thật.
 
 Lệnh này tải và chạy thẳng một script từ GitHub Releases — biết vậy trước khi chạy. Muốn xem
 trước thì tách làm hai bước:
