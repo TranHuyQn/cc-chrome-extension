@@ -7,7 +7,7 @@ Extension thay thế cho **Claude in Chrome** chính thức, dành cho team dùn
 > chúng trên GitHub Releases.
 >
 > Cách cài: **mỗi người tự chạy bridge trên máy mình**, cài bằng một lệnh
-> (`curl … | bash` trên macOS/Linux, `irm … | iex` trên Windows — xem
+> (`curl … | bash` trên macOS/Linux, `irm … -OutFile` + `-File` trên Windows — xem
 > [Cài đặt](#cài-đặt)), chạy như một dịch vụ nền tự khởi động lại cùng máy,
 > không phụ thuộc việc `claude` có đang chạy hay không. **Không còn mô hình
 > server dùng chung**: không VPS, không tên miền, không pairing secret — mọi
@@ -68,13 +68,11 @@ powershell -ExecutionPolicy Bypass -File "$env:TEMP\install.ps1"
 > không có BOM. `-OutFile` ghi nguyên byte, `-File` đọc đúng — đó cũng là
 > đường CI kiểm mỗi lần push.
 
-> ⚠️ **Đường Windows chưa được nghiệm thu trên máy thật.** CI (`windows-latest`) chạy
-> trọn `install.ps1` và `uninstall.ps1` mỗi lần push và đang xanh, nhưng nó chạy với
-> `CC_CHROME_SKIP_SERVICE=1` — nghĩa là **ba thứ chưa ai kiểm**: đăng ký scheduled
-> task có cần nâng quyền không, có hiện cửa sổ console đen không, và task có thật sự
-> ở trạng thái `Running` không. Side panel chat trên Windows cũng chưa chạy thật lần
-> nào. macOS và Linux thì đã dùng thật. Nếu bạn là người thử Windows đầu tiên, báo lại
-> kết quả ba mục trên.
+> **Windows đã chạy thật trên máy thật** (Windows 11, PowerShell 5.1, 1.0.3): cài xong
+> **không cần quyền admin**, bridge tự lên và `/health` trả lời, extension nối được,
+> tool trình duyệt chạy, và khung chat side panel trả lời được. Hai thứ **chưa ai xác
+> nhận**: dịch vụ có tự lên lại sau khi **khởi động lại máy** không, và **gỡ cài đặt**
+> có sạch không. Nếu bạn thử, báo lại giúp.
 
 Lệnh này tải và chạy thẳng một script từ GitHub Releases — biết vậy trước khi chạy. Muốn xem
 trước thì tách làm hai bước:
@@ -120,6 +118,8 @@ dịch vụ nền (phần server).
 
 Không cần quyền root, không đụng gì ngoài thư mục home của bạn. Đầy đủ danh sách:
 
+**macOS / Linux** (`install.sh`):
+
 | Đường dẫn | Nội dung | Quyền |
 |---|---|---|
 | `~/.cc-chrome-bridge/` | `server/` (kèm `node_modules`), `extension/`, `logs/`, `tokens.json`, `uninstall.sh`, `service-unit.sh`, `ccchrome.md` | `700` |
@@ -127,6 +127,25 @@ Không cần quyền root, không đụng gì ngoài thư mục home của bạn
 | `~/Library/LaunchAgents/com.ccchrome.bridge.plist` (macOS)<br>`$XDG_CONFIG_HOME/systemd/user/ccchrome-bridge.service` (Linux) | file dịch vụ nền | |
 | `~/.claude/commands/ccchrome.md` | slash command `/ccchrome` | |
 | `~/.claude.json` | thêm MCP server tên `chrome` (qua `claude mcp add`) | |
+
+**Windows** (`install.ps1`) — cùng bố cục, khác chỗ để file dịch vụ và cách đặt quyền:
+
+| Đường dẫn | Nội dung |
+|---|---|
+| `%USERPROFILE%\.cc-chrome-bridge\` | `server\`, `extension\`, `logs\`, `tokens.json`, `uninstall.ps1`, `service-task.ps1`, `ccchrome.md`, cộng `bridge.cmd` và `bridge-launcher.vbs` |
+| `%USERPROFILE%\.ccchrome.json` | `{ "token": "…", "port": 8787 }` |
+| Scheduled task tên `ccchrome-bridge` | trigger **At log on**, chạy dưới chính tài khoản bạn, `RunLevel Limited` — **không cần quyền admin** |
+| `%USERPROFILE%\.claude\commands\ccchrome.md` | slash command `/ccchrome` |
+| `%USERPROFILE%\.claude.json` | thêm MCP server tên `chrome` |
+
+Windows không có `chmod`, nên hai file chứa token được siết bằng
+`icacls <file> /inheritance:r /grant:r "<bạn>:F"` — bỏ mọi ACE thừa kế rồi cấp lại
+đúng cho tài khoản bạn. Đó là thứ tương đương `chmod 600` ở đây.
+
+Hai file phụ chỉ Windows mới có: `bridge.cmd` giữ biến môi trường và chuyển hướng log
+(Task Scheduler không làm được hai việc đó), còn `bridge-launcher.vbs` là một dòng gọi
+`bridge.cmd` với cờ ẩn cửa sổ — nếu không thì `node.exe` để lại một cửa sổ console đen
+suốt phiên làm việc.
 
 Bảy bước, đúng thứ tự script chạy:
 
@@ -138,7 +157,17 @@ Bảy bước, đúng thứ tự script chạy:
 6. **Dựng file dịch vụ** với **đường dẫn tuyệt đối** tới `node` và `claude` (dịch vụ nền không có `PATH` của terminal), `CC_CHROME_HOST=127.0.0.1` ghi cứng, rồi nạp và chờ `/health` tối đa 20 giây.
 7. **Đăng ký MCP** với Claude Code và copy slash command.
 
-Gỡ sạch mọi thứ trên: `bash ~/.cc-chrome-bridge/uninstall.sh` (giữ lại `panel/` — lịch sử chat của bạn).
+Gỡ sạch mọi thứ trên:
+
+```bash
+bash ~/.cc-chrome-bridge/uninstall.sh                                              # macOS / Linux
+```
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.cc-chrome-bridge\uninstall.ps1"
+```
+
+Cả hai đều **giữ lại `panel/`** — đó là lịch sử hội thoại của khung chat, dữ liệu của bạn,
+không phải thứ script tạo ra.
 
 ### 1c. Cài thủ công, không chạy script
 
@@ -174,9 +203,50 @@ bash -c 'source ~/.cc-chrome-bridge/service-unit.sh \
 mkdir -p ~/.claude/commands && cp ~/.cc-chrome-bridge/ccchrome.md ~/.claude/commands/
 ```
 
+Bản Windows, cùng bảy bước đó trong PowerShell:
+
+```powershell
+# 1. Lấy payload
+$Dir = "$env:USERPROFILE\.cc-chrome-bridge"
+New-Item -ItemType Directory -Force -Path "$Dir\logs" | Out-Null
+irm https://github.com/TranHuyQn/cc-chrome-extension/releases/latest/download/cc-chrome-bridge.tar.gz -OutFile "$env:TEMP\cc.tgz"
+tar -xzf "$env:TEMP\cc.tgz" -C $Dir
+
+# 2. Sinh token (RNG của .NET — đừng dùng `node -e` với dấu nháy kép ở đây,
+#    PowerShell 5.1 nuốt mất dấu nháy khi truyền cho lệnh native)
+$bytes = New-Object byte[] 16
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+$Token = -join ($bytes | ForEach-Object { $_.ToString('x2') })
+"{`"token`":`"$Token`",`"port`":8787}" | Set-Content "$env:USERPROFILE\.ccchrome.json" -Encoding ASCII
+"{`"$Token`":`"local`"}"              | Set-Content "$Dir\tokens.json" -Encoding ASCII
+icacls "$env:USERPROFILE\.ccchrome.json" /inheritance:r /grant:r "${env:USERNAME}:F" | Out-Null
+icacls "$Dir\tokens.json"              /inheritance:r /grant:r "${env:USERNAME}:F" | Out-Null
+
+# 3. Chạy thử ngay trong cửa sổ này
+$env:CC_CHROME_HOST = "127.0.0.1"; $env:CC_CHROME_PORT = "8787"
+$env:CC_CHROME_TOKENS_FILE = "$Dir\tokens.json"
+$env:CC_CHROME_CLAUDE_BIN = (Get-Command claude).Source
+node "$Dir\server\index.js" --http
+
+# 4. Đăng ký với Claude Code (cửa sổ khác)
+claude mcp add --scope user --transport http chrome http://127.0.0.1:8787/mcp --header "Authorization: Bearer $Token"
+
+# 5. Muốn tự chạy nền khi đăng nhập
+. "$Dir\service-task.ps1"
+Write-CcLauncher -InstallDir $Dir -Port 8787
+Register-CcTask -InstallDir $Dir
+Start-CcTask
+
+# 6. Slash command /ccchrome (tuỳ chọn)
+New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.claude\commands" | Out-Null
+Copy-Item "$Dir\ccchrome.md" "$env:USERPROFILE\.claude\commands\"
+```
+
 Sau đó vẫn còn hai việc trong Chrome ở mục ngay dưới đây. URL cần dán là
 `ws://127.0.0.1:8787/ws?token=<TOKEN vừa sinh>` — đọc lại bằng
-`cat ~/.ccchrome.json` nếu bạn quên.
+`cat ~/.ccchrome.json` (macOS/Linux) hoặc
+`Get-Content "$env:USERPROFILE\.ccchrome.json"` (Windows) nếu bạn quên.
 
 ### 2. Hai việc phải tự làm trong Chrome
 

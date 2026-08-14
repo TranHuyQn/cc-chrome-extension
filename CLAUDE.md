@@ -67,6 +67,14 @@ drives bash and shadows `uname`/`systemctl` to exercise the Linux branch from an
 therefore never executed a line of the `.ps1` files. `.github/workflows/ci.yml` is what does —
 including a `powershell-syntax` job, because a syntax error in a `.ps1` would otherwise be invisible
 on a machine with no `pwsh`.
+
+Even a green CI is not the same as a real install, and three separate Windows-only defects proved it:
+the documented `irm ... | iex` could never have worked (CI invokes the script with `-File`), the
+release tarball carried a symlink Windows' `tar.exe` cannot create (CI installs from a checkout via
+`CC_CHROME_SOURCE`, never through the download path), and a first install died on `claude mcp remove`
+returning non-zero (CI had no `claude` on PATH, so the whole block was skipped). Each gap is now
+covered. The full Windows flow — install without elevation, extension connected, browser tools, side
+panel chat — has since been run on real hardware; reboot survival and uninstall have not.
 `npm run build:release` (`scripts/build-release.mjs`) is what packages a release for GitHub — see
 "Publishing a GitHub Release" below.
 
