@@ -106,6 +106,68 @@ dịch vụ nền (phần server).
 > thêm ở bản mới, xem [Lưu ý bảo mật](#lưu-ý-bảo-mật)), bạn vẫn thiếu nó cho tới khi Reload. Luôn vào
 > `chrome://extensions` bấm **Reload** trên "Claude Code Chrome Bridge" sau mỗi lần chạy lại lệnh cài.
 
+### 1b. Script động vào đúng những chỗ nào
+
+Không cần quyền root, không đụng gì ngoài thư mục home của bạn. Đầy đủ danh sách:
+
+| Đường dẫn | Nội dung | Quyền |
+|---|---|---|
+| `~/.cc-chrome-bridge/` | `server/` (kèm `node_modules`), `extension/`, `logs/`, `tokens.json`, `uninstall.sh`, `service-unit.sh`, `ccchrome.md` | `700` |
+| `~/.ccchrome.json` | `{ "token": "…", "port": 8787 }` | `600` |
+| `~/Library/LaunchAgents/com.ccchrome.bridge.plist` (macOS)<br>`$XDG_CONFIG_HOME/systemd/user/ccchrome-bridge.service` (Linux) | file dịch vụ nền | |
+| `~/.claude/commands/ccchrome.md` | slash command `/ccchrome` | |
+| `~/.claude.json` | thêm MCP server tên `chrome` (qua `claude mcp add`) | |
+
+Bảy bước, đúng thứ tự script chạy:
+
+1. **Kiểm tra Node ≥ 18**, chưa có thì dừng, chưa tải gì cả.
+2. **Tải gói phát hành** về thư mục tạm, giải nén vào `~/.cc-chrome-bridge/.new` và kiểm tra đủ file (đặc biệt là `node_modules`) — **trước khi** đụng vào bản đang cài. Tải hỏng thì bản cũ nguyên vẹn.
+3. **Dừng dịch vụ đang chạy** (nếu có) — chỉ làm sau khi bước 2 đã có bản thay thế sẵn sàng.
+4. **Đổi tên `.new` vào vị trí thật.** Cùng ổ đĩa nên là đổi tên tức thời, không phải copy.
+5. **Token.** Nâng cấp thì giữ token cũ (khỏi dán lại URL); cài mới thì sinh 16 byte ngẫu nhiên bằng `crypto.randomBytes`. Ghi `~/.ccchrome.json` và `tokens.json`, cả hai `chmod 600`. **`tokens.json` bị ghi đè chứ không gộp** — đó chính là cách token cũ bị thu hồi.
+6. **Dựng file dịch vụ** với **đường dẫn tuyệt đối** tới `node` và `claude` (dịch vụ nền không có `PATH` của terminal), `CC_CHROME_HOST=127.0.0.1` ghi cứng, rồi nạp và chờ `/health` tối đa 20 giây.
+7. **Đăng ký MCP** với Claude Code và copy slash command.
+
+Gỡ sạch mọi thứ trên: `bash ~/.cc-chrome-bridge/uninstall.sh` (giữ lại `panel/` — lịch sử chat của bạn).
+
+### 1c. Cài thủ công, không chạy script
+
+Nếu bạn không muốn chạy script của người khác, đây là toàn bộ những gì nó làm, dạng lệnh tự gõ:
+
+```bash
+# 1. Lấy payload (hoặc git clone repo rồi cd server && npm install)
+mkdir -p ~/.cc-chrome-bridge/logs && chmod 700 ~/.cc-chrome-bridge
+curl -fsSL https://github.com/TranHuyQn/cc-chrome-extension/releases/latest/download/cc-chrome-bridge.tar.gz \
+  | tar -xz -C ~/.cc-chrome-bridge
+
+# 2. Sinh token và ghi hai file cấu hình
+TOKEN=$(node -e 'process.stdout.write(require("crypto").randomBytes(16).toString("hex"))')
+printf '{"token":"%s","port":8787}\n' "$TOKEN" > ~/.ccchrome.json
+printf '{"%s":"local"}\n' "$TOKEN" > ~/.cc-chrome-bridge/tokens.json
+chmod 600 ~/.ccchrome.json ~/.cc-chrome-bridge/tokens.json
+
+# 3. Chạy thử ngay trong terminal — chưa cần dịch vụ nền
+CC_CHROME_HOST=127.0.0.1 CC_CHROME_PORT=8787 \
+CC_CHROME_TOKENS_FILE="$HOME/.cc-chrome-bridge/tokens.json" \
+CC_CHROME_CLAUDE_BIN="$(command -v claude)" \
+node ~/.cc-chrome-bridge/server/index.js --http
+
+# 4. Đăng ký với Claude Code (terminal khác)
+claude mcp add --scope user --transport http chrome \
+  http://127.0.0.1:8787/mcp --header "Authorization: Bearer $TOKEN"
+
+# 5. Muốn nó tự chạy nền khi đăng nhập thì dùng chính helper trong gói
+bash -c 'source ~/.cc-chrome-bridge/service-unit.sh \
+  && cc_write_unit "$HOME/.cc-chrome-bridge" 8787 && cc_service_start'
+
+# 6. Slash command /ccchrome (tuỳ chọn)
+mkdir -p ~/.claude/commands && cp ~/.cc-chrome-bridge/ccchrome.md ~/.claude/commands/
+```
+
+Sau đó vẫn còn hai việc trong Chrome ở mục ngay dưới đây. URL cần dán là
+`ws://127.0.0.1:8787/ws?token=<TOKEN vừa sinh>` — đọc lại bằng
+`cat ~/.ccchrome.json` nếu bạn quên.
+
 ### 2. Hai việc phải tự làm trong Chrome
 
 Script không tự làm được — Chrome không cho một script cài extension thay bạn:
