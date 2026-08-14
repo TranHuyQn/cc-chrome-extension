@@ -4,7 +4,9 @@
 // browser-automation commands (navigate, click, fill, screenshot, ...)
 // using chrome.tabs / chrome.scripting / chrome.debugger.
 
-const DEFAULT_WS_URL = "ws://127.0.0.1:9876";
+// The bridge has one mode now: http bound to loopback, installed as a per-user
+// service. 9876 was the stdio bridge, which no longer exists.
+const DEFAULT_WS_URL = "ws://127.0.0.1:8787/ws";
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 const KEEPALIVE_MS = 20000;
@@ -19,7 +21,7 @@ const NETWORK_BUFFER_MAX = 400;
 // has no CLOSE_REASONS map at all, so the only client that can ever *display*
 // this message is a 2.0.0 extension whose saved URL simply has no ?token=.
 const CLOSE_REASONS = {
-  4001: "Token sai hoặc đã bị thu hồi — chạy lại /ccchrome connect",
+  4001: "Token sai hoặc đã bị thu hồi — mở popup, kiểm tra lại URL đã dán, hoặc chạy lại lệnh cài (bash ~/.cc-chrome-bridge/uninstall.sh rồi cài lại) để lấy token mới",
   4002: "URL thiếu token, hoặc extension cũ hơn server — kiểm tra URL đã có ?token=… chưa, rồi tải lại extension từ <server>/extension.zip nếu vẫn lỗi",
   4003: "Server từ chối: origin không hợp lệ",
 };
@@ -29,7 +31,7 @@ const CLOSE_REASONS = {
 const REFUSAL_CODES = new Set([4001, 4002, 4003]);
 
 const MISSING_TOKEN_REASON =
-  "URL thiếu token — server từ xa cần dạng wss://<domain>/ws?token=… (chạy /ccchrome connect để lấy URL)";
+  "URL thiếu token — server từ xa cần dạng wss://<domain>/ws?token=…; hỏi người quản lý server đó để lấy URL đầy đủ";
 
 const GROUP_COLOR = "orange";
 
@@ -178,9 +180,12 @@ function scheduleReconnect() {
   reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
 }
 
-// A loopback URL is the stdio-mode bridge (ws://127.0.0.1:9876), which has no
-// tokens at all. Anything else is a shared server, where a URL without a token
-// can only ever be refused — worth saying locally instead of round-tripping.
+// A loopback URL is tried even with no token — the server always requires
+// auth to even start (see the FATAL check in server/index.js's mainHttp), so
+// a token-less bridge cannot exist; connecting without one just lets the
+// server's own 4002 explain the problem instead of the extension guessing
+// here. A remote URL without a token skips the round trip: it can only ever
+// be refused.
 function isLoopbackUrl(parsed) {
   const host = parsed.hostname.replace(/^\[|\]$/g, "");
   return host === "127.0.0.1" || host === "localhost" || host === "::1";
@@ -465,10 +470,55 @@ async function resolveTab(params) {
   return tab;
 }
 
+// One list, two rules. A page under these schemes is browser-internal: no tool
+// may run code in it (assertScriptableUrl), and no tool may send a tab to one
+// (assertNavigableUrl). They started as two separate regexes and immediately
+// disagreed — one carried /i and the other did not, one listed two schemes and
+// the other five — which is exactly how one guard quietly stops covering what
+// its twin covers. about:blank is the deliberate exception on both sides:
+// resolveTab opens one when the session's group is empty and new_tab defaults
+// to it.
+const INTERNAL_URL_RE = /^(chrome|chrome-extension|devtools|edge|about):/i;
+
+function isInternalUrl(url) {
+  const u = url || "";
+  // The exemption is case-insensitive because INTERNAL_URL_RE is. Matching the
+  // scheme loosely but the exemption strictly refuses "About:Blank" while
+  // allowing "about:blank" — one rule disagreeing with itself, which is where
+  // the next drift starts.
+  return INTERNAL_URL_RE.test(u) && !/^about:blank/i.test(u);
+}
+
+// navigate and new_tab must agree on what a scheme-less url means. new_tab did
+// not prefix at all, and chrome.tabs.create resolves a relative url against the
+// EXTENSION's own base — so a bare "popup.html" opened this extension's own
+// page with nothing scheme-shaped in the payload to notice.
+function normalizeTargetUrl(url) {
+  return /^[a-z][a-z0-9+.-]*:/i.test(url) ? url : `https://${url}`;
+}
+
+// tab.url is where the tab IS. tab.pendingUrl is where Chrome is already taking
+// it, and it is the only field set while a navigation is in flight. Claude Code
+// issues independent tool calls concurrently (see the groupLocks comment
+// above), and this check runs a full chrome.debugger attach + Runtime.enable
+// before Runtime.evaluate reaches the renderer — so a concurrent navigate onto
+// an extension page would otherwise slip an eval into the privileged realm.
 function assertScriptableUrl(tab) {
-  const url = tab.url || "";
-  if (/^(chrome|chrome-extension|devtools|edge|about):/.test(url) && !url.startsWith("about:blank")) {
-    throw new Error(`Cannot run scripts on ${url} (browser-internal page). Navigate to a normal web page first.`);
+  for (const url of [tab.url, tab.pendingUrl]) {
+    if (isInternalUrl(url)) {
+      throw new Error(`Cannot run scripts on ${url} (browser-internal page). Navigate to a normal web page first.`);
+    }
+  }
+}
+
+// The destination counterpart: assertScriptableUrl inspects where a tab is,
+// which says nothing about where it is being sent. A tab already inside the
+// session group that lands on this extension's own pages puts chrome.tabs
+// within reach, and that is the whole of the in-group restriction — so both
+// doors into a tab's url, navigate and new_tab, go through here.
+function assertNavigableUrl(url) {
+  if (isInternalUrl(url)) {
+    throw new Error(`Cannot navigate to ${url} (browser-internal page). Use a normal web page.`);
   }
 }
 
@@ -1036,7 +1086,8 @@ const handlers = {
       await chrome.tabs.reload(tab.id);
     } else {
       if (!url) throw new Error("url is required (or set action to back/forward/reload)");
-      const fullUrl = /^[a-z][a-z0-9+.-]*:/i.test(url) ? url : `https://${url}`;
+      const fullUrl = normalizeTargetUrl(url);
+      assertNavigableUrl(fullUrl);
       await chrome.tabs.update(tab.id, { url: fullUrl });
     }
     await waitForTabComplete(tab.id);
@@ -1100,6 +1151,12 @@ const handlers = {
   async press_key(params) {
     if (!params.key) throw new Error("key is required");
     const tab = await resolveTab(params);
+    // Same fix as javascript_eval: this reaches chrome.debugger, so execInTab's
+    // guard never applied to it. Injecting keystrokes into a privileged page has
+    // no legitimate use — into this extension's own options UI it means Tab and
+    // Enter onto "Lưu & kết nối lại", repointing the bridge at an arbitrary
+    // endpoint, and that setting persists in chrome.storage.
+    assertScriptableUrl(tab);
     await ensureDebugger(tab.id);
     const known = CDP_KEYS[params.key];
     const single = params.key.length === 1;
@@ -1131,6 +1188,9 @@ const handlers = {
   async type_text(params) {
     if (params.text === undefined) throw new Error("text is required");
     const tab = await resolveTab(params);
+    // See press_key: typing into a browser-internal page is the other half of
+    // repointing this extension's own "Địa chỉ MCP server" field.
+    assertScriptableUrl(tab);
     await ensureDebugger(tab.id);
     await cdp(tab.id, "Input.insertText", { text: String(params.text) });
     return { typed: String(params.text).slice(0, 80) };
@@ -1138,28 +1198,67 @@ const handlers = {
 
   async take_screenshot(params) {
     const tab = await resolveTab(params);
+    // The missing assertScriptableUrl here is a decision, not an oversight, and
+    // adding one "for consistency" with press_key/type_text/javascript_eval/
+    // upload_file would be a regression in usefulness for no security gain.
+    // Those four MUTATE a privileged page — injecting keystrokes, script or a
+    // file selection into this extension's own options UI repoints the bridge
+    // persistently, and there is no legitimate use for it. Capturing pixels
+    // mutates nothing, and screenshotting an internal page is sometimes
+    // genuinely useful when diagnosing. The line the guards follow is
+    // mutate-vs-capture, not which Chrome API a handler happens to use — both
+    // branches below reach chrome.debugger the way those four do and both
+    // still carry no guard on purpose.
+    //
     // Screenshots are used to inspect real visual defects (spacing, colour,
     // overflow). A fake orange edge in every image would corrupt that, so the
     // frame comes off for the capture and goes straight back on.
-    if (params.fullPage) {
-      await ensureDebugger(tab.id, ["Page"]);
-      await clearBorder(tab.id);
-      try {
-        const shot = await cdp(tab.id, "Page.captureScreenshot", {
-          format: "png",
-          captureBeyondViewport: true,
-        });
-        return { mimeType: "image/png", base64: shot.data, fullPage: true };
-      } finally {
-        paintBorder(tab.id);
-      }
-    }
-    await chrome.tabs.update(tab.id, { active: true });
-    await clearBorder(tab.id);
-    await sleep(150);
+    //
+    // Both branches now go through CDP Page.captureScreenshot instead of
+    // chrome.tabs.captureVisibleTab. That older API can only capture the tab
+    // that is ACTIVE in its window, so the default branch used to force the
+    // target tab active first (chrome.tabs.update(tab.id, {active:true})) —
+    // measured (focus-investigation.md) to steal whatever other tab the
+    // owner had open in that same window, every time. Page.captureScreenshot
+    // has no such requirement; it captures the given tab directly regardless
+    // of which tab is active. captureBeyondViewport is the only difference
+    // between the two branches — omitted here, that's what "default
+    // (non-fullPage)" means: just the visible viewport.
+    //
+    // Cost accepted, not overlooked: every default screenshot now attaches
+    // the debugger, so Chrome shows its "is debugging this browser" infobar
+    // on that tab, not just for eval/console/network/upload calls as before.
+    // That's judged worth it — an infobar is not focus theft, and this
+    // extension already pays that cost for four other tools. Deliberately no
+    // fallback to the old activate-and-capture path if the attach fails (e.g.
+    // DevTools already owns this tab's debugger): falling back would quietly
+    // reintroduce the exact steal this fix removes. The caller gets a clear
+    // error telling it what to do instead.
     try {
-      const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-      return { mimeType: "image/png", base64: dataUrl.split(",", 2)[1], fullPage: false };
+      await ensureDebugger(tab.id, ["Page"]);
+    } catch (err) {
+      // Two different causes land here and need different advice. A
+      // chrome:// tab already failed before this change too (chrome.debugger
+      // simply cannot attach there, ever — "Cannot access a chrome:// URL"),
+      // so that is not a regression, just a message that must not blame
+      // DevTools for something DevTools had nothing to do with. Anything
+      // else (most commonly: DevTools, or another extension, already has
+      // this tab's debugger) IS the real trade-off this fix accepts.
+      const hint = /cannot access a chrome:\/\/ url/i.test(err.message || "")
+        ? "This is a browser-internal page; chrome.debugger cannot attach to chrome:// pages at all, regardless of this tool."
+        : "Close DevTools (or any other debugger session) on this tab and try again.";
+      throw new Error(
+        `Cannot take a screenshot without activating the tab: the debugger could not attach (${err.message}). ${hint}`,
+        { cause: err }
+      );
+    }
+    await clearBorder(tab.id);
+    try {
+      const shot = await cdp(tab.id, "Page.captureScreenshot", {
+        format: "png",
+        ...(params.fullPage ? { captureBeyondViewport: true } : {}),
+      });
+      return { mimeType: "image/png", base64: shot.data, fullPage: !!params.fullPage };
     } finally {
       paintBorder(tab.id);
     }
@@ -1168,7 +1267,17 @@ const handlers = {
   async javascript_eval(params) {
     if (!params.code) throw new Error("code is required");
     const tab = await resolveTab(params);
+    // execInTab calls this for chrome.scripting; this handler goes through
+    // chrome.debugger instead, so it has to make the same check itself.
+    // assertScriptableUrl already covers chrome-extension: — the bug was that
+    // nothing here ever called it.
+    assertScriptableUrl(tab);
     await ensureDebugger(tab.id, ["Runtime"]);
+    // ensureDebugger is a full chrome.debugger.attach + Runtime.enable round
+    // trip on first use, and tool calls arrive concurrently, so the snapshot
+    // resolveTab handed back can be stale by the time the evaluate would reach
+    // the renderer. Re-read live state and re-assert against it here.
+    assertScriptableUrl(await chrome.tabs.get(tab.id));
     const evalResult = await cdp(tab.id, "Runtime.evaluate", {
       expression: params.code,
       returnByValue: true,
@@ -1242,9 +1351,19 @@ const handlers = {
   },
 
   async new_tab(params) {
+    // This is the second door onto a tab's url and it needs the same
+    // destination check navigate has: new_tab({url:"chrome-extension://<id>/…"})
+    // put this extension's own page inside the session group in a single call.
+    // normalizeTargetUrl covers the quieter half — chrome.tabs.create resolves
+    // a relative url against the extension's own base, so a bare "popup.html"
+    // did it with nothing scheme-shaped in the payload.
+    const url = params.url ? normalizeTargetUrl(params.url) : "about:blank";
+    assertNavigableUrl(url);
     // active: false — tabs Claude opens must not steal the user's focus.
-    // switch_tab is the tool for actually bringing a tab to the front.
-    const tab = await chrome.tabs.create({ url: params.url || "about:blank", active: false });
+    // switch_tab is the tool for making a tab the visible one in its window;
+    // nothing here, switch_tab included, brings Chrome forward over another
+    // application any more.
+    const tab = await chrome.tabs.create({ url, active: false });
     if (params.url) await waitForTabComplete(tab.id);
     await addTabToSessionGroup(tab, params.__session);
     const updated = await chrome.tabs.get(tab.id);
@@ -1266,8 +1385,15 @@ const handlers = {
   async switch_tab(params) {
     if (!params.tabId) throw new Error("tabId is required");
     const target = await resolveTab(params);
+    // Activates the tab inside its own window and stops there. The window
+    // raise this used to do (chrome.windows.update({focused:true})) pulled the
+    // owner out of whatever application they were in, every call -- the same
+    // complaint filed against the original Claude in Chrome extension
+    // (anthropics/claude-code#39696, #39707). It was documented here as an
+    // intended exception for two revisions; the owner ruled it a defect. Tab
+    // activation stays because it IS the tool: when the owner next looks at
+    // that window, the tab they asked for is the one showing.
     const tab = await chrome.tabs.update(target.id, { active: true });
-    await chrome.windows.update(tab.windowId, { focused: true });
     return { tabId: tab.id, url: tab.url, title: tab.title };
   },
 
@@ -1325,10 +1451,21 @@ const handlers = {
 
   async resize_window(params) {
     const tab = await resolveTab(params);
+    // state:"normal" must only be sent when the window is actually
+    // minimized. Measured directly (see focus-investigation.md): that field
+    // alone -- even width/height with no `state` steal nothing -- raises
+    // whatever window it's sent to, 3/3, EVEN when the window is already
+    // normal (a same-value transition). Sending it unconditionally on every
+    // call is exactly what made resize_window one of the two handlers that
+    // could bring a background window forward while the owner was working in
+    // another one. switch_tab was the other, and it no longer does either --
+    // no handler raises a window now, which test/focus.test.mjs's all-handler
+    // sweep asserts against every one of them.
+    const win = await chrome.windows.get(tab.windowId);
     await chrome.windows.update(tab.windowId, {
       width: params.width || 1280,
       height: params.height || 800,
-      state: "normal",
+      ...(win.state === "minimized" ? { state: "normal" } : {}),
     });
     return { width: params.width || 1280, height: params.height || 800 };
   },
@@ -1336,6 +1473,14 @@ const handlers = {
   async upload_file(params) {
     if (!params.selector || !params.filePath) throw new Error("selector and filePath are required");
     const tab = await resolveTab(params);
+    // The fourth mutating debugger tool, guarded for the same reason as
+    // press_key/type_text/javascript_eval. On a browser-internal page the
+    // attach, DOM.getDocument and DOM.querySelector all succeed today and only
+    // DOM.setFileInputFiles fails, with "Node is not a file input element" —
+    // that is a coincidence of the current HTML (neither popup.html nor
+    // sidepanel.html happens to contain a file input), not a guard, and it
+    // stops holding the day one of them does.
+    assertScriptableUrl(tab);
     await ensureDebugger(tab.id, ["DOM"]);
     const doc = await cdp(tab.id, "DOM.getDocument", {});
     const node = await cdp(tab.id, "DOM.querySelector", {

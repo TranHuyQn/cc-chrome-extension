@@ -11,6 +11,58 @@
 // across turns even though the process does not.
 
 import { spawn } from "node:child_process";
+import { writeFileSync, chmodSync, existsSync } from "node:fs";
+import { join } from "node:path";
+
+// cmd.exe quoting, kept to the one rule actually needed here: wrap in double
+// quotes, escape any double quote inside. Everything this quotes is
+// repo-controlled — flags, absolute paths, a UUID-validated session id — and
+// the chat prompt never reaches argv at all (it goes over stdin), so this does
+// not have to survive hostile input, only spaces in %USERPROFILE%.
+export function winQuote(s) {
+  return /^[A-Za-z0-9_\-.:\\/=]+$/.test(String(s)) ? String(s) : `"${String(s).replace(/"/g, '\\"')}"`;
+}
+
+// Node >= 18.20/20.12 refuses to spawn a .cmd without a shell (the fix for
+// CVE-2024-27980), and on Windows `claude` IS claude.cmd — so the panel's very
+// first turn died with ENOENT there. shell:true is only safe because
+// mcpConfigPath() moved the one argument containing JSON quotes out of argv
+// and into a file; cmd.exe treats `"` as a quoting toggle and would have
+// shredded it.
+//
+// Takes the platform as an argument so both branches are testable from any
+// machine, which is the only reason the Windows branch has coverage at all.
+export function buildSpawn(bin, args, platform = process.platform) {
+  if (platform !== "win32") {
+    return { command: bin, args, options: { shell: false } };
+  }
+  // The COMMAND is quoted too, not just the args: shell:true makes Node join
+  // them into one cmd.exe command line, so an unquoted path with a space
+  // (C:\Users\Huy Tran\...\claude.cmd, or anything under a %TEMP% that contains
+  // one) would be split and reported as "not recognized as an internal or
+  // external command".
+  return {
+    command: winQuote(bin),
+    args: args.map(winQuote),
+    options: { shell: true, windowsHide: true },
+  };
+}
+
+// A background service does not inherit an interactive shell's PATH. Measured
+// on macOS: launchd hands this process PATH=/usr/bin:/bin:/usr/sbin:/sbin while
+// claude lives at /opt/homebrew/bin/claude, so every panel chat turn died with
+// "spawn claude ENOENT" the moment the bridge ran as the installed service —
+// which is the only way it is meant to run. systemd --user and Task Scheduler
+// give the same treatment.
+//
+// The installers resolve `claude` once, at install time, and bake the absolute
+// path into the unit as CC_CHROME_CLAUDE_BIN — exactly what service-unit.sh
+// already did for `node`, and for the same reason. The bare-name fallback is
+// what a developer running the bridge by hand in a terminal gets, where PATH is
+// real.
+export function claudeBinFromEnv() {
+  return process.env.CC_CHROME_CLAUDE_BIN || "claude";
+}
 
 export class AgentSession {
   constructor({
@@ -74,22 +126,39 @@ export class AgentSession {
     this.onEvent(event);
   }
 
-  // NOTE on exposure: this JSON string (Bearer token included) is passed as
-  // an --mcp-config argv value, so it is visible in `ps`/`/proc/<pid>/cmdline`
-  // to any other local user on the same machine as the bridge server for the
-  // lifetime of the child process. That is a deliberate tradeoff carried over
-  // from the probe, not an oversight — see the task-2 fix-round report for
-  // the file-based-config alternative this was weighed against.
-  mcpConfig() {
-    return JSON.stringify({
-      mcpServers: {
-        chrome: {
-          type: "http",
-          url: this.mcpUrl,
-          headers: { Authorization: `Bearer ${this.token}` },
+  // Written to a file rather than passed inline as JSON. Two reasons, both
+  // real: cmd.exe re-parses double quotes when spawning through a shell (which
+  // Windows needs — see buildSpawn), and the inline form put the bridge's
+  // Bearer token in the child's argv, readable via `ps` / Task Manager by any
+  // other local user for the child's lifetime. A 0600 file in the session's
+  // own cwd has neither problem.
+  //
+  // Written once per session and reused: `claude` reads it at startup on every
+  // turn, so it has to outlive the first child.
+  mcpConfigPath() {
+    if (this._mcpConfigPath) return this._mcpConfigPath;
+    const file = join(this.cwd, `.mcp-config-${this.sessionId || "panel"}.json`);
+    writeFileSync(
+      file,
+      JSON.stringify({
+        mcpServers: {
+          chrome: {
+            type: "http",
+            url: this.mcpUrl,
+            headers: { Authorization: `Bearer ${this.token}` },
+          },
         },
-      },
-    });
+      }),
+      { mode: 0o600 },
+    );
+    // `mode` only applies when the file is CREATED. A file left by an earlier
+    // run keeps whatever mode it had, so repair it unconditionally — the same
+    // reason install.sh chmods on every run. Skipped on Windows, where POSIX
+    // modes mean nothing and install.ps1's icacls on the install dir is what
+    // restricts access.
+    if (process.platform !== "win32") chmodSync(file, 0o600);
+    this._mcpConfigPath = file;
+    return file;
   }
 
   buildArgs() {
@@ -114,7 +183,7 @@ export class AgentSession {
       // that flag only pins the *MCP* config; it does nothing about plugins,
       // hooks, or any other user-level setting.
       "--setting-sources", "project",
-      "--mcp-config", this.mcpConfig(),
+      "--mcp-config", this.mcpConfigPath(),
       // Every built-in tool off: this agent has no business reading or writing
       // the user's filesystem, and the browser tools all arrive over MCP.
       "--tools", "",
@@ -135,10 +204,28 @@ export class AgentSession {
     this.lastStderrLine = null;
     this.emit({ type: "turn_start" });
 
-    const child = spawn(this.claudeBin, this.buildArgs(), {
+    // Checked before spawning, not left to the spawn's own error. A missing
+    // binary only reports ENOENT when Node launches it directly; on Windows
+    // buildSpawn goes through cmd.exe, which swallows that into exit code 1
+    // and "The system cannot find the path specified" — so the actionable
+    // message below would never have appeared on the one platform that needs
+    // it most. CI caught this on windows-latest.
+    //
+    // Only applies to a path-shaped claudeBin, which is what the installers
+    // bake in (CC_CHROME_CLAUDE_BIN). A bare "claude" still has to be resolved
+    // through PATH by the OS, and its ENOENT is handled in the error listener.
+    if (/[\\/]/.test(this.claudeBin) && !existsSync(this.claudeBin)) {
+      this.finished = true;
+      this.emit({ type: "turn_end", ok: false, error: this.missingClaudeMessage() });
+      return;
+    }
+
+    const { command, args, options } = buildSpawn(this.claudeBin, this.buildArgs());
+    const child = spawn(command, args, {
       cwd: this.cwd,
       env: { ...process.env, ...this.env },
       stdio: ["pipe", "pipe", "pipe"],
+      ...options,
     });
     this.child = child;
     this.started = true;
@@ -166,7 +253,13 @@ export class AgentSession {
       // first of the two may emit turn_end.
       if (this.finished) return;
       this.finished = true;
-      this.emit({ type: "turn_end", ok: false, error: err.message });
+      // ENOENT here has one cause and one fix, and "spawn claude ENOENT" names
+      // neither. This message is what the user reads in the panel's chat log,
+      // so it says which command is missing and what to do about it — the
+      // installer is what bakes the absolute path in (CC_CHROME_CLAUDE_BIN),
+      // so re-running it is the fix after installing or moving the CLI.
+      const message = err.code === "ENOENT" ? this.missingClaudeMessage() : err.message;
+      this.emit({ type: "turn_end", ok: false, error: message });
     });
 
     child.on("close", (code) => {
@@ -262,10 +355,49 @@ export class AgentSession {
     // ignored the same way rather than throwing.
   }
 
+  // One wording, two callers: the pre-flight check in send() and the spawn
+  // error listener. It is what the user reads in the panel's chat log, so it
+  // names the command, says why PATH is not the answer, and gives the fix.
+  missingClaudeMessage() {
+    return (
+      `Không chạy được lệnh 'claude' (${this.claudeBin}). Dịch vụ nền không dùng PATH của terminal, ` +
+      "nên nó cần đường dẫn tuyệt đối do script cài ghi vào. Cài Claude Code rồi chạy lại lệnh cài " +
+      "đặt bridge để ghi lại đường dẫn."
+    );
+  }
+
+  // Kills the child AND anything it started. On Windows the child is cmd.exe
+  // (buildSpawn has to go through a shell so PATHEXT finds claude.cmd), so
+  // `claude` is a GRANDchild: child.kill() takes down the shell and leaves the
+  // CLI running, the turn never ends, and the panel's stop button does nothing.
+  // CI caught exactly that — "not busy after stop" failed on windows-latest and
+  // passed everywhere else. taskkill /T is the tree kill; /F because a console
+  // app ignores the polite request.
+  killChild(signal) {
+    if (!this.child) return;
+    if (process.platform === "win32" && this.child.pid) {
+      // Fire-and-forget: the `close` handler is what actually finishes the
+      // turn, and a failure here (child already gone) must not throw into the
+      // caller. detached+unref so this helper cannot outlive the server.
+      try {
+        const killer = spawn("taskkill", ["/pid", String(this.child.pid), "/T", "/F"], {
+          stdio: "ignore",
+          windowsHide: true,
+        });
+        killer.on("error", () => {});
+        killer.unref();
+      } catch {
+        this.child.kill(signal);
+      }
+      return;
+    }
+    this.child.kill(signal);
+  }
+
   stop() {
     if (!this.child) return false;
     this.stopping = true;
-    this.child.kill("SIGTERM");
+    this.killChild("SIGTERM");
     return true;
   }
 
@@ -279,7 +411,7 @@ export class AgentSession {
     // still translates into delta/message/tool events, which on the
     // start-while-busy path would land in the *new* conversation.
     this.disposed = true;
-    if (this.child) this.child.kill("SIGKILL");
+    this.killChild("SIGKILL");
     this.child = null;
   }
 }

@@ -39,20 +39,30 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const workdir = mkdtempSync(join(tmpdir(), "cc-panel-proto-"));
 const sessionFile = join(workdir, "sessions.txt");
 
-// The panel builds its own AgentSession with the default claudeBin ("claude"),
-// so the only seam for a fake is PATH. Node resolves an unqualified command
-// against the PATH of the env it hands the child, so a shim directory in front
-// of it wins.
+// The panel's AgentSession takes its binary from CC_CHROME_CLAUDE_BIN, which is
+// the same seam the installers use to bake in an absolute path (a background
+// service has no useful PATH). Pointing that at a shim is exact; shadowing PATH
+// with a directory was not, and broke on Windows two ways at once — the
+// separator is ';' not ':', and cmd.exe will not run an extensionless /bin/sh
+// script, so the child died with "'claude' is not recognized as an internal or
+// external command".
 const shimDir = join(workdir, "bin");
-const shim = join(shimDir, "claude");
 mkdirSync(shimDir, { recursive: true });
-writeFileSync(shim, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(join(root, "test", "fake-claude-mcp.mjs"))} "$@"\n`);
-chmodSync(shim, 0o755);
+const fakeClaudeMcp = join(root, "test", "fake-claude-mcp.mjs");
+const shim = join(shimDir, process.platform === "win32" ? "claude.cmd" : "claude");
+if (process.platform === "win32") {
+  // %* forwards every argument. @echo off keeps the command line itself out of
+  // the child's stdout, which the test parses as NDJSON.
+  writeFileSync(shim, `@echo off\r\n"${process.execPath}" "${fakeClaudeMcp}" %*\r\n`);
+} else {
+  writeFileSync(shim, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fakeClaudeMcp)} "$@"\n`);
+  chmodSync(shim, 0o755);
+}
 
 const server = spawn(process.execPath, [join(root, "server", "index.js"), "--http"], {
   env: {
     ...process.env,
-    PATH: `${shimDir}:${process.env.PATH}`,
+    CC_CHROME_CLAUDE_BIN: shim,
     CC_CHROME_TOKENS: `${TOKEN}=panelproto`,
     CC_CHROME_HOST: "127.0.0.1",
     CC_CHROME_PORT: String(PORT),

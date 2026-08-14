@@ -9,7 +9,7 @@ const RECONNECT_MAX_MS = 30000;
 
 const CLOSE_REASONS = {
   4001: "Token sai hoặc đã bị thu hồi — mở popup và dán lại URL.",
-  4002: "URL thiếu token — chạy /ccchrome connect để lấy URL đầy đủ.",
+  4002: "URL thiếu token — mở popup, dán lại URL đầy đủ (dạng ws://127.0.0.1:<port>/ws?token=…, đọc port/token từ ~/.ccchrome.json trên máy chạy bridge).",
   4003: "Origin không hợp lệ.",
   4004: "Server này không bật khung chat. Khung chat chỉ chạy trên bridge của chính máy này — bridge bind loopback, kết nối đến thẳng từ máy này, và không có reverse proxy đứng trước.",
 };

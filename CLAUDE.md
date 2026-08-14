@@ -8,8 +8,13 @@ An MCP server (`server/`) + Chrome MV3 extension (`extension/`) that lets Claude
 without any claude.ai login. Every MCP tool call is forwarded over WebSocket to the extension, which
 executes it with `chrome.tabs` / `chrome.scripting` / `chrome.debugger` and returns JSON.
 
-Two runtime modes, both in `server/index.js`: `stdio` (local, single user, binds `127.0.0.1:9876`)
-and `http` (`--http`, shared VPS, multi-user, Bearer-token routing, port `8787`).
+One runtime mode: `mainHttp()` in `server/index.js` runs an HTTP + WebSocket server, bound to
+`127.0.0.1` by default (port `8787`), that every Claude Code session and the extension both talk to.
+There is no `mainStdio()` — stdio mode (single process on stdout, no auth) was removed before 1.0.0. The
+distribution model changed with it: `scripts/install.sh` installs a per-user background service (see
+"Setup and commands" below) instead of everyone pointing at one shared server; `deploy/` still runs
+the old shared-server shape for anyone who deliberately wants it (see the warning at the top of
+`deploy/chrome-bridge.service`).
 
 ## Setup and commands
 
@@ -24,8 +29,8 @@ cd test && npm install   # e2e deps (playwright)
 ```bash
 npm run build       # package extension -> dist/*.zip + signed dist/*.crx
 npm run lint        # eslint (flat config in eslint.config.mjs); must stay at 0 errors
-npm test            # build.test + origin.test + e2e (stdio) + e2e (http) — needs real Chromium
-npm run test:stdio  # a single suite: also test:build, test:origin, test:http
+npm test            # build.test + origin.test + e2e + e2e-http — needs real Chromium
+npm run test:e2e    # a single suite: also test:build, test:origin, test:http
 ```
 
 Tests launch a real Chromium with the extension loaded. All four files under `test/` read
@@ -44,6 +49,25 @@ at all, headed or headless. Playwright's own managed Chromium (branded "Chrome f
 the stable Google Chrome channel) still honors those flags, so the working combination on this
 platform is `HEADED=1` with no `CHROME_PATH` — that runs Playwright's bundled browser with a
 visible window.
+
+`scripts/install.sh` is the end-user installer referenced above under "What this is" (not needed for
+developing or testing this repo — `npm test` starts and stops its own server instances directly): it
+installs a per-user background service via `scripts/service-unit.sh` (LaunchAgent on macOS,
+`systemd --user` on Linux) and registers the MCP server with Claude Code over `--transport http`.
+`scripts/install.ps1` is the Windows counterpart, backed by `scripts/service-task.ps1`, which
+registers a Task Scheduler task triggered at logon. All three are the same model — a per-user job
+that starts when the user logs in — and Windows is deliberately NOT a Windows Service: that would run
+in session 0 with no user profile, leaving the side panel's spawned `claude` with no logged-in
+account, and it would need administrator rights. No installer here ever requires elevation.
+
+Platform coverage is asymmetric and it matters when reading a green run: `test/install.test.mjs`
+drives bash and shadows `uname`/`systemctl` to exercise the Linux branch from any machine, while
+`test/install-windows.test.mjs` **skips with exit 0 off Windows**. A green `npm test` on macOS has
+therefore never executed a line of the `.ps1` files. `.github/workflows/ci.yml` is what does —
+including a `powershell-syntax` job, because a syntax error in a `.ps1` would otherwise be invisible
+on a machine with no `pwsh`.
+`npm run build:release` (`scripts/build-release.mjs`) is what packages a release for GitHub — see
+"Publishing a GitHub Release" below.
 
 There is no formatter or bundler, and the extension is plain JS loaded directly by Chrome — never
 introduce a build step for `extension/` without being asked. A `PostToolUse` hook in
@@ -66,7 +90,7 @@ page" messages for the tone).
 A new handler in `extension/background.js` must get its tab through `resolveTab(params)` (see
 "Security invariants" below) instead of calling `chrome.tabs.get`/`query` itself. `resolveTab` is a
 thin wrapper around `resolveTabInGroup`, which is the one place the in-group restriction is
-enforced — skipping it silently reopens the hole `close_tab` and `switch_tab` had before 3.0.0.
+enforced — skipping it silently reopens a hole `close_tab` and `switch_tab` once had.
 
 `resolveTab()` also paints the orange "Claude is driving this tab" frame, so a handler that
 uses it gets the indicator for free and must not paint one itself. The frame removes itself
@@ -74,6 +98,21 @@ uses it gets the indicator for free and must not paint one itself. The frame rem
 Chrome terminates the worker mid-sequence and a ghost frame would survive on the user's page.
 A handler that captures pixels must call `await clearBorder(tab.id)` before the capture and
 `paintBorder(tab.id)` in a `finally`, the way `take_screenshot` does.
+
+**No handler may take focus.** A handler must never pass `active: true` to `chrome.tabs.update`
+or `focused: true` to `chrome.windows.update`, and must never send `state: "normal"` to a window
+that is not actually minimized — that field alone raises a window even as a same-value
+transition. The one narrow exception is `switch_tab`, which may activate its own target tab
+inside that tab's window and may still not raise the window. This is the property the owner
+cares about most: the original Claude in Chrome extension activates the tab and raises the
+window on essentially every tool call (anthropics/claude-code#39696, #39707, #31119), and this
+project deliberately does not. `test/focus.test.mjs` ends with a sweep that calls **every**
+handler and asserts both halves — the arguments actually passed to those two APIs (deterministic
+everywhere) and the owner's active tab (observable). The sweep reads `Object.keys(handlers)`
+live, so a new handler that is not listed in it fails the suite rather than being silently
+uncovered. Three separate cases in that file failed this rule at some point — `take_screenshot`,
+`resize_window` and `switch_tab` — so the sweep exists precisely because reading the handlers
+by hand missed it three times.
 
 ## Injected page functions
 
@@ -87,11 +126,6 @@ They run in a different realm, so:
 - Element refs live on `window.__cc_refs`, rebuilt by `read_page`/`find`. They go stale on navigation
   or DOM replacement; that is expected, the fix is to call `read_page` again.
 
-## stdio mode: stdout is the MCP transport
-
-In stdio mode stdout carries the MCP protocol. Any stray `console.log` in `server/index.js` corrupts
-the session. Log through `log()` (which is `console.error`) or `process.stderr` only.
-
 ## Versions and signing key
 
 - Three files carry the version and must agree: `extension/manifest.json` `version` (names the build
@@ -103,9 +137,26 @@ the session. Log through `log()` (which is `console.error`) or `process.stderr` 
   Never delete or regenerate it — a new key changes the ID and breaks everyone's installed extension
   and any enterprise allowlist.
 
+## Publishing a GitHub Release
+
+`npm run build:release` (`scripts/build-release.mjs`) writes exactly three things to `dist/`:
+`cc-chrome-bridge.tar.gz` (the full install payload — `server/`, `extension/`, `node_modules`,
+`uninstall.sh`, `service-unit.sh`, `uninstall.ps1`, `service-task.ps1`, `ccchrome.md`) and,
+standalone, `install.sh` and `install.ps1`. **All three must be uploaded as release assets**, not
+just the tarball — each documented one-line install fetches its own script first, before the tarball
+that script then pulls at `CC_CHROME_RELEASE_URL`:
+`curl -fsSL .../releases/latest/download/install.sh | bash` and
+`irm .../releases/latest/download/install.ps1 | iex`, both in `README.md` and
+`.claude/commands/ccchrome.md`. A missing standalone asset makes its command 404 silently, and the
+Windows user sees literally nothing happen. No CI workflow does this upload, so it is a manual step
+on every release: run `npm run build:release`, then attach `dist/cc-chrome-bridge.tar.gz`,
+`dist/install.sh` and `dist/install.ps1` to the GitHub Release. `test/build.test.mjs` asserts both
+standalone copies exist and are byte-identical to their sources, but nothing can assert that a human
+attached them.
+
 ## Security invariants — do not relax without being asked
 
-- Both modes require `Origin: chrome-extension://…` on the WebSocket handshake.
+- The bridge requires `Origin: chrome-extension://…` on the WebSocket handshake.
   An absent Origin is a rejection, not a pass. It blocks browser-originated
   cross-origin connections and raises the bar against casual local clients, but
   `Origin` is client-supplied and a purpose-built local process forges it in one
@@ -142,7 +193,7 @@ the session. Log through `log()` (which is `console.error`) or `process.stderr` 
   opens) a tab inside that group instead of whatever tab the user has active. A new or edited
   handler must call `resolveTab()` and must never call `chrome.tabs.query`/`get`/`remove`/`update`
   on a caller-supplied tab id directly — before
-  3.0.0, `close_tab` and `switch_tab` did exactly that, which meant either tool could close or focus
+  tab-group isolation landed, `close_tab` and `switch_tab` did exactly that, which meant either tool could close or focus
   *any* tab in the browser, not just the caller's own. That bypass is why the rule exists now.
 - The side panel gets its own `/panel` websocket rather than sharing `/ws`,
   because `registry.attach()` closes the previous connection on token collision
@@ -162,23 +213,28 @@ the session. Log through `log()` (which is `console.error`) or `process.stderr` 
   by presence. Deliberately **not** overridable by an env var — a switch that
   re-enables this is a switch someone will flip. `/ws` is unaffected: the
   extension bridge is *meant* to work through a proxy.
-- The panel's MCP Bearer token travels in the spawned `claude` child's argv
-  (inside `--mcp-config`, built by `AgentSession.mcpConfig()` in
-  `server/agent.js`), so it is readable via `ps`/`/proc/<pid>/cmdline` by any
-  other local user on the same machine, for the child's lifetime. Stated the
-  same way the `Origin` caveat above is stated, not omitted: this is a
-  deliberate tradeoff, not an oversight. The panel already requires a loopback
-  bridge, so the exposure is same-machine only, and that machine already holds
-  the token in `~/.ccchrome.json` and `chrome.storage`.
-- Known limitation, not a fixed one: a hand-typed
-  `ws://127.0.0.1:9876/ws?token=anything` still dials `/panel` on the stdio
-  bridge and evicts the extension's own connection. The stdio bridge
-  (`DEFAULT_WS_URL`, port 9876) has no path routing at all, so `/panel` lands
-  in the same connection handler as `/ws` and `registry.attach()` treats it as
-  a replacement connection (closes the old one with 4000). The panel's guard
-  in `extension/sidepanel.js` keys only on the token's presence in the saved
-  URL, not on which bridge is actually on the other end, and the stdio bridge
-  ignores both path and token. No documented flow produces that URL.
+- The panel's MCP Bearer token reaches the spawned `claude` child through a
+  **file**, not argv: `AgentSession.mcpConfigPath()` in `server/agent.js`
+  writes `.mcp-config-<sessionId>.json` (mode 0600) into the session's own cwd
+  and passes that path to `--mcp-config`. Do not put the config back inline.
+  It was inline until 3.6.0, which meant the token was readable via
+  `ps`/`/proc/<pid>/cmdline` by any other local user for the child's lifetime,
+  and it is also what made the Windows spawn impossible — Windows has to go
+  through `cmd.exe` (Node refuses to spawn `claude.cmd` without a shell since
+  CVE-2024-27980) and `cmd` treats the JSON's `"` as quoting toggles. The mode
+  is re-applied on every write because `writeFileSync`'s `mode` only applies at
+  creation. Nothing prunes these files; they live in `PANEL_CWD`, which nothing
+  prunes either.
+- Historical note, now moot: earlier versions had a second `stdio` mode
+  bridge that ignored path routing entirely, so a hand-typed
+  `ws://127.0.0.1:9876/ws?token=anything` would dial `/panel` on it and evict
+  the extension's own connection. `mainStdio()` was removed before 1.0.0 — there
+  is exactly one server process now, it always does path-based routing
+  between `/ws` and `/panel`, and nothing in this repo listens on 9876 by
+  default any more. `extension/sidepanel.js` and `extension/popup.js` still
+  carry `9876` in a stale UI fallback default; that is a dead value with
+  nothing behind it unless a caller manually points the extension at some
+  other, unrelated process on that port.
 - `attach_tab` in `extension/background.js` is the one sanctioned way a tab
   outside the session group gets in. It is not an MCP tool, so **Claude** cannot
   call it — but that is the only boundary that claim covers: `handleRequest`
@@ -194,7 +250,7 @@ the session. Log through `log()` (which is `console.error`) or `process.stderr` 
   window's active tab. An earlier revision let the panel name a `windowId`,
   reasoning that refusing `tabId` was enough. It was not — window ids are small
   sequential integers, so anything holding the panel token could enumerate them
-  and pull every window's active tab into its own group, which is the pre-3.0.0
+  and pull every window's active tab into its own group, which is the pre-isolation
   hole with lasting access instead of a single action.
 
 - A panel replays **two** ids on `start`, and both are caller-supplied:
@@ -209,18 +265,28 @@ the session. Log through `log()` (which is `console.error`) or `process.stderr` 
   stored ids per window (`panelSession.<windowId>` in `chrome.storage.local`)
   for the same reason: one extension-global key made two windows resume one
   conversation.
-- **Known hole, verified in a real browser, not fixed here:**
-  `chrome.debugger.attach` succeeds on this extension's *own*
-  `chrome-extension://<id>/sidepanel.html` and `popup.html`, and `javascript_eval`
-  never calls `assertScriptableUrl` (only `execInTab` does), nor does `navigate`.
-  So a model can `navigate` a tab already in its own group to the extension's own
-  page and then `javascript_eval` there — that code runs in the extension's
-  privileged realm with `chrome.tabs.*`, which defeats `resolveTabInGroup`
-  entirely (confirmed end-to-end: `chrome.tabs.query({})` returned every tab in
-  the browser). Chrome blocks attach on `chrome://` but not on
-  `chrome-extension://`. Pre-existing, predates the side panel branch, and needs
-  its own decision (deny `chrome-extension://` in `javascript_eval`, or refuse to
-  `navigate` there at all).
+- **Closed before 1.0.0:** `chrome.debugger.attach` still succeeds on this
+  extension's *own* `chrome-extension://<id>/sidepanel.html` and `popup.html`
+  (Chrome blocks attach on `chrome://` but not on `chrome-extension://`), so
+  the guard has to be at the tool level, not the debugger API. `navigate` calls
+  `assertNavigableUrl()` and refuses to send a tab to `chrome-extension:` (or
+  `chrome:`, `devtools:`, `edge:`, non-blank `about:`) in the first place, and
+  every mutating debugger-backed tool — `javascript_eval`, `press_key`,
+  `type_text`, `upload_file` — calls `assertScriptableUrl()` on the tab before
+  it touches `chrome.debugger`, so none of them can run against a
+  browser-internal page even if a tab somehow already sits on one.
+  `take_screenshot` deliberately does **not** call `assertScriptableUrl()` —
+  that is a decision, not a gap: capturing pixels mutates nothing, while
+  injecting keystrokes, script or a file selection into this extension's own
+  options UI has no legitimate use and can repoint the bridge itself.
+  `test/security-eval.test.mjs` guards both halves of this: it asserts the
+  four mutating tools are refused against `chrome-extension://` targets (the
+  only scheme it drives against a real tab — `chrome:`, `devtools:`, `edge:`
+  are covered by `assertScriptableUrl()`/`assertNavigableUrl()` sharing the
+  one `INTERNAL_URL_RE` regex, not by a separate assertion per scheme), and
+  separately asserts `take_screenshot` still **succeeds** against the same
+  `chrome-extension://` target, specifically so nobody "fixes" that asymmetry
+  later.
 
 ## Side panel chat operational notes
 
@@ -261,5 +327,5 @@ the session. Log through `log()` (which is `console.error`) or `process.stderr` 
 - User-facing docs (`README.md`, popup UI, `/ccchrome` command output) are in Vietnamese. Code,
   comments, and commit messages are in English.
 - Config is env-var driven and documented in the README table — add new vars there too.
-- `.claude/commands/ccchrome.md` is shipped to users via `scripts/install-command.sh`; it is a
-  product surface, not local tooling.
+- `.claude/commands/ccchrome.md` is shipped to users via `scripts/install.sh` (it copies the file into
+  `~/.claude/commands/`); it is a product surface, not local tooling.

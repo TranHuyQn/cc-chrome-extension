@@ -5,7 +5,8 @@
 // Usage: npm install && npm install in test/, then: node test/build.test.mjs
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, rmSync, existsSync } from "node:fs";
+import { gunzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +14,56 @@ import AdmZip from "adm-zip";
 import { chromium } from "playwright";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+// Walks raw tar headers instead of shelling out to `tar -tzf`. Needed
+// specifically because macOS's own `tar -tzf` hides/merges AppleDouble
+// (`._<name>`) resource-fork entries on read — the exact same tool used to
+// build the archive on this platform, so a listing built from it can never
+// see the defect it's meant to catch. Each header is a 512-byte block; a PAX
+// extended header (typeflag 'x') precedes most real entries here (bsdtar
+// emits one per entry for high-res timestamps, not just for long names) and
+// carries the real path as a "<len> path=<value>\n" record when the name
+// doesn't fit in the 100-byte name field. For names that fit in ustar's
+// fixed fields but still exceed the 100-byte `name` field alone (roughly
+// 101-255 bytes), bsdtar splits across `prefix` (offset 345, 155 bytes) +
+// "/" + `name` instead of emitting a PAX override — read and join both.
+//
+// Two things this deliberately does not handle, safe in this archive today:
+// it stops at the first all-zero block rather than requiring the two
+// consecutive ones the tar spec uses to mark end-of-archive (this build
+// never produces a real all-zero header body mid-archive, so one is enough
+// here), and it does not special-case GNU long-name entries (typeflag 'L')
+// — one would be pushed as a spurious literal "././@LongLink" member,
+// inflating the count rather than hiding entries, so it fails safe. Neither
+// occurs: this archive's typeflag census is 0 (file) / 2 (symlink) / 5
+// (dir) / x (PAX) only.
+function listTarMembers(tarPath) {
+  const buf = gunzipSync(readFileSync(tarPath));
+  const names = [];
+  let offset = 0;
+  let pendingName = null;
+  while (offset + 512 <= buf.length) {
+    const header = buf.subarray(offset, offset + 512);
+    if (header.every((b) => b === 0)) break; // end-of-archive marker
+    const typeflag = String.fromCharCode(header[156]);
+    const sizeOctal = header.subarray(124, 136).toString("ascii").replace(/\0/g, "").trim();
+    const size = sizeOctal ? parseInt(sizeOctal, 8) : 0;
+    const dataBlocks = Math.ceil(size / 512);
+    if (typeflag === "x" || typeflag === "g") {
+      // PAX extended (per-entry) or global header: metadata, not a member itself.
+      const data = buf.subarray(offset + 512, offset + 512 + size).toString("utf8");
+      const match = data.match(/(?:^|\n)\d+ path=([^\n]*)\n/);
+      if (typeflag === "x" && match) pendingName = match[1];
+    } else {
+      const rawName = header.subarray(0, 100).toString("utf8").split("\0")[0];
+      const prefix = header.subarray(345, 500).toString("utf8").split("\0")[0];
+      names.push(pendingName || (prefix ? `${prefix}/${rawName}` : rawName));
+      pendingName = null;
+    }
+    offset += 512 + dataBlocks * 512;
+  }
+  return names;
+}
 
 let failures = 0;
 function check(name, cond, detail = "") {
@@ -93,6 +144,98 @@ check("running version matches build", version === manifest.version, version);
 await context.close();
 rmSync(unpackDir, { recursive: true, force: true });
 rmSync(userDataDir, { recursive: true, force: true });
+
+// --- release tarball --------------------------------------------------------
+
+execFileSync("node", [join(root, "scripts", "build-release.mjs")], { stdio: "inherit" });
+const tarPath = join(root, "dist", "cc-chrome-bridge.tar.gz");
+check("release tarball exists", existsSync(tarPath));
+
+// install.sh must also exist as its OWN release asset, not just inside the
+// tarball above: the one-line install everyone is told to run
+// (`curl .../releases/latest/download/install.sh | bash`) needs install.sh
+// to be fetchable before the tarball it then downloads is ever requested.
+const distInstallPath = join(root, "dist", "install.sh");
+check("install.sh is produced as a standalone release asset (dist/install.sh)", existsSync(distInstallPath));
+check(
+  "dist/install.sh is byte-identical to scripts/install.sh",
+  existsSync(distInstallPath) && readFileSync(distInstallPath, "utf8") === readFileSync(join(root, "scripts", "install.sh"), "utf8")
+);
+
+// Same argument, Windows half: the documented Windows install is
+// `irm .../releases/latest/download/install.ps1 | iex`, which fetches that one
+// file before any tarball exists locally. Forgetting to publish it makes the
+// command 404 with nothing to read.
+const distInstallPs1Path = join(root, "dist", "install.ps1");
+check("install.ps1 is produced as a standalone release asset (dist/install.ps1)", existsSync(distInstallPs1Path));
+check(
+  "dist/install.ps1 is byte-identical to scripts/install.ps1",
+  existsSync(distInstallPs1Path) && readFileSync(distInstallPs1Path, "utf8") === readFileSync(join(root, "scripts", "install.ps1"), "utf8")
+);
+
+const listing = execFileSync("tar", ["-tzf", tarPath], { encoding: "utf8" });
+// Exact entry names, not substring matching against the raw listing — a
+// substring check would also pass on e.g. "server/index.js.bak".
+const entries = new Set(
+  listing
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => line.replace(/^\.\//, "").replace(/\/$/, "")),
+);
+for (const required of [
+  "server/index.js",
+  "server/agent.js",
+  "server/node_modules/ws/package.json",
+  "extension/manifest.json",
+  "extension/sidepanel.html",
+  "install.sh",
+  "uninstall.sh",
+  "service-unit.sh",
+  "install.ps1",
+  "uninstall.ps1",
+  "service-task.ps1",
+  "ccchrome.md",
+]) {
+  check(`tarball contains ${required}`, entries.has(required), listing.slice(0, 500));
+}
+
+// macOS's own `tar -czf` silently adds one `._<name>` AppleDouble
+// resource-fork entry per real entry unless COPYFILE_DISABLE=1 is set.
+// macOS's own `tar -tzf` hides and merges those on read, so a listing built
+// from it (the `entries` set above) can never see this defect — a Linux
+// install (`cp -R` in install.sh) extracts them for real, permanently, as
+// junk twins of every shipped file. listTarMembers() walks the raw headers
+// instead, so it sees exactly what a non-macOS extractor sees.
+const rawMembers = listTarMembers(tarPath);
+
+// Anchor listTarMembers() against the `entries` set built from `tar -tzf`
+// above, so a walker that silently stops early (a logic bug, not a thrown
+// exception — nothing else would report an empty/short result as an error)
+// fails loudly instead of reporting a suspiciously clean archive. `tar -tzf`
+// hides AppleDouble members but agrees with the walker on everything else,
+// so their non-AppleDouble counts must match exactly.
+const normalizedRaw = rawMembers.map((n) => n.replace(/^\.\//, "").replace(/\/$/, ""));
+const nonAppleDoubleRawCount = normalizedRaw.filter((n) => !/(^|\/)\._/.test(n)).length;
+check(
+  "listTarMembers() sees as many non-AppleDouble entries as tar -tzf",
+  nonAppleDoubleRawCount === entries.size,
+  `listTarMembers=${nonAppleDoubleRawCount} tar-tzf=${entries.size}`,
+);
+
+const appleDoubleEntries = rawMembers.filter((e) => /(^|\/)\._/.test(e));
+check("no AppleDouble (._*) junk entries", appleDoubleEntries.length === 0, appleDoubleEntries.slice(0, 10).join(", "));
+
+// fs.cpSync resolves symlinks via realpath instead of preserving their
+// literal target, which previously rewrote relative symlinks under
+// server/node_modules/.bin/ into absolute paths naming the builder's own
+// checkout — dangling and machine-specific on every other machine.
+const verboseListing = execFileSync("tar", ["-tvzf", tarPath], { encoding: "utf8" });
+const absoluteLinks = verboseListing
+  .split("\n")
+  .filter((line) => line.includes(" -> "))
+  .map((line) => line.split(" -> ")[1])
+  .filter((target) => target && target.startsWith("/"));
+check("no symlink in the tarball has an absolute target", absoluteLinks.length === 0, absoluteLinks.slice(0, 5).join(", "));
 
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);
