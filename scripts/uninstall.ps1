@@ -94,13 +94,25 @@ if (Test-Path $StateFile) {
 # 5. Thư mục cài. panel\ được giữ lại: đó là lịch sử hội thoại của side panel,
 #    dữ liệu của người dùng, không phải file cài đặt. Cùng quy tắc với
 #    uninstall.sh.
+# .mcp-config-*.json in panel\ are not user data: each is a copy of the
+# bridge's Bearer token, written per chat session, and nothing pruned them.
+# AgentSession.dispose() removes its own now; this catches the ones left behind
+# when the bridge was killed outright.
+if (Test-Path $PanelDir) {
+    $stale = @(Get-ChildItem $PanelDir -Force -Filter '.mcp-config-*.json' -ErrorAction SilentlyContinue)
+    if ($stale.Count -gt 0) {
+        $stale | Remove-Item -Force -ErrorAction SilentlyContinue
+        Say "→ Đã xoá $($stale.Count) file cấu hình MCP cũ trong panel\ (mỗi file chứa một token đã thu hồi)"
+    }
+}
+
 if (Test-Path $InstallDir) {
     $keptPanel = (Test-Path $PanelDir) -and ((Get-ChildItem $PanelDir -Force | Measure-Object).Count -gt 0)
     Get-ChildItem $InstallDir -Force |
         Where-Object { $_.FullName -ne $PanelDir } |
         Remove-Item -Recurse -Force
     if ($keptPanel) {
-        Say "→ Đã xoá $InstallDir (giữ lại panel\ — lịch sử chat của bạn)"
+        Say "→ Đã xoá $InstallDir (giữ lại panel\ — thư mục làm việc của khung chat)"
     } else {
         Remove-Item -Recurse -Force $InstallDir
         Say "→ Đã xoá $InstallDir"

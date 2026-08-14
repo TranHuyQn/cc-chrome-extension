@@ -187,6 +187,24 @@ for sub in server extension logs ccchrome.md tokens.json uninstall.sh service-un
     gone
   fi
 done
+# panel/ giữ lại dữ liệu người dùng, nhưng .mcp-config-*.json KHÔNG phải dữ liệu
+# người dùng: mỗi file là một bản sao token Bearer của bridge, do server sinh ra
+# cho từng phiên khung chat, và trước đây không có gì dọn — đo được 40 file sau
+# vài ngày dùng. Token đã bị thu hồi lúc gỡ (tokens.json biến mất), nhưng để lại
+# một đống file chứa credential đã chết trong thư mục mà uninstall cố ý bảo tồn
+# là thói quen xấu. AgentSession.dispose() xoá file của nó khi phiên đóng; đây là
+# lưới hứng cho những phiên mà bridge bị kill trước khi kịp dọn.
+if [ -d "$INSTALL_DIR/panel" ]; then
+  stale_configs=$(find "$INSTALL_DIR/panel" -maxdepth 1 -name '.mcp-config-*.json' 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$stale_configs" -gt 0 ]; then
+    note "$stale_configs file cấu hình MCP cũ trong panel/ (mỗi file chứa một token đã thu hồi)"
+    if [ "$DRY" = no ]; then
+      find "$INSTALL_DIR/panel" -maxdepth 1 -name '.mcp-config-*.json' -delete 2>/dev/null || true
+    fi
+    gone
+  fi
+fi
+
 # Xoá thư mục gốc chỉ khi đã rỗng — panel/ còn thì giữ nguyên cả thư mục.
 if [ "$DRY" = no ]; then
   rmdir "$INSTALL_DIR" 2>/dev/null || true
@@ -205,10 +223,15 @@ else
   echo "$([ $DRY = yes ] && echo 'Sẽ gỡ' || echo 'Đã gỡ') $removed mục."
 fi
 
-if [ -d "$INSTALL_DIR/panel" ]; then
+# Chỉ nhắc khi panel/ THỰC SỰ còn gì đó. Trước đây dòng này luôn hiện và gọi
+# panel/ là "lịch sử hội thoại", trong khi trên máy thật nó chỉ chứa file cấu
+# hình MCP do server sinh ra — lịch sử của khung chat nằm ở ~/.claude/projects/,
+# không phải ở đây. Nói sai chỗ dữ liệu nằm thì tệ hơn là không nói.
+if [ -d "$INSTALL_DIR/panel" ] && [ -n "$(ls -A "$INSTALL_DIR/panel" 2>/dev/null)" ]; then
   echo ""
-  echo "Còn lại lịch sử hội thoại của khung chat (KHÔNG bị xoá):"
+  echo "Giữ lại thư mục làm việc của khung chat (KHÔNG bị xoá):"
   echo "  $INSTALL_DIR/panel"
+  echo "  Đây là cwd mà mỗi tiến trình 'claude' của khung chat chạy trong đó."
   echo "  Muốn xoá luôn:  rm -rf \"$INSTALL_DIR/panel\""
 fi
 

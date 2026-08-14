@@ -6,9 +6,9 @@
 // background service on each developer's own machine:
 //      Claude Code --(MCP over Streamable HTTP, Bearer token)--> this process
 //      extension  --(ws://127.0.0.1/ws?token=...)-----------------^
-// The same server also runs on a shared VPS for a whole team, in which case
-// each token identifies one team member: their Claude Code sessions are
-// routed to their own Chrome extension. Tokens are required either way.
+// One bridge per person, on their own machine. Tokens are still required: the
+// loopback bind is not the only thing standing between a local process and
+// full browser control.
 //
 // The `--http` flag is still accepted even though http is now the only mode
 // (it is not required — process.argv is never checked for it — but every
@@ -37,12 +37,8 @@ const PORT = Number(process.env.CC_CHROME_PORT || 8787);
 // host runs Chrome Bridge with a live browser attached) to the network for
 // nothing, and — the bigger reason — would leave AGENT_ENABLED below false,
 // silently disabling the side panel until the user discovers CC_CHROME_HOST
-// on their own. README.md and deploy/chrome-bridge.service both say never to
-// expose 8787 directly; a default that violates that is the configuration
-// mistake panelRefusalReason() below says must not be reachable. The shared
-// VPS deployment is the exception, so it opts in: deploy/Dockerfile sets
-// CC_CHROME_HOST=0.0.0.0 explicitly, and deploy/chrome-bridge.service already
-// sets 127.0.0.1 explicitly (unaffected by this default either way).
+// on their own. Anything other than loopback here is a configuration mistake,
+// and it is exactly the mistake panelRefusalReason() below refuses to trust.
 const HOST = process.env.CC_CHROME_HOST || "127.0.0.1";
 const REQUEST_TIMEOUT_MS = Number(process.env.CC_CHROME_TIMEOUT_MS || 45000);
 // Chrome terminates an extension's service worker once its window has been in
@@ -56,7 +52,7 @@ const REQUEST_TIMEOUT_MS = Number(process.env.CC_CHROME_TIMEOUT_MS || 45000);
 // CC_CHROME_SESSION_TTL_MS.
 const graceFromEnv = Number(process.env.CC_CHROME_RECONNECT_GRACE_MS);
 const RECONNECT_GRACE_MS = Number.isFinite(graceFromEnv) && graceFromEnv >= 0 ? graceFromEnv : 25000;
-const VERSION = "1.0.7";
+const VERSION = "1.0.8";
 
 // The panel spawns `claude` on this host with the team's logged-in account, so
 // it exists only on a bridge nobody else can reach. A public deployment keeps
@@ -65,11 +61,11 @@ const VERSION = "1.0.7";
 const AGENT_ENABLED = isLoopbackHost(HOST);
 
 // "Bound to loopback" and "nobody but this machine can reach me" are not the
-// same claim, and this repo ships the counterexample: deploy/chrome-bridge.service
-// sets CC_CHROME_HOST=127.0.0.1 *because* a TLS reverse proxy sits in front of
-// it. A gate that only reads the bind address would call that deployment
-// private and hand the internet a process spawn on the VPS, once per chat turn,
-// under whatever account the host is logged into.
+// same claim. A bridge set to CC_CHROME_HOST=127.0.0.1 *because* a TLS reverse
+// proxy sits in front of it is bound to loopback and reachable by the
+// internet; a gate that only read the bind address would call it private and
+// hand out a process spawn, once per chat turn, under whatever account that
+// host is logged into.
 //
 // So a /panel upgrade has to prove all three, and any one failing is a 4004:
 //   1. the bind address is loopback (kept as defence in depth),

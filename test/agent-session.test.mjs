@@ -421,6 +421,11 @@ function makeSession(extra = {}) {
     );
   }
   session.dispose();
+  // The file holds the bridge's Bearer token, so it must not outlive the
+  // session. Nothing else pruned these: PANEL_CWD had 40 of them after a few
+  // days, and uninstall deliberately preserves that directory, so they
+  // survived that too.
+  check("dispose() removes the mcp config it wrote", !existsSync(p), p);
 }
 
 // A background service does not inherit an interactive shell's PATH: launchd

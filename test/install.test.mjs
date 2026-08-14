@@ -517,5 +517,33 @@ rmSync(fakeHome, { recursive: true, force: true });
   rmSync(xdgRoot, { recursive: true, force: true });
 }
 
+// --- panel/: stale MCP configs are swept, real files are not ----------------
+//
+// panel/ is preserved on purpose, but .mcp-config-*.json inside it are copies
+// of the bridge's Bearer token that the server writes per chat session — 40 of
+// them had accumulated on a real machine, and they survived every uninstall
+// because the whole directory was treated as user data. They are not.
+{
+  const panel = join(installDir, "panel");
+  mkdirSync(panel, { recursive: true });
+  const staleConfig = join(panel, ".mcp-config-11111111-2222-3333-4444-555555555555.json");
+  const userFile = join(panel, "something-the-user-made.txt");
+  writeFileSync(staleConfig, '{"mcpServers":{}}');
+  writeFileSync(userFile, "keep me");
+
+  // Self-contained: the suite above already uninstalled, so install once more
+  // rather than depending on whatever state the previous case left behind.
+  run("install.sh");
+  mkdirSync(panel, { recursive: true });
+  writeFileSync(staleConfig, '{"mcpServers":{}}');
+  writeFileSync(userFile, "keep me");
+  run("uninstall.sh");
+
+  check("uninstall sweeps stale .mcp-config-*.json out of panel/", !existsSync(staleConfig), staleConfig);
+  check("uninstall keeps everything else in panel/", existsSync(userFile), userFile);
+  check("uninstall keeps the install dir when panel/ still has content", existsSync(panel));
+}
+
+
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

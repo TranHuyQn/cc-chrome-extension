@@ -11,7 +11,7 @@
 // across turns even though the process does not.
 
 import { spawn } from "node:child_process";
-import { writeFileSync, chmodSync, existsSync } from "node:fs";
+import { writeFileSync, chmodSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 // cmd.exe quoting, kept to the one rule actually needed here: wrap in double
@@ -413,5 +413,15 @@ export class AgentSession {
     this.disposed = true;
     this.killChild("SIGKILL");
     this.child = null;
+    // The config carries the bridge's Bearer token, so it should not outlive
+    // the session that needed it. Nothing else pruned these: PANEL_CWD had
+    // accumulated one .mcp-config-<id>.json per panel session — 40 of them
+    // after a few days — and uninstall deliberately preserves that directory,
+    // so they survived it too. Best effort by design: a bridge killed outright
+    // never runs this, which is what the sweep in uninstall.sh is for.
+    if (this._mcpConfigPath) {
+      try { rmSync(this._mcpConfigPath, { force: true }); } catch { /* already gone */ }
+      this._mcpConfigPath = null;
+    }
   }
 }
