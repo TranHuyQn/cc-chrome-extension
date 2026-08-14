@@ -259,7 +259,17 @@ async function connect() {
   // current connection and cause a reconnect storm.
   socket.onopen = () => {
     if (ws !== socket) return;
-    send({ type: "hello", client: "claude-code-chrome-bridge", version: chrome.runtime.getManifest().version });
+    // tabGroupIsolation is declared, not inferred. The server used to read it
+    // off the version number ("major >= 3"), which stopped meaning anything
+    // when the project renumbered to 1.0.0 for its first published release —
+    // every current extension then looked older than the isolation it in fact
+    // enforces. A capability flag cannot go stale that way.
+    send({
+      type: "hello",
+      client: "claude-code-chrome-bridge",
+      version: chrome.runtime.getManifest().version,
+      tabGroupIsolation: true,
+    });
     // The server answers `ping` with `pong`, so this turns "proven" into a
     // sub-second signal instead of waiting a whole keepalive period.
     send({ type: "ping" });

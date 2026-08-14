@@ -56,7 +56,7 @@ const REQUEST_TIMEOUT_MS = Number(process.env.CC_CHROME_TIMEOUT_MS || 45000);
 // CC_CHROME_SESSION_TTL_MS.
 const graceFromEnv = Number(process.env.CC_CHROME_RECONNECT_GRACE_MS);
 const RECONNECT_GRACE_MS = Number.isFinite(graceFromEnv) && graceFromEnv >= 0 ? graceFromEnv : 25000;
-const VERSION = "1.0.4";
+const VERSION = "1.0.5";
 
 // The panel spawns `claude` on this host with the team's logged-in account, so
 // it exists only on a bridge nobody else can reach. A public deployment keeps
@@ -138,10 +138,17 @@ function pickSubprotocol(protocols) {
 // Extension connections
 // ---------------------------------------------------------------------------
 
-// An unparseable or absent version counts as too old: only a version this
-// server can read and confirm to be >= 3.0.0 proves the extension enforces
-// tab-group isolation.
-function isPreIsolationExtension(version) {
+// Capability first, version only as a fallback for extensions too old to
+// declare one. The version test alone was wrong the moment this project
+// renumbered to 1.0.0 for its first published release: "major >= 3" then
+// classified every current extension as pre-isolation and printed a warning
+// saying isolation was NOT enforced, which was false and, being a security
+// claim, worse than silence. Version numbers restart; capabilities do not.
+//
+// The fallback still reads major < 3, which remains correct for the
+// extensions that predate the flag: isolation landed in that line's 3.0.0.
+function isPreIsolationExtension(version, hello) {
+  if (hello?.tabGroupIsolation === true) return false;
   const major = Number.parseInt(String(version ?? "").split(".")[0], 10);
   return !Number.isInteger(major) || major < 3;
 }
@@ -181,9 +188,9 @@ class ExtensionConnection {
       // pre-3.0.0 one connects and works perfectly — with no isolation at all,
       // every tool reaching every tab in that browser. Nothing in the protocol
       // fails, so the only way this is ever noticed is if the server says it.
-      if (isPreIsolationExtension(msg.version)) {
+      if (isPreIsolationExtension(msg.version, msg)) {
         log(
-          `[${this.name}] WARNING: extension version ${msg.version || "unknown"} is older than 3.0.0 — ` +
+          `[${this.name}] WARNING: extension version ${msg.version || "unknown"} predates tab-group isolation — ` +
           "per-session tab group isolation is NOT enforced, so every tool can reach every tab in that browser. " +
           "Reinstall the extension (<server>/extension.zip, or the extension/ folder in the repo)."
         );

@@ -81,22 +81,29 @@ await new Promise((r) => pageServer.listen(HTTP_PORT, "127.0.0.1", r));
 
 // --- start bridge server in http mode --------------------------------------
 
-const stateFile = join(mkdtempSync(join(tmpdir(), "cc-bridge-state-")), "tokens.json");
 
+// stderr is captured as well as printed: the server says things there that
+// nothing else can observe — including a warning about the extension's own
+// capabilities that must NOT appear for a current extension.
+let serverLog = "";
 const serverProc = spawn("node", [join(root, "server", "index.js"), "--http"], {
   env: {
     ...process.env,
     CC_CHROME_PORT: String(MCP_PORT),
     CC_CHROME_HOST: "127.0.0.1",
     CC_CHROME_TOKENS: `${TOKEN_A}=alice,${TOKEN_B}=bob`,
-    CC_CHROME_STATE_FILE: stateFile,
     CC_CHROME_DIST_DIR: join(root, "dist"),
     // Tool calls now wait out a service-worker restart before failing (see
     // test/reconnect-grace.test.mjs). The checks below that expect a clean
     // "not connected" failure would otherwise each sit through the 25s default.
     CC_CHROME_RECONNECT_GRACE_MS: "500",
   },
-  stdio: ["ignore", "inherit", "inherit"],
+  stdio: ["ignore", "inherit", "pipe"],
+});
+serverProc.stderr.setEncoding("utf8");
+serverProc.stderr.on("data", (chunk) => {
+  serverLog += chunk;
+  process.stderr.write(chunk);
 });
 
 // Wait for /health
@@ -544,6 +551,16 @@ if (res.status === 404) {
     renameSync(distCcchromeHidden, distCcchrome);
   }
 }
+
+// The extension under test is the one in this repo, so the server must not
+// claim it predates tab-group isolation. That warning was emitted for every
+// current extension once the project renumbered to 1.0.0 and the check still
+// read "major >= 3" — a false security claim, printed on every connect.
+check(
+  "the server does not warn that the current extension lacks tab-group isolation",
+  !/isolation is NOT enforced|predates tab-group isolation/.test(serverLog),
+  serverLog.split("\n").filter((l) => /isolation/.test(l)).join(" | "),
+);
 
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 
