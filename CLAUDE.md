@@ -337,6 +337,49 @@ attached them.
   not deterministic enough for CI. Run it by hand — `HEADED=1` is already baked
   into the npm script — when you need to verify the actual side-panel UI
   end-to-end.
+- The panel's activity timeline is a **two-sided contract with one owner per
+  half**: `AgentSession.translate()` in `server/agent.js` owns the data — it
+  pairs `tool_use_id` between the `content_block_start`/`assistant` lines and
+  the `user` line carrying `tool_result`, times each step, and truncates
+  results before they cross the socket — while `extension/panel-labels.js` owns
+  every user-facing word. Adding a browser tool means adding one row to
+  `TOOL_LABELS`; it means nothing on the server. Two invariants keep the UI
+  honest and are easy to break: a `tool_result` for an id the server never
+  announced must open its own `step_start` first (the panel keys rows by id and
+  would silently drop an unmatched `step_end`), and **every** path that ends a
+  turn must go through `AgentSession.endTurn()`, which closes any step still
+  open with `aborted: true`. Miss the second and a killed turn leaves a row
+  pulsing forever — which is the exact symptom the timeline was built to remove.
+- The panel must also sweep its OWN open step rows rather than count on the
+  server for it: `endTurn()` only fires on a session that is still alive, and a
+  *disposed* session — a model change, a dropped socket — emits nothing at all,
+  so there is no closing event to receive. `extension/sidepanel.js` calls
+  `sweepOpenSteps()` at `turn_start`, in `socket.onclose`, in the model `change`
+  handler, and after a journal replay; miss any one of those call sites and a
+  row pulses forever with no turn running, which then wins `paintStatus`'s "a
+  running tool outranks any phase" rule and names a dead tool in the status
+  bar. `test/verify-sidepanel.mjs`'s T6 covers the model-change window on
+  purpose without an intervening `turn_start` — `turn_start` sweeps too and
+  would mask the very gap the test exists to catch.
+- `thinking` blocks from `claude -p --output-format stream-json` **always carry
+  an empty string** — measured twice on CLI 2.1.197, including under
+  `ultrathink`, where the model plainly did think (a 2462-character answer
+  followed). The count of `thinking_delta` events is still non-zero, so "the
+  model is thinking" is knowable and "what it is thinking" is not. The panel
+  therefore reports a *phase*, never reasoning text. Do not add a collapsible
+  thinking box back without re-measuring first.
+- The panel keeps its own journal of what it drew (`extension/panel-journal.js`,
+  `panelLog.<windowId>` in `chrome.storage.local`, capped at 400 entries /
+  512KB) and replays it before dialling the socket, because a reopened panel
+  otherwise showed a blank log for a conversation the server resumes happily.
+  It is NOT synchronised with the CLI's own transcript: clearing one does not
+  clear the other. `delta` events are drawn but never journalled — `message`
+  restates the same text authoritatively, and journalling both doubles the log
+  on reopen.
+- The panel declares `protocol: 2` in its `start` frame. A bridge is upgraded by
+  the installer while the extension only changes when the user reloads it in
+  `chrome://extensions`, so the server still emits the pre-timeline `tool` event
+  to anything that does not ask for 2. Do not delete that branch.
 
 ## Conventions
 

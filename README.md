@@ -406,6 +406,17 @@ chạy một tiến trình `claude` mới (headless, `--tools ""`, chỉ có too
 `mcp__chrome`) rồi stream kết quả về khung chat qua một WebSocket riêng
 (`/panel`, tách khỏi `/ws` mà extension dùng).
 
+Khung chat hiện tiến trình theo thời gian thực: mỗi lần Claude gọi một công cụ trình duyệt
+sẽ có một dòng riêng, mở ra ngay lúc nó quyết định gọi, và đóng lại bằng ✓ hoặc ✗ kèm thời
+gian chạy. Bấm vào dòng đó để xem tham số và kết quả (kết quả đã được cắt bớt ở server).
+Dải chữ ngay trên ô nhập luôn cho biết đang ở giai đoạn nào — đang gửi yêu cầu, đang suy
+nghĩ, đang chạy công cụ nào, đang trả lời — kèm số giây trôi.
+
+Ngôn ngữ của phần chữ mô tả hoạt động bám theo ngôn ngữ bạn gõ: nhắn tiếng Việt thì hiện
+"Đang suy nghĩ", nhắn tiếng Anh thì hiện "Thinking". Nút bấm vẫn giữ tiếng Việt.
+
+Đóng panel rồi mở lại sẽ thấy lại toàn bộ nội dung đã trao đổi. Bấm "Phiên mới" mới xoá.
+
 ### Bật khung chat
 
 Cài bằng `install.sh` (hoặc `install.ps1`) là **có sẵn luôn** — bridge do dịch vụ nền
