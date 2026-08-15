@@ -34,7 +34,11 @@ window.ccJournal = (() => {
     if (saveTimer || !key) return;
     saveTimer = setTimeout(() => {
       saveTimer = null;
-      if (key) chrome.storage.local.set({ [key]: entries });
+      if (key) {
+        chrome.storage.local
+          .set({ [key]: entries })
+          .catch((err) => console.warn(`[panel] journal write failed for ${key} (debounced):`, err));
+      }
     }, SAVE_DEBOUNCE_MS);
   }
 
@@ -45,7 +49,12 @@ window.ccJournal = (() => {
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;
-      if (key) chrome.storage.local.set({ [key]: entries });
+      if (key) {
+        const flushedKey = key;
+        chrome.storage.local
+          .set({ [flushedKey]: entries })
+          .catch((err) => console.warn(`[panel] journal write failed for ${flushedKey} (flush on load):`, err));
+      }
     }
     key = storageKey;
     const got = await chrome.storage.local.get({ [key]: [] });
@@ -77,7 +86,11 @@ window.ccJournal = (() => {
       clearTimeout(saveTimer);
       saveTimer = null;
     }
-    if (key) chrome.storage.local.set({ [key]: [] });
+    if (key) {
+      chrome.storage.local
+        .set({ [key]: [] })
+        .catch((err) => console.warn(`[panel] journal clear failed for ${key}:`, err));
+    }
   }
 
   // An entry can be journalled before its final text exists: the panel records

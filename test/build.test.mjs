@@ -91,7 +91,7 @@ const crxPath = join(root, "dist", "extension.crx");
 
 const zip = new AdmZip(zipPath);
 const names = zip.getEntries().map((e) => e.entryName);
-for (const required of ["manifest.json", "background.js", "popup.html", "popup.js", "sidepanel.html", "sidepanel.js", "icons/icon128.png"]) {
+for (const required of ["manifest.json", "background.js", "popup.html", "popup.js", "sidepanel.html", "sidepanel.js", "panel-labels.js", "panel-journal.js", "icons/icon128.png"]) {
   check(`zip contains ${required}`, names.includes(required), names.join(", "));
 }
 const zippedManifest = JSON.parse(zip.readAsText("manifest.json"));

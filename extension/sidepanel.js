@@ -475,8 +475,15 @@ function handle(msg) {
       // turn must not inherit a pulsing row from the one before it.
       sweepOpenSteps();
       setBusy(true);
+      // Same stale-reference risk as `ready`, model change, and socket close
+      // above/below: flush whatever reached the screen into the journal
+      // before dropping the reference. Unreachable today (a new turn requires
+      // busy === false, and every path that clears it already flushes), kept
+      // for symmetry with those other four sites so the invariant holds even
+      // if a future path clears busy differently. flushStreamingEntry()
+      // already nulls streamingEntry itself.
+      flushStreamingEntry();
       streaming = null;
-      streamingEntry = null;
       phase = null;
       phaseStartedAt = Date.now();
       startTicking();
@@ -635,6 +642,21 @@ modelEl.addEventListener("change", () => {
   // a single row; connect() below reloads the same state harmlessly when it
   // actually dials.
   try {
+    // A journal for a window that no longer exists can never be replayed --
+    // a reopened window gets a fresh id, so its own journal (keyed by that
+    // new id) is what will ever be read. The old key is not merely stale, it
+    // is unreachable: nothing in this file ever looks it up again. Chrome
+    // window ids climb monotonically within a browser session and nothing
+    // else in this extension prunes panelLog.* keys, so left alone they
+    // accumulate forever against chrome.storage.local's ~10MB quota (this
+    // extension does not request unlimitedStorage). Deliberately scoped to
+    // panelLog.* only -- panelSession.* keys are tiny, pre-existing, and a
+    // window id can be reused across browser restarts in ways that make
+    // pruning them a different question from this one.
+    const live = new Set((await chrome.windows.getAll()).map((w) => `panelLog.${w.id}`));
+    const all = await chrome.storage.local.get(null);
+    const dead = Object.keys(all).filter((k) => k.startsWith("panelLog.") && !live.has(k));
+    if (dead.length) await chrome.storage.local.remove(dead);
     await loadState();
     await restore();
   } catch (err) {

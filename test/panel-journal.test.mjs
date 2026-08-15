@@ -50,7 +50,11 @@ sandbox.globalThis = sandbox;
 runInNewContext(readFileSync(join(root, "extension", "panel-journal.js"), "utf8"), sandbox);
 const ccJournal = sandbox.window.ccJournal;
 
-check("the file exposes exactly one global", !!ccJournal, JSON.stringify(Object.keys(sandbox.window)));
+check(
+  "the file exposes exactly one global",
+  Object.keys(sandbox.window).length === 1,
+  JSON.stringify(Object.keys(sandbox.window)),
+);
 
 // --- load / push / persist ---------------------------------------------------
 

@@ -27,7 +27,11 @@ sandbox.globalThis = sandbox;
 runInNewContext(readFileSync(join(root, "extension", "panel-labels.js"), "utf8"), sandbox);
 const ccLabels = sandbox.window.ccLabels;
 
-check("the file exposes exactly one global", !!ccLabels, JSON.stringify(Object.keys(sandbox.window)));
+check(
+  "the file exposes exactly one global",
+  Object.keys(sandbox.window).length === 1,
+  JSON.stringify(Object.keys(sandbox.window)),
+);
 
 // --- tool labels -------------------------------------------------------------
 
