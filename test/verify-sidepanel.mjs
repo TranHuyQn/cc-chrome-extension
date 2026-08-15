@@ -684,6 +684,69 @@ async function run() {
     if (logKeys.length) await chrome.storage.local.remove(logKeys);
   }, `ws://127.0.0.1:${MCP_PORT}/ws?token=${TOKEN}`);
 
+  // --- U1: băng cập nhật hiện đúng theo trạng thái --------------------------
+  /* eslint-disable no-undef */
+  await f6Page.evaluate(() => {
+    handle({ type: "update_status", current: "1.1.0", latest: "1.2.0", available: true, notes: "", lastResult: null });
+  });
+  /* eslint-enable no-undef */
+  const u1 = await f6Page.$eval("#update", (el) => ({ hidden: el.hidden, text: el.querySelector("#updateText").textContent, btn: el.querySelector("#updateAction").textContent }));
+  check("U1: a newer release shows the banner with a Cập nhật button",
+    u1.hidden === false && u1.text.includes("1.2.0") && u1.btn === "Cập nhật", JSON.stringify(u1));
+
+  /* eslint-disable no-undef */
+  await f6Page.evaluate(() => { handle({ type: "update_status", current: "1.1.0", latest: "1.1.0", available: false, notes: "", lastResult: null }); });
+  /* eslint-enable no-undef */
+  check("U1: no newer release hides the banner", await f6Page.$eval("#update", (el) => el.hidden) === true);
+
+  // A rollback must still be explained after the bridge comes back on the old
+  // version — that is the only moment the user can learn why nothing changed.
+  /* eslint-disable no-undef */
+  await f6Page.evaluate(() => {
+    handle({ type: "update_status", current: "1.1.0", latest: "1.1.0", available: false, notes: "",
+      lastResult: { ok: false, step: "rolled-back", reason: "Bản 1.2.0 không lên được. Đã khôi phục bản cũ." } });
+  });
+  /* eslint-enable no-undef */
+  const u2 = await f6Page.$eval("#update", (el) => ({ hidden: el.hidden, cls: el.className, text: el.querySelector("#updateText").textContent }));
+  check("U1: a previous rollback is explained even when no update is available",
+    u2.hidden === false && u2.cls.includes("failed") && u2.text.includes("khôi phục"), JSON.stringify(u2));
+
+  /* eslint-disable no-undef */
+  await f6Page.evaluate(() => { handle({ type: "update_failed", reason: "Checksum không khớp" }); });
+  /* eslint-enable no-undef */
+  check("U1: a failed update says why", (await f6Page.$eval("#updateText", (el) => el.textContent)).includes("Checksum"));
+
+  // A previous run that stopped midway (backup still on disk) or that crashed
+  // outright must render the FULL multi-sentence reason -- for these two the
+  // reason IS the recovery instructions, so truncating it would strand the user.
+  const u3Reason = "Có vẻ một bản cập nhật trước đã dừng giữa chừng. Bản cài cũ đang nằm ở " +
+    "/Users/test/.cc-chrome-bridge.bak. Nếu bridge hiện tại chạy bình thường, đổi tên " +
+    "/Users/test/.cc-chrome-bridge.bak thành một tên khác rồi thử lại. Nếu bridge không chạy: " +
+    "đổi tên /Users/test/.cc-chrome-bridge thành /Users/test/.cc-chrome-bridge.failed (nếu nó còn " +
+    "tồn tại), rồi đổi tên /Users/test/.cc-chrome-bridge.bak thành /Users/test/.cc-chrome-bridge " +
+    "để khôi phục bản cũ. Nhật ký lần trước: /Users/test/.cc-chrome-bridge/update.log";
+  /* eslint-disable no-undef */
+  await f6Page.evaluate((reason) => {
+    handle({ type: "update_status", current: "1.1.0", latest: "1.1.0", available: false, notes: "",
+      lastResult: { ok: false, step: "already-running", reason } });
+  }, u3Reason);
+  /* eslint-enable no-undef */
+  const u3 = await f6Page.$eval("#updateText", (el) => el.textContent);
+  check("U1: an already-running (mid-update backup left on disk) result renders the full recovery reason",
+    u3 === u3Reason, u3);
+
+  const u4Reason = "Trình cập nhật gặp lỗi: EACCES. Bản cài cũ (nếu còn) ở /Users/test/.cc-chrome-bridge.bak; " +
+    "bản cài lỗi (nếu có) ở /Users/test/.cc-chrome-bridge.failed; nhật ký ở /Users/test/.cc-chrome-bridge/update.log.";
+  /* eslint-disable no-undef */
+  await f6Page.evaluate((reason) => {
+    handle({ type: "update_status", current: "1.1.0", latest: "1.1.0", available: false, notes: "",
+      lastResult: { ok: false, step: "crashed", reason } });
+  }, u4Reason);
+  /* eslint-enable no-undef */
+  const u4 = await f6Page.$eval("#updateText", (el) => el.textContent);
+  check("U1: a crashed runner renders the full reason (error + backup/failed/log paths)",
+    u4 === u4Reason, u4);
+
   // --- small fixes: never render the literal string "undefined" ---------------
   /* eslint-disable no-undef */
   await f6Page.evaluate(() => { handle({ type: "error" }); }); // no `message` field

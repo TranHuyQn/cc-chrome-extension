@@ -55,6 +55,14 @@
       background: #2a2a2a; color: #eee; border: 1px solid #444;
       border-radius: 6px; padding: 8px; font: inherit;
     }
+    #update {
+      display: flex; align-items: flex-start; gap: 8px;
+      padding: 6px 10px; border-bottom: 1px solid #333;
+      background: #2a2118; color: #e8c39e; font-size: 12px;
+    }
+    #update[hidden] { display: none; }
+    #updateText { flex: 1; white-space: pre-wrap; word-break: break-word; }
+    #update.failed { background: #2a1a1a; color: #f28b82; }
   </style>
 </head>
 <body>
@@ -68,6 +76,11 @@
     </select>
     <span id="group"></span>
   </header>
+
+  <div id="update" hidden>
+    <span id="updateText"></span>
+    <button id="updateAction"></button>
+  </div>
 
   <div id="log"></div>
 

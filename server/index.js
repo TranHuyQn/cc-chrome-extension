@@ -850,6 +850,13 @@ async function mainHttp() {
   // Outside the install directory on purpose: a rollback overwrites the whole
   // install dir and would swallow the very record explaining why it rolled back.
   const UPDATE_STATUS_FILE = join(homedir(), ".ccchrome-update.json");
+  // The panel may ask as often as it likes — it asks on every `ready`, which
+  // includes every reconnect — but GitHub allows 60 unauthenticated requests an
+  // hour per IP, shared by every panel and every machine behind one address.
+  // Exceeding it fails closed, so an un-cached check goes quiet precisely when a
+  // release does exist. 30 minutes is irrelevant for a tool nobody updates hourly.
+  const RELEASE_CACHE_MS = 30 * 60 * 1000;
+  let releaseCache = null; // { at, latest, notes }
   // One update at a time, process-wide. A second panel asking mid-update must be
   // refused rather than queued — two installers racing over one directory is the
   // one failure this feature cannot recover from. The read-then-set in
@@ -1161,6 +1168,17 @@ async function mainHttp() {
       lastResult = JSON.parse(readFileSync(UPDATE_STATUS_FILE, "utf8"));
     } catch { /* no previous update, or unreadable — not an error */ }
 
+    if (releaseCache && Date.now() - releaseCache.at < RELEASE_CACHE_MS) {
+      return {
+        type: "update_status",
+        current: VERSION,
+        latest: releaseCache.latest,
+        available: compareVersions(releaseCache.latest, VERSION) === 1,
+        notes: releaseCache.notes,
+        lastResult,
+      };
+    }
+
     try {
       const res = await fetch(LATEST_RELEASE_API, {
         headers: { Accept: "application/vnd.github+json", "User-Agent": "cc-chrome-bridge" },
@@ -1170,16 +1188,32 @@ async function mainHttp() {
       const tag = body?.tag_name;
       if (!isValidTag(tag)) throw new Error(`tag không hợp lệ: ${String(tag)}`);
       const latest = String(tag).replace(/^v/, "");
+      const notes = typeof body?.body === "string" ? body.body.slice(0, 2000) : "";
+      releaseCache = { at: Date.now(), latest, notes };
       return {
         type: "update_status",
         current: VERSION,
         latest,
         available: compareVersions(latest, VERSION) === 1,
-        notes: typeof body?.body === "string" ? body.body.slice(0, 2000) : "",
+        notes,
         lastResult,
       };
     } catch (err) {
+      // Deliberately does not touch releaseCache: a network hiccup must not
+      // erase a previously known-good latest version, or the one real signal
+      // this tool exists to surface (a release is available) goes dark right
+      // when GitHub is having a bad minute.
       log("[update] không hỏi được bản mới:", err.message);
+      if (releaseCache) {
+        return {
+          type: "update_status",
+          current: VERSION,
+          latest: releaseCache.latest,
+          available: compareVersions(releaseCache.latest, VERSION) === 1,
+          notes: releaseCache.notes,
+          lastResult,
+        };
+      }
       return { type: "update_status", current: VERSION, latest: null, available: false, notes: "", lastResult };
     }
   }

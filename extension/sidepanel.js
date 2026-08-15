@@ -25,6 +25,9 @@ const newBtn = document.getElementById("newSession");
 const statusEl = document.getElementById("status");
 const statusTextEl = document.getElementById("statusText");
 const statusTimeEl = document.getElementById("statusTime");
+const updateEl = document.getElementById("update");
+const updateTextEl = document.getElementById("updateText");
+const updateActionEl = document.getElementById("updateAction");
 
 let ws = null;
 let reconnectDelay = RECONNECT_MIN_MS;
@@ -73,6 +76,11 @@ let locale = "vi";
 // the user has been typing this whole session — then persist that overwrite on
 // the next `ready`.
 let localeInitialized = false;
+
+// null = chưa hỏi, "available" = có bản mới, "running" = đang cài,
+// "reload" = cài xong chờ nạp lại, "failed" = hỏng.
+let updateState = null;
+let updateLatest = null;
 
 function setState(state, detail = "") {
   dotEl.className = `dot ${state}`;
@@ -207,6 +215,61 @@ function paintStatus() {
 function setBusy(value) {
   busy = value;
   stopBtn.disabled = !value;
+}
+
+// Update status describes the machine RIGHT NOW, not the conversation, so it is
+// drawn directly here rather than through record()/ccJournal — a replayed
+// "Có bản 1.2.1" from a week-old journal entry would be a lie the next time the
+// panel opens.
+function showUpdate(state, text, actionLabel) {
+  updateState = state;
+  updateEl.hidden = false;
+  updateEl.classList.toggle("failed", state === "failed");
+  updateTextEl.textContent = text;
+  updateActionEl.hidden = !actionLabel;
+  updateActionEl.textContent = actionLabel || "";
+}
+
+function hideUpdate() {
+  updateState = null;
+  updateEl.hidden = true;
+}
+
+const UPDATE_STEP_TEXT = {
+  downloading: "Đang tải bản mới…",
+  verifying: "Đang kiểm tra gói tải về…",
+  "backing-up": "Đang sao lưu bản hiện tại…",
+  installing: "Đang cài… bridge sẽ khởi động lại",
+};
+
+// The socket dies when the installer stops the service, so the only way to learn
+// the outcome is to ask /health directly. 90s is deliberate: the runner waits 30s
+// for health before it even begins rolling back, so the panel's ceiling has to
+// cover a full install AND a full rollback.
+async function waitForNewVersion(expected) {
+  const raw = (await chrome.storage.local.get({ wsUrl: DEFAULT_WS_URL })).wsUrl;
+  let health;
+  try {
+    const parsed = new URL(raw);
+    health = `http://${parsed.hostname}:${parsed.port}/health`;
+  } catch {
+    showUpdate("failed", "Không đọc được địa chỉ bridge để kiểm tra kết quả.", "");
+    return;
+  }
+  const deadline = Date.now() + 90000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 2000));
+    try {
+      const res = await fetch(health, { cache: "no-store" });
+      const body = await res.json();
+      if (body?.version === expected) {
+        showUpdate("reload", `Đã cài ${expected}. Nạp lại extension để dùng giao diện mới.`, "Nạp lại extension");
+        return;
+      }
+    } catch { /* bridge is restarting — that is the expected state here */ }
+  }
+  showUpdate("failed",
+    "Quá 90 giây chưa thấy bản mới chạy. Mở terminal và chạy lại lệnh cài trong README.", "");
 }
 
 function send(obj) {
@@ -466,6 +529,30 @@ function handle(msg) {
       // shows an empty bubble where the partial reply was.
       flushStreamingEntry();
       streaming = null;
+      send({ type: "update_check" });
+      break;
+    case "update_status":
+      // A panel that just connected asks once; nothing here is journalled,
+      // because it describes the machine right now, not the conversation.
+      // `lastResult.step` may be "rolled-back", "already-running", "crashed" or
+      // "failed-no-backup" -- all are failures, so `ok === false` is the only
+      // distinction that matters, and `reason` carries the full explanation
+      // (recovery paths included) for every one of them.
+      if (msg.available && msg.latest) {
+        updateLatest = msg.latest;
+        showUpdate("available", `Có bản ${msg.latest} (đang chạy ${msg.current}).`, "Cập nhật");
+      } else if (msg.lastResult && msg.lastResult.ok === false) {
+        showUpdate("failed", msg.lastResult.reason || "Lần cập nhật trước thất bại.", "");
+      } else {
+        hideUpdate();
+      }
+      break;
+    case "update_progress":
+      showUpdate("running", UPDATE_STEP_TEXT[msg.step] || "Đang cập nhật…", "");
+      if (msg.step === "installing" && updateLatest) waitForNewVersion(updateLatest);
+      break;
+    case "update_failed":
+      showUpdate("failed", msg.reason || "Cập nhật thất bại.", "");
       break;
     case "turn_start":
       // A disposed AgentSession emits nothing at all (see the comment on
@@ -591,6 +678,19 @@ inputEl.addEventListener("keydown", (event) => {
 });
 
 stopBtn.addEventListener("click", () => send({ type: "stop" }));
+
+updateActionEl.addEventListener("click", () => {
+  if (updateState === "available") {
+    send({ type: "update_start" });
+    showUpdate("running", UPDATE_STEP_TEXT.downloading, "");
+    return;
+  }
+  if (updateState === "reload") {
+    // Reloading destroys this page, which is why it is a button and not
+    // automatic: the user picks the moment, after they have read the result.
+    chrome.runtime.reload();
+  }
+});
 
 attachBtn.addEventListener("click", () => {
   // No windowId: the extension resolves the focused window itself, so a caller
