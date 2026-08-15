@@ -1050,6 +1050,11 @@ async function mainHttp() {
         return;
       }
       updateInFlight = true;
+      // Nothing clears this on the success path — the installer is expected to
+      // kill this process long before the timer fires. It exists for the case
+      // where the handover succeeds but the install never gets that far, which
+      // would otherwise refuse every future update until the bridge restarts.
+      setTimeout(() => { updateInFlight = false; }, 10 * 60 * 1000).unref();
       try {
         await startUpdate(send);
       } catch (err) {
@@ -1214,7 +1219,7 @@ async function mainHttp() {
       reshapeToCheckout(extracted, source);
 
       send({ type: "update_progress", step: "installing" });
-      spawnUpdateRunner({ source, version: status.latest });
+      spawnUpdateRunner({ source, work, version: status.latest });
     } catch (err) {
       // The reshaped source is only needed if the handover succeeded. On any
       // failure it is three copies of a node_modules-bearing payload, and the
@@ -1228,13 +1233,14 @@ async function mainHttp() {
   // because the installer's first act is to stop the service that IS this
   // process. stdio is fully detached for the same reason — a pipe to a dead
   // parent would kill it.
-  function spawnUpdateRunner({ source, version }) {
+  function spawnUpdateRunner({ source, work, version }) {
     const installer = process.platform === "win32"
       ? join(INSTALL_DIR, "install.ps1")
       : join(INSTALL_DIR, "install.sh");
     const child = spawn(process.execPath, [
       join(INSTALL_DIR, "update-runner.mjs"),
       "--source", source,
+      "--work", work,
       "--install-dir", INSTALL_DIR,
       "--installer", installer,
       "--port", String(PORT),
