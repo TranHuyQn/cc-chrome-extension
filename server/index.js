@@ -20,14 +20,16 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { WebSocketServer } from "ws";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { readFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
 import { z } from "zod";
 import { TokenStore } from "./tokens.js";
 import { AgentSession, claudeBinFromEnv } from "./agent.js";
 import { isLoopbackHost, isLoopbackAddress, forwardedHeadersIn } from "./loopback.js";
+import { compareVersions, isValidTag, releaseUrls, parseChecksumFile, sha256File, reshapeToCheckout, LATEST_RELEASE_API } from "./updater.js";
 
 const PORT = Number(process.env.CC_CHROME_PORT || 8787);
 // Loopback by default: the mode this replaced (stdio) bound 127.0.0.1
@@ -844,6 +846,13 @@ async function mainHttp() {
   });
 
   const PANEL_CWD = join(homedir(), ".cc-chrome-bridge", "panel");
+  // Outside the install directory on purpose: a rollback overwrites the whole
+  // install dir and would swallow the very record explaining why it rolled back.
+  const UPDATE_STATUS_FILE = join(homedir(), ".ccchrome-update.json");
+  // One update at a time, process-wide. A second panel asking mid-update must be
+  // refused rather than queued — two installers racing over one directory is the
+  // one failure this feature cannot recover from.
+  let updateInFlight = false;
   // Everything under here is derived from the design's tool-set decision: the
   // agent gets the chrome MCP tools and nothing else.
   const PANEL_ALLOWED_TOOLS = process.env.CC_CHROME_PANEL_TOOLS || "mcp__chrome";
@@ -1018,6 +1027,33 @@ async function mainHttp() {
       return;
     }
 
+    if (msg.type === "update_check") {
+      send(await buildUpdateStatus());
+      return;
+    }
+
+    if (msg.type === "update_start") {
+      // msg.url is deliberately not read. The URL is derived from a constant in
+      // updater.js and from the tag GitHub reports; letting a caller name it
+      // would turn this endpoint into "download and run whatever I point at".
+      if (updateInFlight) {
+        send({ type: "update_failed", reason: "Đang có một bản cập nhật chạy dở." });
+        return;
+      }
+      if (panel.agent?.busy) {
+        send({ type: "update_failed", reason: "Claude đang chạy — dừng lượt chat rồi cập nhật." });
+        return;
+      }
+      updateInFlight = true;
+      try {
+        await startUpdate(send);
+      } catch (err) {
+        updateInFlight = false;
+        send({ type: "update_failed", reason: err.message });
+      }
+      return;
+    }
+
     // Checked before the agent-state guard so an unrecognised type always names
     // itself: silence here would send whoever writes the panel UI hunting for a
     // bug in the agent when the real fault is a typo in the frame they sent.
@@ -1097,6 +1133,85 @@ async function mainHttp() {
               : err.message;
       return { ok: false, error: message };
     }
+  }
+
+  // Reports what is installed, what is published, and how the last attempt went.
+  // A GitHub outage or a rate limit must not surface as an error the user has to
+  // read — there is nothing they can do about it, and the panel is not a status
+  // page for github.com. It degrades to "no update available".
+  async function buildUpdateStatus() {
+    let lastResult = null;
+    try {
+      lastResult = JSON.parse(readFileSync(UPDATE_STATUS_FILE, "utf8"));
+    } catch { /* no previous update, or unreadable — not an error */ }
+
+    try {
+      const res = await fetch(LATEST_RELEASE_API, {
+        headers: { Accept: "application/vnd.github+json", "User-Agent": "cc-chrome-bridge" },
+      });
+      if (!res.ok) throw new Error(`GitHub trả ${res.status}`);
+      const body = await res.json();
+      const tag = body?.tag_name;
+      if (!isValidTag(tag)) throw new Error(`tag không hợp lệ: ${String(tag)}`);
+      const latest = String(tag).replace(/^v/, "");
+      return {
+        type: "update_status",
+        current: VERSION,
+        latest,
+        available: compareVersions(latest, VERSION) === 1,
+        notes: typeof body?.body === "string" ? body.body.slice(0, 2000) : "",
+        lastResult,
+      };
+    } catch (err) {
+      log("[update] không hỏi được bản mới:", err.message);
+      return { type: "update_status", current: VERSION, latest: null, available: false, notes: "", lastResult };
+    }
+  }
+
+  // Everything that can fail harmlessly happens here, while the socket is still
+  // up and before a single byte of the installed copy is touched: the network,
+  // the checksum, the disk. Only once a verified, reshaped source directory
+  // exists does it hand over to the detached runner and let go.
+  async function startUpdate(send) {
+    send({ type: "update_progress", step: "downloading" });
+    const status = await buildUpdateStatus();
+    if (!status.available || !status.latest) throw new Error("Không có bản mới để cài.");
+
+    const urls = releaseUrls(`v${status.latest}`);
+    const work = mkdtempSync(join(tmpdir(), "cc-update-"));
+    const tarball = join(work, "release.tar.gz");
+
+    const tarRes = await fetch(urls.tarball);
+    if (!tarRes.ok) throw new Error(`Tải gói thất bại (${tarRes.status}).`);
+    writeFileSync(tarball, Buffer.from(await tarRes.arrayBuffer()));
+
+    send({ type: "update_progress", step: "verifying" });
+    const sumRes = await fetch(urls.checksum);
+    if (!sumRes.ok) throw new Error(`Bản phát hành thiếu file checksum (${sumRes.status}).`);
+    const expected = parseChecksumFile(await sumRes.text());
+    if (!expected) throw new Error("File checksum không đọc được.");
+    const actual = await sha256File(tarball);
+    if (actual !== expected) {
+      throw new Error("Checksum không khớp — gói tải về không đúng bản đã phát hành. Không cài gì cả.");
+    }
+
+    send({ type: "update_progress", step: "backing-up" });
+    const extracted = join(work, "extracted");
+    mkdirSync(extracted, { recursive: true });
+    await new Promise((resolve, reject) => {
+      const child = spawn("tar", ["-xzf", tarball, "-C", extracted], { stdio: "ignore" });
+      child.on("error", reject);
+      child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`Giải nén thất bại (mã ${code}).`))));
+    });
+    const source = join(work, "source");
+    reshapeToCheckout(extracted, source);
+
+    send({ type: "update_progress", step: "installing" });
+    spawnUpdateRunner({ source, version: status.latest });
+  }
+
+  function spawnUpdateRunner() {
+    throw new Error("Trình cập nhật chưa được cài đặt (Task 5).");
   }
 
   // WebSocket endpoints: /ws for the extension bridge, /panel for the side panel

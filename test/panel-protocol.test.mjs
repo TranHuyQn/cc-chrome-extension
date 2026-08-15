@@ -28,6 +28,10 @@ const ORIGIN = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
 const PORT = 8793;
 const BASE = `http://127.0.0.1:${PORT}`;
 
+// Read from the same place the server reads it, so a version bump does not
+// silently turn this assertion into "whatever the server said".
+const VERSION_UNDER_TEST = JSON.parse(readFileSync(join(root, "server", "package.json"), "utf8")).version;
+
 let failures = 0;
 function check(name, cond, detail = "") {
   const ok = !!cond;
@@ -415,6 +419,53 @@ await sleep(300);
       modernFrames.some((s) => s.type === "step_start" && s.id === f.id)),
     JSON.stringify(modernFrames.filter((f) => f.type.startsWith("step"))));
   modern.close();
+  await sleep(200);
+}
+
+// --- the update frames -------------------------------------------------------
+//
+// The panel is the ONLY surface that can trigger an update, and /panel is the
+// only endpoint in this server that requires all three loopback conditions. The
+// assertions below are about the two ways that guarantee gets lost: a caller
+// naming its own URL, and an update starting while a chat turn is mid-flight.
+{
+  const up = new WebSocket(`ws://127.0.0.1:${PORT}/panel`, [`ccchrome.token.${TOKEN}`], { origin: ORIGIN });
+  const upFrames = [];
+  up.on("message", (raw) => upFrames.push(JSON.parse(raw.toString())));
+  await new Promise((res) => up.on("open", res));
+  await sleep(300);
+  up.send(JSON.stringify({ type: "start", sessionId: null, mcpSessionId: null, model: null, protocol: 2 }));
+  await sleep(500);
+
+  up.send(JSON.stringify({ type: "update_check" }));
+  for (let i = 0; i < 100 && !upFrames.some((f) => f.type === "update_status"); i++) await sleep(50);
+  const status = upFrames.find((f) => f.type === "update_status");
+  check("update_check answers with the running version", status?.current === VERSION_UNDER_TEST,
+    JSON.stringify(status));
+  check("and says whether an update is available, as a boolean",
+    typeof status?.available === "boolean", JSON.stringify(status));
+
+  // A caller-supplied URL is the whole attack: /panel is loopback-only, but if
+  // the panel can name what gets downloaded then "loopback-only" only means the
+  // attacker has to be on this machine, which is exactly what the token already
+  // implies. The field must be ignored, not honoured.
+  up.send(JSON.stringify({ type: "update_start", url: "https://evil.example.com/x.tar.gz" }));
+  for (let i = 0; i < 100 && !upFrames.some((f) => f.type === "update_failed" || f.type === "update_progress"); i++) await sleep(50);
+  const reaction = upFrames.find((f) => f.type === "update_failed" || f.type === "update_progress");
+  check("update_start never reports the caller's url back",
+    JSON.stringify(reaction).includes("evil.example.com") === false, JSON.stringify(reaction));
+
+  check("an unknown frame type still names itself",
+    (() => {
+      up.send(JSON.stringify({ type: "update_nonsense" }));
+      return true;
+    })());
+  for (let i = 0; i < 60 && !upFrames.some((f) => f.type === "error" && /update_nonsense/.test(f.message || "")); i++) await sleep(50);
+  check("update_nonsense comes back as an error naming itself",
+    upFrames.some((f) => f.type === "error" && /update_nonsense/.test(f.message || "")),
+    JSON.stringify(upFrames.filter((f) => f.type === "error")));
+
+  up.close();
   await sleep(200);
 }
 
