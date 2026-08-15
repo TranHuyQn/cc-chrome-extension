@@ -32,9 +32,12 @@ function healthServer(versionRef) {
   return new Promise((res) => server.listen(0, "127.0.0.1", () => res(server)));
 }
 
-function runRunner(args) {
+function runRunner(args, envOverlay = {}) {
   return new Promise((res) => {
-    const child = spawn(process.execPath, [runner, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [runner, ...args], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, ...envOverlay },
+    });
     let out = "";
     child.stdout.on("data", (c) => (out += c));
     child.stderr.on("data", (c) => (out += c));
@@ -354,6 +357,51 @@ async function waitUntil(cond, timeoutMs = 5000) {
     existsSync(argvLog) ? readFileSync(argvLog, "utf8") : "(not run)");
   rmSync(home, { recursive: true, force: true });
   rmSync(work, { recursive: true, force: true });
+}
+
+// --- 8. a .ps1 installer is handed to powershell, not to bash ---------------
+//
+// The mirror image of test 7, and the direction nothing else can catch: a .ps1
+// routed to bash fails in a way that reads as "the installer errored", and only
+// on the platform this repo cannot run. A fake executable named `powershell` on
+// PATH closes that, because Node's spawn resolves a bare command name through
+// PATH on every platform — no Windows required.
+{
+  const home = mkdtempSync(join(tmpdir(), "cc-runner-ps1-"));
+  const installDir = join(home, ".cc-chrome-bridge");
+  mkdirSync(installDir, { recursive: true });
+  const source = join(home, "source");
+  mkdirSync(source, { recursive: true });
+  const work = join(home, "work");
+  mkdirSync(work, { recursive: true });
+
+  const binDir = join(home, "bin");
+  mkdirSync(binDir, { recursive: true });
+  const argvLog = join(home, "ps-argv.txt");
+  const fakePowershell = join(binDir, "powershell");
+  writeFileSync(fakePowershell, `#!/bin/sh\necho "$@" > "${argvLog}"\n`);
+  chmodSync(fakePowershell, 0o755);
+
+  const installer = join(home, "fake-install.ps1");
+  writeFileSync(installer, "# a PowerShell installer that never needs to run\n");
+
+  const version = { value: "7.7.7" };
+  const server = await healthServer(version);
+  await runRunner([
+    "--source", source, "--install-dir", installDir, "--installer", installer,
+    "--work", work, "--port", String(server.address().port),
+    "--expect-version", "7.7.7", "--status-file", join(home, "status.json"),
+  ], { PATH: `${binDir}:${process.env.PATH}` });
+  server.close();
+
+  const recorded = existsSync(argvLog) ? readFileSync(argvLog, "utf8") : "";
+  check("a .ps1 installer is invoked through powershell, not bash",
+    recorded.includes("fake-install.ps1"), recorded || "(powershell never ran)");
+  check("and it is passed -File, so the script is executed rather than read as an argument",
+    recorded.includes("-File"), recorded);
+  check("and -ExecutionPolicy Bypass, without which a Restricted machine refuses the file",
+    recorded.includes("Bypass"), recorded);
+  rmSync(home, { recursive: true, force: true });
 }
 
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);

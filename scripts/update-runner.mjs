@@ -139,7 +139,7 @@ async function main() {
       version: expectVersion,
       reason: `Có vẻ một bản cập nhật trước đã dừng giữa chừng. Bản cài cũ đang nằm ở ${backupDir}. ` +
         `Nếu bridge hiện tại chạy bình thường, đổi tên ${backupDir} thành một tên khác rồi thử lại. ` +
-        `Nếu bridge không chạy: đổi tên ${installDir} thành ${installDir}.broken (nếu nó còn tồn tại), ` +
+        `Nếu bridge không chạy: đổi tên ${installDir} thành ${installDir}.failed (nếu nó còn tồn tại), ` +
         `rồi đổi tên ${backupDir} thành ${installDir} để khôi phục bản cũ. ` +
         `Nhật ký lần trước: ${logPath}`,
     });
@@ -189,7 +189,10 @@ main().catch((err) => {
   // A crash inside rollback() is the highest-stakes one there is, so the
   // record must name every path that might hold a copy of something —
   // not just the error message.
-  if (work) rmSync(work, { recursive: true, force: true });
+  // A leftover temp dir must never cost us the crash record itself — this is
+  // the one status write that matters most, and an EPERM/EBUSY here must not
+  // stop it from being written.
+  if (work) { try { rmSync(work, { recursive: true, force: true }); } catch { /* best-effort cleanup only */ } }
   writeStatus({
     ok: false,
     step: "crashed",
