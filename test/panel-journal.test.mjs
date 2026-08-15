@@ -99,6 +99,28 @@ await ccJournal.load("panelLog.huge");
 ccJournal.push({ type: "message", text: "y".repeat(ccJournal.MAX_BYTES * 2) });
 check("one oversized entry still leaves exactly itself", ccJournal.entries().length === 1, String(ccJournal.entries().length));
 
+// --- resize ------------------------------------------------------------------
+//
+// The panel journals an assistant bubble before its final text exists (so it
+// keeps its position relative to tool rows around it), then mutates it in
+// place once the real text arrives. resize() must both persist that mutation
+// and keep the byte accounting honest -- otherwise the cap above drifts every
+// time a bubble grows.
+
+await ccJournal.load("panelLog.resize");
+ccJournal.push({ type: "message", text: "" });
+ccJournal.push({ type: "message", text: "second, unrelated" });
+const target = ccJournal.entries()[0];
+target.text = "now it has real text, much longer than before";
+ccJournal.resize(target);
+check("resize does not reorder entries",
+  ccJournal.entries()[0] === target && ccJournal.entries()[1].text === "second, unrelated",
+  JSON.stringify(ccJournal.entries()));
+await sleep(700);
+check("resize persists the mutation after the debounce",
+  store["panelLog.resize"][0].text === "now it has real text, much longer than before",
+  JSON.stringify(store["panelLog.resize"]));
+
 // --- clear -------------------------------------------------------------------
 
 await ccJournal.load("panelLog.7");

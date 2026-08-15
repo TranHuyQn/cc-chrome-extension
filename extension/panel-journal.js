@@ -80,5 +80,24 @@ window.ccJournal = (() => {
     if (key) chrome.storage.local.set({ [key]: [] });
   }
 
-  return { load, push, clear, entries: () => entries, MAX_ENTRIES, MAX_BYTES };
+  // An entry can be journalled before its final text exists: the panel records
+  // an assistant bubble the moment streaming starts, so it holds its true
+  // position relative to the tool rows around it, and fills the text in later.
+  // Matched by identity, not by value — the caller holds the object.
+  function resize(entry) {
+    const i = entries.indexOf(entry);
+    if (i === -1) return;
+    let size;
+    try {
+      size = JSON.stringify(entry).length;
+    } catch {
+      return;
+    }
+    bytes += size - sizes[i];
+    sizes[i] = size;
+    trim();
+    schedule();
+  }
+
+  return { load, push, clear, resize, entries: () => entries, MAX_ENTRIES, MAX_BYTES };
 })();

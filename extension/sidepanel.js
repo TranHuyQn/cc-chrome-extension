@@ -43,6 +43,12 @@ let mcpSessionId = null;
 let sessionKey = null;
 let busy = false;
 let streaming = null; // the element currently receiving deltas
+// The journal entry backing `streaming`, if any -- see the `message` case in
+// handle() and the resize() comment in panel-journal.js. Kept separate from
+// `streaming` (the DOM element) because the two are nulled together but read
+// differently: this one is mutated and resize()d, the element's textContent
+// is written directly.
+let streamingEntry = null;
 // Tracks the last detail line logged by setState, so a backoff loop that
 // keeps failing the same way (bridge still down, token still wrong) appends
 // one line, not one line per retry forever.
@@ -140,6 +146,15 @@ function finishStep(msg) {
   step.detail.textContent = `${step.detail.textContent}\n\n${heading}${body}`.trim();
 }
 
+// A turn can die without the server closing its steps: a disposed AgentSession
+// emits nothing (see the `ready` comment), which is what a model change or a
+// dropped socket produces. Nothing else will ever close these rows, and a
+// leftover entry would make paintStatus name a dead turn's tool during the
+// NEXT turn.
+function sweepOpenSteps() {
+  for (const id of [...steps.keys()]) finishStep({ id, ok: false, aborted: true, ms: null });
+}
+
 // One timer for the whole panel, not one per row: what has to move is the
 // single number the user is watching, and a second interval per step would
 // stack up over a long turn.
@@ -196,17 +211,25 @@ async function panelJournalKey() {
 }
 
 // Replayed before the socket is dialled, so the log is never briefly blank and
-// a live event can never interleave into the middle of the replay.
+// a live event can never interleave into the middle of the replay. Callers
+// must await loadState() first -- `locale` has to be the persisted one before
+// a single row is drawn, or the replay renders tool labels in the wrong
+// language and nothing ever repaints them once connect() loads the real value.
 async function restore() {
   const entries = await ccJournal.load(await panelJournalKey());
-  for (const entry of entries) render(entry);
+  for (const entry of entries) {
+    // ccJournal.load only checks that the stored value is an array, never its
+    // elements -- a corrupt or foreign entry must not throw and abort the
+    // whole restore (see the try/catch around this call in the startup IIFE).
+    if (!entry || typeof entry !== "object" || typeof entry.type !== "string") continue;
+    render(entry);
+  }
   // A step still open in the journal belonged to a process that is certainly
   // dead — the panel was closed. Close it now rather than leaving a row that
   // pulses forever.
-  for (const id of [...steps.keys()]) {
-    finishStep({ id, ok: false, aborted: true, ms: null });
-  }
+  sweepOpenSteps();
   streaming = null;
+  streamingEntry = null;
 }
 
 async function loadState() {
@@ -215,13 +238,17 @@ async function loadState() {
   const saved = stored[key] || {};
   sessionId = saved.sessionId || null;
   mcpSessionId = saved.mcpSessionId || null;
+  // Reopening the panel otherwise replays an English conversation with
+  // Vietnamese tool labels: `locale` has to survive alongside the ids it sits
+  // next to, or it silently reverts every time.
+  locale = saved.locale === "en" ? "en" : "vi";
   modelEl.value = stored.panelModel || "";
   return stored.wsUrl || DEFAULT_WS_URL;
 }
 
 function saveState() {
   if (!sessionKey) return;
-  chrome.storage.local.set({ [sessionKey]: { sessionId, mcpSessionId } });
+  chrome.storage.local.set({ [sessionKey]: { sessionId, mcpSessionId, locale } });
 }
 
 function scheduleReconnect() {
@@ -302,6 +329,13 @@ async function connect() {
     // `message` reconciles into a node that is no longer the one being built,
     // and the text disappears with no error.
     streaming = null;
+    streamingEntry = null;
+    // A dropped socket is the other path (besides a model change) where a
+    // disposed AgentSession never gets to send its own step_end -- see the
+    // comment on `turn_start` in handle(). Without this, reconnecting mid-turn
+    // left a pulsing row that the next turn's paintStatus would misreport as
+    // still running.
+    sweepOpenSteps();
     stopTicking();
     statusEl.classList.remove("on");
     const reason = CLOSE_REASONS[event.code] ?? (proven ? "" : "Không kết nối được — bridge chưa chạy?");
@@ -392,10 +426,18 @@ function handle(msg) {
       // Enter afterward is silently swallowed by `if (!text || busy) return`.
       setBusy(false);
       streaming = null;
+      streamingEntry = null;
       break;
     case "turn_start":
+      // A disposed AgentSession emits nothing at all (see the comment on
+      // `ready` above), so a model change or a dropped socket can end a turn
+      // without ever sending step_end for its open rows. Sweep them here too,
+      // not just in those two spots: whichever one actually fires, the NEXT
+      // turn must not inherit a pulsing row from the one before it.
+      sweepOpenSteps();
       setBusy(true);
       streaming = null;
+      streamingEntry = null;
       phase = null;
       phaseStartedAt = Date.now();
       startTicking();
@@ -411,11 +453,26 @@ function handle(msg) {
     case "delta":
       // Deltas are a live preview, deliberately NOT journalled: `message`
       // carries the same text authoritatively a moment later, and journalling
-      // both would double the log on reopen.
+      // both would double the log on reopen. What IS journalled here is a
+      // placeholder the first delta of a bubble creates, so the bubble holds
+      // its true position relative to the tool rows around it instead of
+      // sinking below them on replay -- `message` below fills in the real
+      // text on the same entry.
+      if (!streaming) {
+        streamingEntry = { type: "message", text: "" };
+        ccJournal.push(streamingEntry);
+      }
       render(msg);
       break;
     case "message":
-      record(msg);
+      if (streamingEntry) {
+        streamingEntry.text = msg.text;
+        ccJournal.resize(streamingEntry);
+        streamingEntry = null;
+        render(msg);
+      } else {
+        record(msg);
+      }
       break;
     case "step_start":
       record(msg);
@@ -438,10 +495,21 @@ function handle(msg) {
       break;
     case "turn_end":
       // A turn killed mid-sentence leaves text on screen that `message` never
-      // arrived to confirm. Keep it, or reopening the panel loses it.
-      if (streaming && streaming.textContent) ccJournal.push({ type: "message", text: streaming.textContent });
+      // arrived to confirm. Keep it, or reopening the panel loses it. The
+      // placeholder already holds the right position (pushed on the first
+      // delta above), so this updates it in place rather than pushing a
+      // second entry for the same bubble.
+      if (streaming && streaming.textContent) {
+        if (streamingEntry) {
+          streamingEntry.text = streaming.textContent;
+          ccJournal.resize(streamingEntry);
+        } else {
+          ccJournal.push({ type: "message", text: streaming.textContent });
+        }
+      }
       setBusy(false);
       streaming = null;
+      streamingEntry = null;
       stopTicking();
       paintStatus();
       if (!msg.ok) {
@@ -455,12 +523,18 @@ function handle(msg) {
       }
       break;
     case "attach_tab_result":
+      // Deliberately unjournalled, unlike error-line: this describes the
+      // CURRENT live connection ("✓ Đã đưa vào phiên"), and replaying it days
+      // later would claim a tab attachment as present tense that is not true
+      // anymore.
       addMessage(msg.ok ? "tool" : "error",
         msg.ok
           ? `✓ Đã đưa vào phiên: ${msg.title || msg.url}`
           : `Không đưa được tab vào phiên: ${msg.error || "không rõ lý do"}`);
       break;
     case "error":
+      // Same reasoning as attach_tab_result: a transport-level error about
+      // this socket, not part of the conversation, so it stays unjournalled.
       addMessage("error", msg.message || "Lỗi không rõ từ server.");
       break;
   }
@@ -496,6 +570,7 @@ newBtn.addEventListener("click", async () => {
   // covers the stale-DOM-reference half, which `ready` alone does not fix
   // since it can arrive before the very last straggling delta does.
   streaming = null;
+  streamingEntry = null;
   // Only the conversation is new. mcpSessionId is kept on purpose: it names the
   // tab group, so dropping it here would strand the tabs the user attached —
   // "Phiên mới" clears the chat, not the session's tabs (README says so too).
@@ -510,11 +585,28 @@ modelEl.addEventListener("change", () => {
   // Same stale-reference risk as "Phiên mới" above: a model change also
   // disposes any running turn server-side.
   streaming = null;
+  streamingEntry = null;
+  // Same leak as socket.onclose: a disposed AgentSession never sends step_end
+  // for whatever was still running, so this turn's rows would otherwise
+  // pulse forever and paintStatus would misreport them during the next turn.
+  sweepOpenSteps();
   chrome.storage.local.set({ panelModel: modelEl.value });
   send({ type: "start", sessionId, mcpSessionId, model: modelEl.value || null, protocol: PROTOCOL });
 });
 
 (async () => {
-  await restore();
+  // The journal is a nicety; the socket is the product. A corrupt journal
+  // entry, a storage error, or a failed lookup must never cost the user their
+  // connection -- before this file gained a journal, connect() was
+  // unconditional, and it stays that way. loadState() runs here (not only
+  // inside connect()) so `locale` is the persisted one BEFORE restore() draws
+  // a single row; connect() below reloads the same state harmlessly when it
+  // actually dials.
+  try {
+    await loadState();
+    await restore();
+  } catch (err) {
+    console.warn("[panel] không đọc lại được nhật ký:", err);
+  }
   connect();
 })();
