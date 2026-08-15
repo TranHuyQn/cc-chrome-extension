@@ -992,6 +992,9 @@ async function mainHttp() {
         claudeBin: claudeBinFromEnv(),
         cwd: PANEL_CWD,
         systemPrompt: PANEL_SYSTEM_PROMPT,
+        // Which event shape this panel understands. Absent = 1 = an extension
+        // that predates the activity timeline and only renders `tool`.
+        protocol: Number(msg.protocol) || 1,
         resuming,
         onEvent: (event) => send(event),
         log,

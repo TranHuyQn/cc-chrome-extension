@@ -101,9 +101,16 @@ if (called.status !== 200) {
 }
 
 const emit = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
+const toolUseId = "toolu_fake_0001";
 emit({
   type: "assistant",
-  message: { content: [{ type: "tool_use", name: `mcp__chrome__${toolName}`, input: {} }] },
+  message: { content: [{ type: "tool_use", id: toolUseId, name: `mcp__chrome__${toolName}`, input: {} }] },
+});
+// The tool result: the line that tells the panel the tool finished. Shaped like
+// a real MCP result — content is an ARRAY, not a string.
+emit({
+  type: "user",
+  message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseId, content: [{ type: "text", text: "ok" }], is_error: false }] },
 });
 emit({ type: "assistant", message: { content: [{ type: "text", text: "xong" }] } });
 process.exit(0);

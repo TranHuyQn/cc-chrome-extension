@@ -387,6 +387,37 @@ try { panelB.socket.close(); } catch { /* already closing */ }
 try { panelC.socket.close(); } catch { /* already closing */ }
 await sleep(300);
 
+// --- the panel's protocol version decides which event shape it gets ----------
+//
+// A bridge and an extension are upgraded independently: the installer replaces
+// the bridge, but the extension only changes when the user reloads it in
+// chrome://extensions. Both directions have to keep working, so the panel says
+// which shape it understands and the server obeys.
+{
+  const modern = new WebSocket(`ws://127.0.0.1:${PORT}/panel`, [`ccchrome.token.${TOKEN}`], { origin: ORIGIN });
+  const modernFrames = [];
+  modern.on("message", (raw) => modernFrames.push(JSON.parse(raw.toString())));
+  await new Promise((res) => modern.on("open", res));
+  await sleep(300);
+  modern.send(JSON.stringify({ type: "start", sessionId: null, mcpSessionId: null, model: null, protocol: 2 }));
+  await sleep(500);
+  modern.send(JSON.stringify({ type: "prompt", text: "xin chào" }));
+  for (let i = 0; i < 100 && !modernFrames.some((f) => f.type === "turn_end"); i++) await sleep(50);
+
+  check("a protocol-2 panel gets step events",
+    modernFrames.some((f) => f.type === "step_start"),
+    JSON.stringify(modernFrames.map((f) => f.type)));
+  check("a protocol-2 panel gets no legacy tool event",
+    !modernFrames.some((f) => f.type === "tool"),
+    JSON.stringify(modernFrames.map((f) => f.type)));
+  check("its step closes under the same id",
+    modernFrames.some((f) => f.type === "step_end" &&
+      modernFrames.some((s) => s.type === "step_start" && s.id === f.id)),
+    JSON.stringify(modernFrames.filter((f) => f.type.startsWith("step"))));
+  modern.close();
+  await sleep(200);
+}
+
 // --- teardown ----------------------------------------------------------------
 
 try { panel.close(); } catch { /* already closing */ }
