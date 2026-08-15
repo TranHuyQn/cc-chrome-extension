@@ -214,6 +214,84 @@ Người dùng cài bridge trên Windows từ checkout có `CC_CHROME_SOURCE` tr
 
 Sự thật một cái từ máy này cần ghi vào spec: policy của máy là `Restricted`, và `npm` trong PowerShell qua shim `npm.ps1`, nên `npm install` bình thường bị từ chối. Đường sản phẩm không bị ảnh hưởng — `scripts/update-runner.mjs` đã truyền `-ExecutionPolicy Bypass` khi chạy installer `.ps1`, và `install.ps1` dot-source `service-task.ps1` vào cùng một process nên nó thừa kế bypass — nhưng điều này có nghĩa máy Restricted-policy mới là mặc định thực tế, không phải edge case.
 
+## G2. SỬA ĐỔI 2026-08-16 — phép đo cũ trả lời sai câu hỏi
+
+Review toàn nhánh phát hiện hai lỗi chặn phát hành. Mục này **thay thế** phần liên quan
+trong mục A bước 6 và mục G ở trên; những gì ghi ở đó vẫn đúng về mặt dữ liệu, nhưng kết
+luận rút ra từ chúng thì sai.
+
+### Sai ở đâu
+
+Phép đo Q2 gọi `Stop-ScheduledTask` và trả lời: tiến trình con tách rời **sống sót**. Đúng.
+Nhưng `install.ps1` **không gọi lệnh đó**. Nó gọi `Stop-CcTask`, và hàm ấy trong
+`service-task.ps1` là ba bước:
+
+```
+Disable-ScheduledTask → Stop-ScheduledTask → taskkill /pid <bridge> /T /F
+```
+
+`/T` giết cả cây tiến trình con theo PID cha. Trình cập nhật là **con của bridge**, và
+`detached: true` của Node trên Windows chỉ đặt `DETACHED_PROCESS` — không cắt quan hệ cha
+con. Nên nó bị giết cùng.
+
+Linux còn chắc chắn hơn và không cần đo mới kết luận được: unit ở `service-unit.sh` không
+đặt `KillMode`, nên mặc định là `control-group`; `cc_service_stop` chạy
+`systemctl --user disable --now`, và systemd gửi SIGTERM cho **toàn bộ cgroup** — bridge,
+trình cập nhật, và cả `install.sh` đang chạy. `detached: true` trên POSIX chỉ là `setsid()`,
+đổi session chứ không thoát cgroup. Tệ hơn: unit đã bị **disable**, nên `Restart=always`
+không dựng lại gì.
+
+**Bài học:** một phép đo chỉ có giá trị nếu nó gọi **đúng đường mã mà sản phẩm chạy**. Đo một
+cơ chế tương đương rồi suy ra là cách tạo ra một câu trả lời đúng cho một câu hỏi không ai
+hỏi.
+
+### Kết quả đo lại (2026-08-16)
+
+| Nền tảng | Lệnh dừng thật | Tiến trình con tách rời | Nguồn |
+|---|---|---|---|
+| macOS | `launchctl bootout gui/<uid>/<label>` | **SỐNG SÓT** — heartbeat 18 → 26 sau lệnh | đo trên máy này, LaunchAgent dùng-một-lần, đã gỡ sạch |
+| Windows | `Stop-CcTask` (kèm `taskkill /T /F`) | **CHẾT** | suy từ mã `service-task.ps1:133-156`; cần đo lại bằng đúng hàm đó |
+| Linux | `systemctl --user disable --now` | **CHẾT** | suy từ mặc định `KillMode=control-group`; **không đo được — không có máy Linux** |
+
+### Thiết kế thay thế cho bước 6
+
+Trình cập nhật không được là con cháu của dịch vụ. Mỗi nền tảng một cơ chế:
+
+| Nền tảng | Cách bàn giao | Cha mới |
+|---|---|---|
+| **macOS** | giữ nguyên `spawn(detached)` — đã đo là an toàn | không đổi |
+| **Linux** | `systemd-run --user --collect --unit=cc-chrome-update-<id>` | systemd |
+| **Windows** | đăng ký một scheduled task chạy-một-lần rồi kích hoạt, tự gỡ sau | Task Scheduler |
+
+Linux **chưa được đo trên phần cứng thật**. Kết luận dựa trên hành vi có tài liệu của systemd
+(`KillMode=control-group` là mặc định, và `systemd-run --user --unit` tạo một transient
+service do systemd tự fork, nên có cgroup riêng). Ghi rõ ở đây để người sau không nhầm nó là
+đã kiểm chứng.
+
+### Lỗi thứ hai: ba file không bao giờ được cài
+
+`spawnUpdateRunner` chạy `<INSTALL_DIR>/update-runner.mjs` và trỏ `--installer` vào
+`<INSTALL_DIR>/install.sh` (hoặc `.ps1`). Ba file đó có trong tarball, nhưng **không trình
+cài đặt nào chép chúng vào thư mục cài** — cả hai chỉ chuyển `server/`, `extension/`,
+`ccchrome.md`, `uninstall.*`, `service-*`, phần còn lại của thư mục giải nén bị xoá. Kiểm
+chứng bằng cách chạy thật `install.sh` vào một `HOME` giả: ba file vắng mặt.
+
+Hệ quả: nút cập nhật không chạy được trên **bất kỳ máy nào**. Tiến trình con chết ngay với
+`MODULE_NOT_FOUND`, `stdio` là `ignore` nên không ai thấy, và panel đợi 90 giây rồi báo một
+thông điệp mô tả sai chuyện vừa xảy ra.
+
+Sửa hai phần, thiếu phần nào cũng gãy:
+
+1. `reshapeToCheckout` phải đặt ba file vào `<target>/scripts/`, để một bản phát hành thiếu
+   chúng **hỏng ngay lúc dựng lại** — đúng mục đích hàm đó tồn tại.
+2. Cả hai installer phải chép ba file từ `$SOURCE/scripts/` (và từ thư mục giải nén trên
+   đường tải về) vào `$INSTALL_DIR`, ở **bước dàn dựng** — trước khi dừng dịch vụ, để thiếu
+   file thì dừng lại an toàn trong khi dịch vụ vẫn đang chạy.
+
+Điều này **sửa `install.sh` và `install.ps1`**, thứ mà kế hoạch cũ cấm. Chính lệnh cấm đó
+tạo ra lỗ hổng này: nó khiến việc "đưa file tới nơi cần" bị đẩy sang tarball, mà tarball
+không phải nơi bridge đọc.
+
 ## H. Ngoài phạm vi
 
 - **Không** tự động cập nhật nền. Chỉ kiểm tra khi panel mở, và chỉ cài khi người dùng bấm.
