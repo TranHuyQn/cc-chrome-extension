@@ -7,6 +7,7 @@
     "build:release": "node scripts/build-release.mjs",
     "lint": "eslint .",
     "test:labels": "node test/panel-labels.test.mjs",
+    "test:journal": "node test/panel-journal.test.mjs",
     "test:build": "node test/build.test.mjs",
     "test:origin": "node test/origin.test.mjs",
     "test:tabgroups": "node test/tabgroups.test.mjs",
@@ -22,7 +23,7 @@
     "test:panelproto": "node test/panel-protocol.test.mjs",
     "test:install": "node test/install.test.mjs",
     "test:installwin": "node test/install-windows.test.mjs",
-    "test": "node test/panel-labels.test.mjs && node test/agent-session.test.mjs && node test/build.test.mjs && node test/origin.test.mjs && node test/tabgroups.test.mjs && node test/attach-tab.test.mjs && node test/focus.test.mjs && node test/security-eval.test.mjs && node test/reconnect-grace.test.mjs && node test/panel-auth.test.mjs && node test/panel-protocol.test.mjs && node test/install.test.mjs && node test/install-windows.test.mjs && node test/e2e.mjs && node test/e2e-http.mjs && node test/session-ttl.test.mjs",
+    "test": "node test/panel-journal.test.mjs && node test/panel-labels.test.mjs && node test/agent-session.test.mjs && node test/build.test.mjs && node test/origin.test.mjs && node test/tabgroups.test.mjs && node test/attach-tab.test.mjs && node test/focus.test.mjs && node test/security-eval.test.mjs && node test/reconnect-grace.test.mjs && node test/panel-auth.test.mjs && node test/panel-protocol.test.mjs && node test/install.test.mjs && node test/install-windows.test.mjs && node test/e2e.mjs && node test/e2e-http.mjs && node test/session-ttl.test.mjs",
     "verify:sidepanel": "HEADED=1 node test/verify-sidepanel.mjs"
   },
   "devDependencies": {
