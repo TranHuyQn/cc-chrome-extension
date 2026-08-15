@@ -445,15 +445,34 @@ await sleep(300);
   check("and says whether an update is available, as a boolean",
     typeof status?.available === "boolean", JSON.stringify(status));
 
-  // A caller-supplied URL is the whole attack: /panel is loopback-only, but if
-  // the panel can name what gets downloaded then "loopback-only" only means the
-  // attacker has to be on this machine, which is exactly what the token already
-  // implies. The field must be ignored, not honoured.
+  // update_start is driven ONLY down its refusal paths here. A live start would
+  // be a real download and, once the runner is no longer a stub, a real install
+  // over the developer's own bridge in the middle of npm test. There is no way
+  // for the server to tell a test's update_start from a user's, so the test is
+  // what has to stay on the safe side of that line.
+  up.send(JSON.stringify({ type: "prompt", text: "giữ cho lượt chat đang chạy" }));
+  for (let i = 0; i < 100 && !upFrames.some((f) => f.type === "turn_start"); i++) await sleep(50);
+
   up.send(JSON.stringify({ type: "update_start", url: "https://evil.example.com/x.tar.gz" }));
-  for (let i = 0; i < 100 && !upFrames.some((f) => f.type === "update_failed" || f.type === "update_progress"); i++) await sleep(50);
-  const reaction = upFrames.find((f) => f.type === "update_failed" || f.type === "update_progress");
-  check("update_start never reports the caller's url back",
-    JSON.stringify(reaction).includes("evil.example.com") === false, JSON.stringify(reaction));
+  for (let i = 0; i < 100 && !upFrames.some((f) => f.type === "update_failed"); i++) await sleep(50);
+  const refusal = upFrames.find((f) => f.type === "update_failed");
+  check("update_start is refused while a chat turn is running",
+    /đang chạy/.test(refusal?.reason || ""), JSON.stringify(refusal));
+  check("the refusal names what the user should do about it",
+    /dừng/i.test(refusal?.reason || ""), JSON.stringify(refusal));
+  check("a caller-supplied url never appears in any frame the server sends",
+    !JSON.stringify(upFrames).includes("evil.example.com"), "supplied url leaked into a frame");
+
+  // The property is "no code path reads msg.url", and the only honest way to
+  // assert that from a protocol test is to look. A comment mentioning msg.url is
+  // fine; a read is not.
+  const serverSource = readFileSync(join(root, "server", "index.js"), "utf8");
+  const urlReads = serverSource
+    .split("\n")
+    .filter((line) => /msg\.url|msg\[["']url["']\]/.test(line))
+    .filter((line) => !line.trim().startsWith("//"));
+  check("no code path reads msg.url — the download url is derived, never supplied",
+    urlReads.length === 0, JSON.stringify(urlReads));
 
   check("an unknown frame type still names itself",
     (() => {

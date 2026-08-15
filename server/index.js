@@ -20,7 +20,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { WebSocketServer } from "ws";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { readFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -851,7 +851,11 @@ async function mainHttp() {
   const UPDATE_STATUS_FILE = join(homedir(), ".ccchrome-update.json");
   // One update at a time, process-wide. A second panel asking mid-update must be
   // refused rather than queued — two installers racing over one directory is the
-  // one failure this feature cannot recover from.
+  // one failure this feature cannot recover from. The read-then-set in
+  // update_start below has no `await` between the check and the write, so two
+  // concurrent `update_start` frames cannot both pass it — Node runs that
+  // handler to its first `await` without yielding, which is what makes the
+  // race structurally impossible rather than merely untested.
   let updateInFlight = false;
   // Everything under here is derived from the design's tool-set decision: the
   // agent gets the chrome MCP tools and nothing else.
@@ -1178,36 +1182,45 @@ async function mainHttp() {
     if (!status.available || !status.latest) throw new Error("Không có bản mới để cài.");
 
     const urls = releaseUrls(`v${status.latest}`);
-    const work = mkdtempSync(join(tmpdir(), "cc-update-"));
-    const tarball = join(work, "release.tar.gz");
+    let work = null;
+    try {
+      work = mkdtempSync(join(tmpdir(), "cc-update-"));
+      const tarball = join(work, "release.tar.gz");
 
-    const tarRes = await fetch(urls.tarball);
-    if (!tarRes.ok) throw new Error(`Tải gói thất bại (${tarRes.status}).`);
-    writeFileSync(tarball, Buffer.from(await tarRes.arrayBuffer()));
+      const tarRes = await fetch(urls.tarball);
+      if (!tarRes.ok) throw new Error(`Tải gói thất bại (${tarRes.status}).`);
+      writeFileSync(tarball, Buffer.from(await tarRes.arrayBuffer()));
 
-    send({ type: "update_progress", step: "verifying" });
-    const sumRes = await fetch(urls.checksum);
-    if (!sumRes.ok) throw new Error(`Bản phát hành thiếu file checksum (${sumRes.status}).`);
-    const expected = parseChecksumFile(await sumRes.text());
-    if (!expected) throw new Error("File checksum không đọc được.");
-    const actual = await sha256File(tarball);
-    if (actual !== expected) {
-      throw new Error("Checksum không khớp — gói tải về không đúng bản đã phát hành. Không cài gì cả.");
+      send({ type: "update_progress", step: "verifying" });
+      const sumRes = await fetch(urls.checksum);
+      if (!sumRes.ok) throw new Error(`Bản phát hành thiếu file checksum (${sumRes.status}).`);
+      const expected = parseChecksumFile(await sumRes.text());
+      if (!expected) throw new Error("File checksum không đọc được.");
+      const actual = await sha256File(tarball);
+      if (actual !== expected) {
+        throw new Error("Checksum không khớp — gói tải về không đúng bản đã phát hành. Không cài gì cả.");
+      }
+
+      send({ type: "update_progress", step: "backing-up" });
+      const extracted = join(work, "extracted");
+      mkdirSync(extracted, { recursive: true });
+      await new Promise((resolve, reject) => {
+        const child = spawn("tar", ["-xzf", tarball, "-C", extracted], { stdio: "ignore" });
+        child.on("error", reject);
+        child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`Giải nén thất bại (mã ${code}).`))));
+      });
+      const source = join(work, "source");
+      reshapeToCheckout(extracted, source);
+
+      send({ type: "update_progress", step: "installing" });
+      spawnUpdateRunner({ source, version: status.latest });
+    } catch (err) {
+      // The reshaped source is only needed if the handover succeeded. On any
+      // failure it is three copies of a node_modules-bearing payload, and the
+      // stub throwing means this is the path every attempt takes today.
+      if (work) rmSync(work, { recursive: true, force: true });
+      throw err;
     }
-
-    send({ type: "update_progress", step: "backing-up" });
-    const extracted = join(work, "extracted");
-    mkdirSync(extracted, { recursive: true });
-    await new Promise((resolve, reject) => {
-      const child = spawn("tar", ["-xzf", tarball, "-C", extracted], { stdio: "ignore" });
-      child.on("error", reject);
-      child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`Giải nén thất bại (mã ${code}).`))));
-    });
-    const source = join(work, "source");
-    reshapeToCheckout(extracted, source);
-
-    send({ type: "update_progress", step: "installing" });
-    spawnUpdateRunner({ source, version: status.latest });
   }
 
   function spawnUpdateRunner() {
