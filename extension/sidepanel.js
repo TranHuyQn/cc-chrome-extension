@@ -68,6 +68,11 @@ let tickTimer = null;
 // Follows the language of what the user typed, and only governs the activity
 // wording — buttons and connection errors stay Vietnamese.
 let locale = "vi";
+// Only on the first load. connect() calls loadState() on every reconnect, and
+// adopting the stored value there would overwrite a locale detected from what
+// the user has been typing this whole session — then persist that overwrite on
+// the next `ready`.
+let localeInitialized = false;
 
 function setState(state, detail = "") {
   dotEl.className = `dot ${state}`;
@@ -155,6 +160,21 @@ function sweepOpenSteps() {
   for (const id of [...steps.keys()]) finishStep({ id, ok: false, aborted: true, ms: null });
 }
 
+// A stream can end without a `message`: a dropped socket, a model change, a
+// disposed session. The placeholder is already in the journal holding "", so
+// whatever reached the screen has to be copied into it before the reference is
+// dropped — otherwise reopening the panel shows an empty bubble where the text
+// was.
+function flushStreamingEntry() {
+  if (!streamingEntry) return;
+  const text = streaming ? streaming.textContent : "";
+  if (text) {
+    streamingEntry.text = text;
+    ccJournal.resize(streamingEntry);
+  }
+  streamingEntry = null;
+}
+
 // One timer for the whole panel, not one per row: what has to move is the
 // single number the user is watching, and a second interval per step would
 // stack up over a long turn.
@@ -240,8 +260,14 @@ async function loadState() {
   mcpSessionId = saved.mcpSessionId || null;
   // Reopening the panel otherwise replays an English conversation with
   // Vietnamese tool labels: `locale` has to survive alongside the ids it sits
-  // next to, or it silently reverts every time.
-  locale = saved.locale === "en" ? "en" : "vi";
+  // next to, or it silently reverts every time. Only on the FIRST load though
+  // -- connect() calls loadState() again on every reconnect, and adopting the
+  // stored value there would clobber a locale detected live from what the
+  // user has typed since, then persist that clobber on the next `ready`.
+  if (!localeInitialized) {
+    locale = saved.locale === "en" ? "en" : "vi";
+    localeInitialized = true;
+  }
   modelEl.value = stored.panelModel || "";
   return stored.wsUrl || DEFAULT_WS_URL;
 }
@@ -262,7 +288,16 @@ function scheduleReconnect() {
 
 async function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-  const raw = await loadState();
+  let raw;
+  try {
+    raw = await loadState();
+  } catch (err) {
+    // Storage can reject on an invalidated extension context. Falling back to
+    // the default URL is better than returning: returning leaves no socket and
+    // no reconnect timer, which is indistinguishable from a hung panel.
+    console.warn("[panel] không đọc được cấu hình:", err);
+    raw = DEFAULT_WS_URL;
+  }
 
   let socket;
   try {
@@ -328,8 +363,8 @@ async function connect() {
     // change: leaving a stale element here means the reconnected socket's first
     // `message` reconciles into a node that is no longer the one being built,
     // and the text disappears with no error.
+    flushStreamingEntry();
     streaming = null;
-    streamingEntry = null;
     // A dropped socket is the other path (besides a model change) where a
     // disposed AgentSession never gets to send its own step_end -- see the
     // comment on `turn_start` in handle(). Without this, reconnecting mid-turn
@@ -425,8 +460,12 @@ function handle(msg) {
       // socket close, so without this it would stay true forever and every
       // Enter afterward is silently swallowed by `if (!text || busy) return`.
       setBusy(false);
+      // A model change or "Phiên mới" can dispose a turn mid-stream, and this
+      // is the frame that confirms it: flush whatever reached the screen into
+      // the journal before dropping the reference, or reopening the panel
+      // shows an empty bubble where the partial reply was.
+      flushStreamingEntry();
       streaming = null;
-      streamingEntry = null;
       break;
     case "turn_start":
       // A disposed AgentSession emits nothing at all (see the comment on
@@ -499,17 +538,9 @@ function handle(msg) {
       // placeholder already holds the right position (pushed on the first
       // delta above), so this updates it in place rather than pushing a
       // second entry for the same bubble.
-      if (streaming && streaming.textContent) {
-        if (streamingEntry) {
-          streamingEntry.text = streaming.textContent;
-          ccJournal.resize(streamingEntry);
-        } else {
-          ccJournal.push({ type: "message", text: streaming.textContent });
-        }
-      }
+      flushStreamingEntry();
       setBusy(false);
       streaming = null;
-      streamingEntry = null;
       stopTicking();
       paintStatus();
       if (!msg.ok) {
@@ -546,6 +577,7 @@ inputEl.addEventListener("keydown", (event) => {
   const text = inputEl.value.trim();
   if (!text || busy) return;
   locale = ccLabels.detectLocale(text, locale);
+  saveState();
   record({ type: "user", text });
   inputEl.value = "";
   send({ type: "prompt", text });
@@ -584,8 +616,8 @@ newBtn.addEventListener("click", async () => {
 modelEl.addEventListener("change", () => {
   // Same stale-reference risk as "Phiên mới" above: a model change also
   // disposes any running turn server-side.
+  flushStreamingEntry();
   streaming = null;
-  streamingEntry = null;
   // Same leak as socket.onclose: a disposed AgentSession never sends step_end
   // for whatever was still running, so this turn's rows would otherwise
   // pulse forever and paintStatus would misreport them during the next turn.

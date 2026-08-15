@@ -107,19 +107,30 @@ check("one oversized entry still leaves exactly itself", ccJournal.entries().len
 // and keep the byte accounting honest -- otherwise the cap above drifts every
 // time a bubble grows.
 
+// Let the push's own debounce fire and clear FIRST, so the only thing that can
+// schedule the second write is resize() itself.
 await ccJournal.load("panelLog.resize");
-ccJournal.push({ type: "message", text: "" });
-ccJournal.push({ type: "message", text: "second, unrelated" });
-const target = ccJournal.entries()[0];
-target.text = "now it has real text, much longer than before";
-ccJournal.resize(target);
-check("resize does not reorder entries",
-  ccJournal.entries()[0] === target && ccJournal.entries()[1].text === "second, unrelated",
-  JSON.stringify(ccJournal.entries()));
+const entry = { type: "message", text: "ban đầu" };
+ccJournal.push(entry);
 await sleep(700);
-check("resize persists the mutation after the debounce",
-  store["panelLog.resize"][0].text === "now it has real text, much longer than before",
+entry.text = "đã sửa";
+ccJournal.resize(entry);
+await sleep(700);
+check("resize schedules a write for an entry mutated after its first save",
+  (store["panelLog.resize"][0] || {}).text === "đã sửa",
   JSON.stringify(store["panelLog.resize"]));
+
+// The accounting half: an entry that grows past the budget must be trimmed
+// against its NEW size, which only happens if resize updated the bookkeeping.
+await ccJournal.load("panelLog.resizecap");
+ccJournal.push({ type: "message", text: "nhỏ" });
+const grown = { type: "message", text: "x" };
+ccJournal.push(grown);
+grown.text = "y".repeat(ccJournal.MAX_BYTES);
+ccJournal.resize(grown);
+check("resize re-accounts the entry's size so the byte cap still holds",
+  ccJournal.entries().length === 1 && ccJournal.entries()[0] === grown,
+  String(ccJournal.entries().length));
 
 // --- clear -------------------------------------------------------------------
 
