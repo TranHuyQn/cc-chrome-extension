@@ -45,11 +45,7 @@ window.ccJournal = (() => {
       saveTimer = null;
     }
     const got = await chrome.storage.local.get({ [key]: [] });
-    // Copy rather than alias got[key]: a real chrome.storage.local.get()
-    // always hands back a structured-clone, but a naive in-process mock (or
-    // any other backing store that skips the clone) would otherwise let
-    // push() mutate the caller's stored array before the debounce fires.
-    entries = Array.isArray(got[key]) ? got[key].slice() : [];
+    entries = Array.isArray(got[key]) ? got[key] : [];
     sizes = entries.map((entry) => JSON.stringify(entry).length);
     bytes = sizes.reduce((sum, n) => sum + n, 0);
     return entries;

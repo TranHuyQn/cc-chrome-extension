@@ -29,12 +29,19 @@ const sandbox = {
   chrome: {
     storage: {
       local: {
+        // The real chrome.storage.local serializes on the way in and hands back
+        // fresh objects on the way out, so a caller can never hold a live
+        // reference into the store. A double that skips that models an API
+        // nobody ships, and makes the debounce assertion below unobservable
+        // once the first save has run.
         get: async (defaults) => {
           const out = {};
-          for (const key of Object.keys(defaults)) out[key] = key in store ? store[key] : defaults[key];
+          for (const key of Object.keys(defaults)) {
+            out[key] = key in store ? structuredClone(store[key]) : defaults[key];
+          }
           return out;
         },
-        set: async (obj) => { Object.assign(store, obj); },
+        set: async (obj) => { Object.assign(store, structuredClone(obj)); },
       },
     },
   },
