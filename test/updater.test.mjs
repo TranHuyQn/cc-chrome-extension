@@ -106,6 +106,8 @@ try {
   threw = err.message;
 }
 check("a tarball missing ccchrome.md is refused, by name", threw && threw.includes("ccchrome.md"), String(threw));
+check("a refused tarball leaves NO half-built source directory behind",
+  !existsSync(join(work, "checkout2")), join(work, "checkout2"));
 
 rmSync(work, { recursive: true, force: true });
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);

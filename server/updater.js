@@ -73,16 +73,28 @@ export function reshapeToCheckout(extractedDir, targetDir) {
     return from;
   };
 
+  // Every required path is resolved BEFORE anything is written. The whole point
+  // of this function is to fail while nothing has been touched yet; validating
+  // lazily, inline with the copies, just moves the half-finished state from the
+  // install directory into the staging directory the installer is handed next.
+  const scripts = ["uninstall.sh", "service-unit.sh", "uninstall.ps1", "service-task.ps1"];
+  const sources = {
+    server: need("server"),
+    extension: need("extension"),
+    command: need("ccchrome.md"),
+    scripts: Object.fromEntries(scripts.map((f) => [f, need(f)])),
+  };
+
   mkdirSync(targetDir, { recursive: true });
-  cpSync(need("server"), join(targetDir, "server"), { recursive: true });
-  cpSync(need("extension"), join(targetDir, "extension"), { recursive: true });
+  cpSync(sources.server, join(targetDir, "server"), { recursive: true });
+  cpSync(sources.extension, join(targetDir, "extension"), { recursive: true });
 
   const command = join(targetDir, ".claude", "commands", "ccchrome.md");
   mkdirSync(dirname(command), { recursive: true });
-  copyFileSync(need("ccchrome.md"), command);
+  copyFileSync(sources.command, command);
 
   mkdirSync(join(targetDir, "scripts"), { recursive: true });
-  for (const file of ["uninstall.sh", "service-unit.sh", "uninstall.ps1", "service-task.ps1"]) {
-    copyFileSync(need(file), join(targetDir, "scripts", file));
+  for (const file of scripts) {
+    copyFileSync(sources.scripts[file], join(targetDir, "scripts", file));
   }
 }
