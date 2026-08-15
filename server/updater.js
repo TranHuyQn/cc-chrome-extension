@@ -36,6 +36,13 @@ export function isValidTag(tag) {
   return typeof tag === "string" && /^v?\d+\.\d+\.\d+$/.test(tag);
 }
 
+// Extracted so the freshness decision is testable without mocking time or the
+// network: the call sites remain untestable, but the rule they apply does not
+// have to be.
+export function isCacheFresh(entry, now, ttlMs) {
+  return !!entry && typeof entry.at === "number" && now - entry.at < ttlMs;
+}
+
 export function releaseUrls(tag) {
   if (!isValidTag(tag)) throw new Error(`Tag phát hành không hợp lệ: ${String(tag)}`);
   const tarball = `https://github.com/${REPO}/releases/download/${tag}/${TARBALL_NAME}`;

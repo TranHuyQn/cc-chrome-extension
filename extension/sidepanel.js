@@ -242,34 +242,47 @@ const UPDATE_STEP_TEXT = {
   installing: "Đang cài… bridge sẽ khởi động lại",
 };
 
+// Guards against two overlapping polls: a retry from the "failed" state (see
+// the click handler below) can fire update_start again while an earlier
+// waitForNewVersion() from a previous attempt is still polling /health, and
+// two loops racing to call showUpdate() would make the banner flicker between
+// two different outcomes at random.
+let updatePolling = false;
+
 // The socket dies when the installer stops the service, so the only way to learn
 // the outcome is to ask /health directly. 90s is deliberate: the runner waits 30s
 // for health before it even begins rolling back, so the panel's ceiling has to
 // cover a full install AND a full rollback.
 async function waitForNewVersion(expected) {
-  const raw = (await chrome.storage.local.get({ wsUrl: DEFAULT_WS_URL })).wsUrl;
-  let health;
+  if (updatePolling) return;
+  updatePolling = true;
   try {
-    const parsed = new URL(raw);
-    health = `http://${parsed.hostname}:${parsed.port}/health`;
-  } catch {
-    showUpdate("failed", "Không đọc được địa chỉ bridge để kiểm tra kết quả.", "");
-    return;
-  }
-  const deadline = Date.now() + 90000;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 2000));
+    const raw = (await chrome.storage.local.get({ wsUrl: DEFAULT_WS_URL })).wsUrl;
+    let health;
     try {
-      const res = await fetch(health, { cache: "no-store" });
-      const body = await res.json();
-      if (body?.version === expected) {
-        showUpdate("reload", `Đã cài ${expected}. Nạp lại extension để dùng giao diện mới.`, "Nạp lại extension");
-        return;
-      }
-    } catch { /* bridge is restarting — that is the expected state here */ }
+      const parsed = new URL(raw);
+      health = `http://${parsed.hostname}:${parsed.port}/health`;
+    } catch {
+      showUpdate("failed", "Không đọc được địa chỉ bridge để kiểm tra kết quả.", "");
+      return;
+    }
+    const deadline = Date.now() + 90000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        const res = await fetch(health, { cache: "no-store" });
+        const body = await res.json();
+        if (body?.version === expected) {
+          showUpdate("reload", `Đã cài ${expected}. Nạp lại extension để dùng giao diện mới.`, "Nạp lại extension");
+          return;
+        }
+      } catch { /* bridge is restarting — that is the expected state here */ }
+    }
+    showUpdate("failed",
+      "Quá 90 giây chưa thấy bản mới chạy. Mở terminal và chạy lại lệnh cài trong README.", "");
+  } finally {
+    updatePolling = false;
   }
-  showUpdate("failed",
-    "Quá 90 giây chưa thấy bản mới chạy. Mở terminal và chạy lại lệnh cài trong README.", "");
 }
 
 function send(obj) {
@@ -531,22 +544,37 @@ function handle(msg) {
       streaming = null;
       send({ type: "update_check" });
       break;
-    case "update_status":
+    case "update_status": {
       // A panel that just connected asks once; nothing here is journalled,
       // because it describes the machine right now, not the conversation.
       // `lastResult.step` may be "rolled-back", "already-running", "crashed" or
       // "failed-no-backup" -- all are failures, so `ok === false` is the only
       // distinction that matters, and `reason` carries the full explanation
       // (recovery paths included) for every one of them.
-      if (msg.available && msg.latest) {
+      //
+      // A version that just failed is still GitHub's newest tag, so `available`
+      // is true immediately after a rollback. Checking it first would replace
+      // the recovery instructions -- the only text naming the backup and log
+      // paths -- with a retry button. The failure has to win.
+      //
+      // Unless the machine is now RUNNING that version: then the record is
+      // stale (a later attempt worked, or the user installed by hand), and
+      // showing it would be reporting an old failure as current.
+      const failed = msg.lastResult
+        && msg.lastResult.ok === false
+        && msg.lastResult.version !== msg.current;
+      if (failed) {
+        updateLatest = msg.available ? msg.latest : null;
+        showUpdate("failed", msg.lastResult.reason || "Lần cập nhật trước thất bại.",
+          msg.available && msg.latest ? "Thử lại" : "");
+      } else if (msg.available && msg.latest) {
         updateLatest = msg.latest;
         showUpdate("available", `Có bản ${msg.latest} (đang chạy ${msg.current}).`, "Cập nhật");
-      } else if (msg.lastResult && msg.lastResult.ok === false) {
-        showUpdate("failed", msg.lastResult.reason || "Lần cập nhật trước thất bại.", "");
       } else {
         hideUpdate();
       }
       break;
+    }
     case "update_progress":
       showUpdate("running", UPDATE_STEP_TEXT[msg.step] || "Đang cập nhật…", "");
       if (msg.step === "installing" && updateLatest) waitForNewVersion(updateLatest);
@@ -680,7 +708,10 @@ inputEl.addEventListener("keydown", (event) => {
 stopBtn.addEventListener("click", () => send({ type: "stop" }));
 
 updateActionEl.addEventListener("click", () => {
-  if (updateState === "available") {
+  // "failed" shows this button ("Thử lại") only when a newer release is still
+  // available -- see the update_status handler above -- so it starts an update
+  // exactly the way "available" does.
+  if (updateState === "available" || updateState === "failed") {
     send({ type: "update_start" });
     showUpdate("running", UPDATE_STEP_TEXT.downloading, "");
     return;

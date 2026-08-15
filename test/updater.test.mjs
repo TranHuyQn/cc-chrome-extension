@@ -9,7 +9,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  compareVersions, isValidTag, releaseUrls, parseChecksumFile, sha256File, reshapeToCheckout, REPO,
+  compareVersions, isValidTag, releaseUrls, parseChecksumFile, sha256File, reshapeToCheckout, isCacheFresh, REPO,
 } from "../server/updater.js";
 
 let failures = 0;
@@ -110,5 +110,26 @@ check("a refused tarball leaves NO half-built source directory behind",
   !existsSync(join(work, "checkout2")), join(work, "checkout2"));
 
 rmSync(work, { recursive: true, force: true });
+
+// --- release cache freshness --------------------------------------------------
+//
+// This covers only the pure decision (server/index.js's buildUpdateStatus
+// pulls the check out to here for exactly this reason). Whether a cache hit
+// actually skips the fetch, and whether a network failure actually leaves a
+// good cache entry untouched, are NOT exercised here or anywhere else in this
+// suite -- they were verified by reading buildUpdateStatus, not by running it
+// under a mocked clock or a mocked fetch.
+
+check("no entry is never fresh", isCacheFresh(null, 1_000_000, 1000) === false);
+check("undefined is never fresh", isCacheFresh(undefined, 1_000_000, 1000) === false);
+check("a malformed entry with no `at` is never fresh",
+  isCacheFresh({ latest: "1.2.0" }, 1_000_000, 1000) === false);
+check("one millisecond inside the TTL is fresh",
+  isCacheFresh({ at: 1_000_000 - 999 }, 1_000_000, 1000) === true);
+check("exactly at the TTL boundary is NOT fresh (< , not <=)",
+  isCacheFresh({ at: 1_000_000 - 1000 }, 1_000_000, 1000) === false);
+check("well past the TTL is not fresh",
+  isCacheFresh({ at: 1_000_000 - 5000 }, 1_000_000, 1000) === false);
+
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

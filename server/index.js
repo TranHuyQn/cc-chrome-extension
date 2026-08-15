@@ -29,7 +29,7 @@ import { z } from "zod";
 import { TokenStore } from "./tokens.js";
 import { AgentSession, claudeBinFromEnv } from "./agent.js";
 import { isLoopbackHost, isLoopbackAddress, forwardedHeadersIn } from "./loopback.js";
-import { compareVersions, isValidTag, releaseUrls, parseChecksumFile, sha256File, reshapeToCheckout, LATEST_RELEASE_API } from "./updater.js";
+import { compareVersions, isValidTag, releaseUrls, parseChecksumFile, sha256File, reshapeToCheckout, isCacheFresh, LATEST_RELEASE_API } from "./updater.js";
 
 const PORT = Number(process.env.CC_CHROME_PORT || 8787);
 // Loopback by default: the mode this replaced (stdio) bound 127.0.0.1
@@ -1168,7 +1168,7 @@ async function mainHttp() {
       lastResult = JSON.parse(readFileSync(UPDATE_STATUS_FILE, "utf8"));
     } catch { /* no previous update, or unreadable — not an error */ }
 
-    if (releaseCache && Date.now() - releaseCache.at < RELEASE_CACHE_MS) {
+    if (isCacheFresh(releaseCache, Date.now(), RELEASE_CACHE_MS)) {
       return {
         type: "update_status",
         current: VERSION,

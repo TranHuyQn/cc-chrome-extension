@@ -690,26 +690,56 @@ async function run() {
     handle({ type: "update_status", current: "1.1.0", latest: "1.2.0", available: true, notes: "", lastResult: null });
   });
   /* eslint-enable no-undef */
-  const u1 = await f6Page.$eval("#update", (el) => ({ hidden: el.hidden, text: el.querySelector("#updateText").textContent, btn: el.querySelector("#updateAction").textContent }));
-  check("U1: a newer release shows the banner with a Cập nhật button",
-    u1.hidden === false && u1.text.includes("1.2.0") && u1.btn === "Cập nhật", JSON.stringify(u1));
+  const u1 = await f6Page.$eval("#update", (el) => ({
+    hidden: el.hidden,
+    text: el.querySelector("#updateText").textContent,
+    btn: el.querySelector("#updateAction").textContent,
+    btnHidden: el.querySelector("#updateAction").hidden,
+  }));
+  check("U1: a newer release shows the banner with a visible Cập nhật button",
+    u1.hidden === false && u1.text.includes("1.2.0") && u1.btn === "Cập nhật" && u1.btnHidden === false,
+    JSON.stringify(u1));
 
   /* eslint-disable no-undef */
   await f6Page.evaluate(() => { handle({ type: "update_status", current: "1.1.0", latest: "1.1.0", available: false, notes: "", lastResult: null }); });
   /* eslint-enable no-undef */
   check("U1: no newer release hides the banner", await f6Page.$eval("#update", (el) => el.hidden) === true);
 
-  // A rollback must still be explained after the bridge comes back on the old
-  // version — that is the only moment the user can learn why nothing changed.
+  // A rollback must still be explained even though the version that just
+  // failed is STILL GitHub's newest tag -- that is the realistic post-rollback
+  // state (available: true), and it is the input that broke the original
+  // ordering: `available` was checked before `lastResult.ok === false`, so
+  // this exact case rendered "Có bản 1.2.1 — Cập nhật" and silently discarded
+  // the reason naming the backup/log paths.
   /* eslint-disable no-undef */
   await f6Page.evaluate(() => {
-    handle({ type: "update_status", current: "1.1.0", latest: "1.1.0", available: false, notes: "",
-      lastResult: { ok: false, step: "rolled-back", reason: "Bản 1.2.0 không lên được. Đã khôi phục bản cũ." } });
+    handle({ type: "update_status", current: "1.2.0", latest: "1.2.1", available: true, notes: "",
+      lastResult: { ok: false, step: "rolled-back", version: "1.2.1",
+        reason: "Bản 1.2.1 cài xong nhưng bridge không lên. Đã khôi phục bản cũ. Nhật ký: /tmp/x.log" } });
   });
   /* eslint-enable no-undef */
-  const u2 = await f6Page.$eval("#update", (el) => ({ hidden: el.hidden, cls: el.className, text: el.querySelector("#updateText").textContent }));
-  check("U1: a previous rollback is explained even when no update is available",
-    u2.hidden === false && u2.cls.includes("failed") && u2.text.includes("khôi phục"), JSON.stringify(u2));
+  const u2 = await f6Page.$eval("#update", (el) => ({
+    hidden: el.hidden,
+    cls: el.className,
+    text: el.querySelector("#updateText").textContent,
+    btn: el.querySelector("#updateAction").textContent,
+  }));
+  check("U1: a previous rollback is explained (reason, failed class, Thử lại) even though the failed version is still the latest release",
+    u2.hidden === false && u2.cls.includes("failed") && u2.text.includes("khôi phục") && u2.btn === "Thử lại",
+    JSON.stringify(u2));
+
+  // The stale case: the record names a version that IS what is running now --
+  // a later attempt worked, or the user installed by hand. Showing the old
+  // failure here would report it as current when it no longer is.
+  /* eslint-disable no-undef */
+  await f6Page.evaluate(() => {
+    handle({ type: "update_status", current: "1.2.1", latest: "1.2.1", available: false, notes: "",
+      lastResult: { ok: false, step: "rolled-back", version: "1.2.1",
+        reason: "Bản 1.2.1 cài xong nhưng bridge không lên. Đã khôi phục bản cũ. Nhật ký: /tmp/x.log" } });
+  });
+  /* eslint-enable no-undef */
+  check("U1: a stale failure record (version === current) is ignored, banner hides",
+    await f6Page.$eval("#update", (el) => el.hidden) === true);
 
   /* eslint-disable no-undef */
   await f6Page.evaluate(() => { handle({ type: "update_failed", reason: "Checksum không khớp" }); });
