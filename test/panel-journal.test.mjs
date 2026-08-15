@@ -64,6 +64,21 @@ check("writing is debounced, not synchronous", store["panelLog.7"].length === 1,
 await sleep(700);
 check("and lands after the debounce", store["panelLog.7"].length === 2, String(store["panelLog.7"].length));
 
+// --- load() must not drop a pending write ------------------------------------
+//
+// If load() clears the debounce timer without flushing it first, whatever was
+// pushed since the last actual write is silently gone: the timer never fires
+// and entries is immediately overwritten from storage under the new key.
+
+await ccJournal.load("panelLog.flushA");
+ccJournal.push({ type: "message", text: "not yet saved" });
+// The debounce is still pending here on purpose — no sleep before the next
+// load() call, so this is exercising the swap-while-pending path.
+await ccJournal.load("panelLog.flushB");
+check("a pending write is flushed under its OWN key before load() swaps to a new one",
+  (store["panelLog.flushA"] || []).some((e) => e.text === "not yet saved"),
+  JSON.stringify(store["panelLog.flushA"]));
+
 // --- the cap -----------------------------------------------------------------
 
 await ccJournal.load("panelLog.cap");

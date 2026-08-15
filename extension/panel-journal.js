@@ -39,11 +39,15 @@ window.ccJournal = (() => {
   }
 
   async function load(storageKey) {
-    key = storageKey;
+    // A pending debounced write belongs to the PREVIOUS key and holds entries
+    // that are not on disk yet. Clearing its timer without flushing would drop
+    // them silently, so it is written out now, under the key it was queued for.
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;
+      if (key) chrome.storage.local.set({ [key]: entries });
     }
+    key = storageKey;
     const got = await chrome.storage.local.get({ [key]: [] });
     entries = Array.isArray(got[key]) ? got[key] : [];
     sizes = entries.map((entry) => JSON.stringify(entry).length);

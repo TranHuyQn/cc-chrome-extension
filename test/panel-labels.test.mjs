@@ -46,6 +46,7 @@ check("a missing name never renders undefined",
 check("a url is the subtitle when there is one", ccLabels.stepSubtitle({ url: "https://example.com" }) === "https://example.com", ccLabels.stepSubtitle({ url: "https://example.com" }));
 check("a query wins when there is no url", ccLabels.stepSubtitle({ query: "đăng nhập", maxResults: 5 }) === "đăng nhập", ccLabels.stepSubtitle({ query: "đăng nhập" }));
 check("a ref is shown when that is all there is", ccLabels.stepSubtitle({ ref: 12 }) === "12", ccLabels.stepSubtitle({ ref: 12 }));
+check("a ref of 0 is a real value, not a missing one", ccLabels.stepSubtitle({ ref: 0 }) === "0", ccLabels.stepSubtitle({ ref: 0 }));
 check("no interesting key means no subtitle", ccLabels.stepSubtitle({ maxElements: 150 }) === "", ccLabels.stepSubtitle({ maxElements: 150 }));
 check("an empty input is safe", ccLabels.stepSubtitle(undefined) === "", ccLabels.stepSubtitle(undefined));
 check("a long subtitle is cut", ccLabels.stepSubtitle({ text: "z".repeat(200) }).length <= 61, String(ccLabels.stepSubtitle({ text: "z".repeat(200) }).length));
@@ -71,6 +72,12 @@ check("an ambiguous prompt keeps the previous language", ccLabels.detectLocale("
 check("and keeps it the other way too", ccLabels.detectLocale("github.com", "vi") === "vi");
 check("an empty prompt keeps the previous language", ccLabels.detectLocale("", "en") === "en");
 check("a non-string never throws", ccLabels.detectLocale(null, "vi") === "vi");
+check("a lone English word that is also on the Vietnamese list does not flip the language",
+  ccLabels.detectLocale("doc?", "en") === "en", ccLabels.detectLocale("doc?", "en"));
+check("nor does a business acronym that collides with a Vietnamese word",
+  ccLabels.detectLocale("ROI", "en") === "en", ccLabels.detectLocale("ROI", "en"));
+check("a lone Vietnamese word does not flip an English session either",
+  ccLabels.detectLocale("xem", "en") === "en", ccLabels.detectLocale("xem", "en"));
 
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

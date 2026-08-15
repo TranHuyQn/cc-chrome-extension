@@ -126,8 +126,12 @@ window.ccLabels = (() => {
     if (VI_MARKS.test(s)) return "vi";
     const vi = count(s, VI_WORDS);
     const en = count(s, EN_WORDS);
-    if (vi > en) return "vi";
-    if (en > vi) return "en";
+    // A margin, not a bare majority. Several list entries are ordinary words in
+    // the other language — "doc", "roi" and "tim" read as document, ROI and Tim
+    // — so one lone hit is noise, not evidence. Real prose clears 2 easily:
+    // "mo tab github roi tim repo" scores 3.
+    if (vi - en >= 2) return "vi";
+    if (en - vi >= 2) return "en";
     // Nothing to go on — a URL, a code snippet, one bare word. Flipping the
     // interface on that would be worse than saying nothing.
     return fallback;
