@@ -29,6 +29,8 @@ export default [
         ...globals.browser,
         ...globals.serviceworker,
         chrome: "readonly",
+        ccLabels: "readonly",
+        ccJournal: "readonly",
         // The file declares its own `status`; the deprecated window.status
         // global would otherwise be reported as a redeclaration.
         status: "off",

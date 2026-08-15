@@ -22,6 +22,9 @@ const modelEl = document.getElementById("model");
 const stopBtn = document.getElementById("stop");
 const attachBtn = document.getElementById("attach");
 const newBtn = document.getElementById("newSession");
+const statusEl = document.getElementById("status");
+const statusTextEl = document.getElementById("statusText");
+const statusTimeEl = document.getElementById("statusTime");
 
 let ws = null;
 let reconnectDelay = RECONNECT_MIN_MS;
@@ -44,6 +47,21 @@ let streaming = null; // the element currently receiving deltas
 // keeps failing the same way (bridge still down, token still wrong) appends
 // one line, not one line per retry forever.
 let lastStateDetail = null;
+// The event shape this panel understands. The server still speaks the old one
+// to a panel that does not say this, because a bridge is upgraded by the
+// installer while the extension only changes when the user reloads it.
+const PROTOCOL = 2;
+
+// step id -> the row rendering it. Rows outlive their event: step_start creates
+// one, step_args fills its subtitle, step_end finishes it, and any of the three
+// can arrive while the user scrolls elsewhere.
+let steps = new Map();
+let phase = null;
+let phaseStartedAt = 0;
+let tickTimer = null;
+// Follows the language of what the user typed, and only governs the activity
+// wording — buttons and connection errors stay Vietnamese.
+let locale = "vi";
 
 function setState(state, detail = "") {
   dotEl.className = `dot ${state}`;
@@ -58,11 +76,97 @@ function setState(state, detail = "") {
 
 function addMessage(kind, text) {
   const el = document.createElement("div");
-  el.className = kind === "tool" ? "tool" : `msg ${kind}`;
+  el.className = kind === "tool" ? "tool" : kind === "stats" ? "stats" : `msg ${kind}`;
   el.textContent = text;
   logEl.appendChild(el);
   logEl.scrollTop = logEl.scrollHeight;
   return el;
+}
+
+function formatMs(ms) {
+  if (typeof ms !== "number" || !isFinite(ms)) return "";
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
+// Built element by element, never innerHTML: `summary` is page text a website
+// controls, and it is also what a user is most likely to be looking at.
+function addStep(id, name) {
+  const el = document.createElement("div");
+  el.className = "step running";
+
+  const head = document.createElement("div");
+  head.className = "step-head";
+  const icon = document.createElement("span");
+  icon.className = "step-icon";
+  icon.textContent = "●";
+  const label = document.createElement("span");
+  label.className = "step-label";
+  label.textContent = ccLabels.stepLabel(name, locale);
+  const sub = document.createElement("span");
+  sub.className = "step-sub";
+  const time = document.createElement("span");
+  time.className = "step-time";
+  head.append(icon, label, sub, time);
+
+  const detail = document.createElement("pre");
+  detail.className = "step-detail";
+  detail.hidden = true;
+  head.addEventListener("click", () => { detail.hidden = !detail.hidden; });
+
+  el.append(head, detail);
+  logEl.appendChild(el);
+  logEl.scrollTop = logEl.scrollHeight;
+  steps.set(id, { el, icon, label, sub, time, detail, name });
+  return el;
+}
+
+function fillStepArgs(id, input) {
+  const step = steps.get(id);
+  if (!step) return;
+  step.sub.textContent = ccLabels.stepSubtitle(input);
+  step.detail.textContent = ccLabels.formatInput(input, locale);
+}
+
+function finishStep(msg) {
+  const step = steps.get(msg.id);
+  if (!step) return;
+  steps.delete(msg.id);
+  step.el.classList.remove("running");
+  step.el.classList.add(msg.ok ? "ok" : "fail");
+  step.icon.textContent = msg.aborted ? "⦸" : msg.ok ? "✓" : "✗";
+  step.time.textContent = formatMs(msg.ms);
+  const heading = ccLabels.resultHeading(msg, locale);
+  const body = msg.summary ? `\n${msg.summary}` : "";
+  step.detail.textContent = `${step.detail.textContent}\n\n${heading}${body}`.trim();
+}
+
+// One timer for the whole panel, not one per row: what has to move is the
+// single number the user is watching, and a second interval per step would
+// stack up over a long turn.
+function startTicking() {
+  if (tickTimer) return;
+  tickTimer = setInterval(paintStatus, 1000);
+}
+
+function stopTicking() {
+  if (!tickTimer) return;
+  clearInterval(tickTimer);
+  tickTimer = null;
+}
+
+function paintStatus() {
+  if (!busy) {
+    statusEl.classList.remove("on");
+    stopTicking();
+    return;
+  }
+  // A running tool outranks any phase: it is the more specific truth.
+  const running = [...steps.values()].at(-1);
+  statusTextEl.textContent = running
+    ? ccLabels.stepLabel(running.name, locale)
+    : ccLabels.phaseLabel(phase, locale);
+  statusTimeEl.textContent = `${Math.max(0, Math.round((Date.now() - phaseStartedAt) / 1000))}s`;
+  statusEl.classList.add("on");
 }
 
 function setBusy(value) {
@@ -84,6 +188,25 @@ async function panelSessionKey() {
   const win = await chrome.windows.getCurrent().catch(() => null);
   sessionKey = `panelSession.${win?.id ?? "unknown"}`;
   return sessionKey;
+}
+
+async function panelJournalKey() {
+  const key = await panelSessionKey();
+  return key.replace("panelSession.", "panelLog.");
+}
+
+// Replayed before the socket is dialled, so the log is never briefly blank and
+// a live event can never interleave into the middle of the replay.
+async function restore() {
+  const entries = await ccJournal.load(await panelJournalKey());
+  for (const entry of entries) render(entry);
+  // A step still open in the journal belonged to a process that is certainly
+  // dead — the panel was closed. Close it now rather than leaving a row that
+  // pulses forever.
+  for (const id of [...steps.keys()]) {
+    finishStep({ id, ok: false, aborted: true, ms: null });
+  }
+  streaming = null;
 }
 
 async function loadState() {
@@ -179,6 +302,8 @@ async function connect() {
     // `message` reconciles into a node that is no longer the one being built,
     // and the text disappears with no error.
     streaming = null;
+    stopTicking();
+    statusEl.classList.remove("on");
     const reason = CLOSE_REASONS[event.code] ?? (proven ? "" : "Không kết nối được — bridge chưa chạy?");
     setState("disconnected", reason);
     if (CLOSE_REASONS[event.code]) reconnectDelay = RECONNECT_MAX_MS;
@@ -191,33 +316,13 @@ async function connect() {
   };
 }
 
-function handle(msg) {
+// Everything that puts something on screen. Separate from handle() because the
+// journal replays these same objects on open, and a replay must not re-send
+// `start`, reset busy, or reschedule anything.
+function render(msg) {
   switch (msg.type) {
-    case "hello":
-      send({ type: "start", sessionId, mcpSessionId, model: modelEl.value || null });
-      break;
-    case "ready":
-      sessionId = msg.sessionId;
-      // The server may have refused the replayed id (another live panel holds
-      // it) and minted its own, so `ready` is the authority for both ids.
-      mcpSessionId = msg.mcpSessionId || mcpSessionId;
-      saveState();
-      groupEl.textContent = msg.groupTitle || "";
-      // "Phiên mới" and a model change both send `start` even while a turn is
-      // running; the server disposes that AgentSession, and a disposed
-      // session never emits its own turn_end (see AgentSession.emit's
-      // `disposed` guard in server/agent.js). busy is otherwise only cleared
-      // by turn_end or a socket close, so without this it would stay true
-      // forever and every Enter afterward is silently swallowed by
-      // `if (!text || busy) return`. ready is the server's honest
-      // acknowledgement that a clean session now exists, so it is the right
-      // place to reset both.
-      setBusy(false);
-      streaming = null;
-      break;
-    case "turn_start":
-      setBusy(true);
-      streaming = null;
+    case "user":
+      addMessage("user", msg.text);
       break;
     case "delta":
       if (!streaming) streaming = addMessage("assistant", "");
@@ -231,36 +336,121 @@ function handle(msg) {
       else addMessage("assistant", msg.text);
       streaming = null;
       break;
+    case "step_start":
+      // Deliberately does NOT touch `streaming` — see the comment on the old
+      // `tool` case: blocks can arrive as [tool_use, text], and orphaning the
+      // element the deltas built made the same reply render twice.
+      addStep(msg.id, msg.name);
+      break;
+    case "step_args":
+      fillStepArgs(msg.id, msg.input);
+      break;
+    case "step_end":
+      finishStep(msg);
+      break;
+    case "turn_stats": {
+      const bits = [];
+      if (typeof msg.ms === "number") bits.push(formatMs(msg.ms));
+      if (typeof msg.outputTokens === "number") bits.push(`${msg.outputTokens} token`);
+      if (bits.length) addMessage("stats", bits.join(" · "));
+      break;
+    }
+    case "error-line":
+      addMessage("error", msg.text);
+      break;
     case "tool":
-      // Does NOT touch `streaming`. When an assistant turn's content blocks
-      // arrive as [tool_use, text] (the [text, tool_use] order was already
-      // handled correctly, since "message" itself always nulls `streaming`
-      // once it finalizes a text block), earlier `delta`s have already built
-      // the streaming element; nulling it here on the intervening `tool`
-      // event orphaned that element and made the following `message` create
-      // a second one with identical text -- the same reply rendered twice.
-      // Leaving `streaming` alone lets `message` reconcile into the element
-      // the deltas actually went into, whichever order the blocks arrive in.
-      // `msg.name` is server-controlled today, but a malformed or future
-      // frame with no name must not throw inside onmessage and silently drop
-      // the whole event.
+      // A bridge older than this panel still speaks the pre-timeline shape.
       addMessage("tool", `⚙ ${typeof msg.name === "string" ? msg.name.replace(/^mcp__chrome__/, "") : "(không rõ tool)"}`);
       break;
-    case "turn_end":
+  }
+}
+
+// Draw it and remember it. Anything that goes through here comes back when the
+// panel is reopened.
+function record(msg) {
+  ccJournal.push(msg);
+  render(msg);
+}
+
+function handle(msg) {
+  switch (msg.type) {
+    case "hello":
+      send({ type: "start", sessionId, mcpSessionId, model: modelEl.value || null, protocol: PROTOCOL });
+      break;
+    case "ready":
+      sessionId = msg.sessionId;
+      // The server may have refused the replayed id (another live panel holds
+      // it) and minted its own, so `ready` is the authority for both ids.
+      mcpSessionId = msg.mcpSessionId || mcpSessionId;
+      saveState();
+      groupEl.textContent = msg.groupTitle || "";
+      // "Phiên mới" and a model change both send `start` even while a turn is
+      // running; the server disposes that AgentSession, and a disposed session
+      // never emits its own turn_end (see AgentSession.emit's `disposed` guard
+      // in server/agent.js). busy is otherwise only cleared by turn_end or a
+      // socket close, so without this it would stay true forever and every
+      // Enter afterward is silently swallowed by `if (!text || busy) return`.
       setBusy(false);
       streaming = null;
+      break;
+    case "turn_start":
+      setBusy(true);
+      streaming = null;
+      phase = null;
+      phaseStartedAt = Date.now();
+      startTicking();
+      paintStatus();
+      break;
+    case "phase":
+      phase = msg.phase;
+      // The clock measures the CURRENT state, not the whole turn: "Đang suy
+      // nghĩ… 40s" when 38 of those were a tool call would be a lie.
+      phaseStartedAt = Date.now();
+      paintStatus();
+      break;
+    case "delta":
+      // Deltas are a live preview, deliberately NOT journalled: `message`
+      // carries the same text authoritatively a moment later, and journalling
+      // both would double the log on reopen.
+      render(msg);
+      break;
+    case "message":
+      record(msg);
+      break;
+    case "step_start":
+      record(msg);
+      phaseStartedAt = Date.now();
+      paintStatus();
+      break;
+    case "step_args":
+      record(msg);
+      break;
+    case "step_end":
+      record(msg);
+      phaseStartedAt = Date.now();
+      paintStatus();
+      break;
+    case "turn_stats":
+      record(msg);
+      break;
+    case "tool":
+      record(msg);
+      break;
+    case "turn_end":
+      // A turn killed mid-sentence leaves text on screen that `message` never
+      // arrived to confirm. Keep it, or reopening the panel loses it.
+      if (streaming && streaming.textContent) ccJournal.push({ type: "message", text: streaming.textContent });
+      setBusy(false);
+      streaming = null;
+      stopTicking();
+      paintStatus();
       if (!msg.ok) {
         // `error` carries the claude child's last stderr line verbatim — real
-        // external process output, never innerHTML'd, always textContent (see
-        // addMessage). It passes through unchanged except for one case: a
-        // replayed sessionId whose conversation the server no longer has. That
-        // is the common failure after reopening the panel days later, so it
-        // gets a plain-language nudge instead of leaving the raw CLI error to
-        // speak for itself. Every other error stays exactly as received.
+        // external process output, never innerHTML'd, always textContent.
         const errorText = msg.error || "Lượt chat thất bại.";
-        addMessage("error", errorText);
+        record({ type: "error-line", text: errorText });
         if (errorText.includes("No conversation found")) {
-          addMessage("error", 'Phiên chat cũ không còn tồn tại trên máy chủ — bấm "Phiên mới" rồi thử lại.');
+          record({ type: "error-line", text: 'Phiên chat cũ không còn tồn tại trên máy chủ — bấm "Phiên mới" rồi thử lại.' });
         }
       }
       break;
@@ -281,7 +471,8 @@ inputEl.addEventListener("keydown", (event) => {
   event.preventDefault();
   const text = inputEl.value.trim();
   if (!text || busy) return;
-  addMessage("user", text);
+  locale = ccLabels.detectLocale(text, locale);
+  record({ type: "user", text });
   inputEl.value = "";
   send({ type: "prompt", text });
 });
@@ -309,8 +500,10 @@ newBtn.addEventListener("click", async () => {
   // tab group, so dropping it here would strand the tabs the user attached —
   // "Phiên mới" clears the chat, not the session's tabs (README says so too).
   saveState();
+  ccJournal.clear();
+  steps = new Map();
   logEl.textContent = "";
-  send({ type: "start", sessionId: null, mcpSessionId, model: modelEl.value || null });
+  send({ type: "start", sessionId: null, mcpSessionId, model: modelEl.value || null, protocol: PROTOCOL });
 });
 
 modelEl.addEventListener("change", () => {
@@ -318,7 +511,10 @@ modelEl.addEventListener("change", () => {
   // disposes any running turn server-side.
   streaming = null;
   chrome.storage.local.set({ panelModel: modelEl.value });
-  send({ type: "start", sessionId, mcpSessionId, model: modelEl.value || null });
+  send({ type: "start", sessionId, mcpSessionId, model: modelEl.value || null, protocol: PROTOCOL });
 });
 
-connect();
+(async () => {
+  await restore();
+  connect();
+})();

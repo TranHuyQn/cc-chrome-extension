@@ -28,6 +28,26 @@
     .msg.user { align-self: flex-end; background: #2f2f2f; padding: 6px 10px; border-radius: 10px; max-width: 85%; }
     .msg.error { color: #f28b82; }
     .tool { font-size: 11px; color: #d97757; }
+    .step { font-size: 11px; border-left: 2px solid #3a3a3a; padding-left: 8px; }
+    .step-head { display: flex; gap: 6px; align-items: baseline; cursor: pointer; }
+    .step-icon { width: 1em; flex: none; text-align: center; }
+    .step-label { font-weight: 600; flex: none; }
+    .step-sub { color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .step-time { margin-left: auto; color: #777; flex: none; }
+    .step.running { color: #d97757; }
+    .step.running .step-icon { animation: ccpulse 1s ease-in-out infinite; }
+    .step.ok .step-icon { color: #188038; }
+    .step.fail { color: #f28b82; }
+    .step-detail {
+      margin: 4px 0 0; padding: 6px; background: #222; border-radius: 4px; color: #bbb;
+      white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow: auto;
+      font-family: ui-monospace, monospace; font-size: 11px;
+    }
+    .stats { font-size: 11px; color: #666; }
+    @keyframes ccpulse { 50% { opacity: .25; } }
+    #status { display: none; gap: 6px; font-size: 11px; color: #d97757; padding: 0 2px 6px; }
+    #status.on { display: flex; }
+    #statusTime { margin-left: auto; color: #777; }
     footer { border-top: 1px solid #333; padding: 8px; }
     .toolbar { display: flex; gap: 6px; margin-bottom: 6px; }
     textarea {
@@ -52,6 +72,7 @@
   <div id="log"></div>
 
   <footer>
+    <div id="status"><span id="statusText"></span><span id="statusTime"></span></div>
     <div class="toolbar">
       <button id="attach">Đưa tab này vào phiên</button>
       <button id="newSession">Phiên mới</button>
@@ -60,6 +81,8 @@
     <textarea id="input" placeholder="Nhắn cho Claude… (Enter để gửi)"></textarea>
   </footer>
 
+  <script src="panel-labels.js"></script>
+  <script src="panel-journal.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>
