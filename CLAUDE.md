@@ -373,9 +373,20 @@ attached them.
   512KB) and replays it before dialling the socket, because a reopened panel
   otherwise showed a blank log for a conversation the server resumes happily.
   It is NOT synchronised with the CLI's own transcript: clearing one does not
-  clear the other. `delta` events are drawn but never journalled — `message`
-  restates the same text authoritatively, and journalling both doubles the log
-  on reopen.
+  clear the other. An assistant bubble's journal entry is created by its
+  **first `delta`**, not by `message` — a placeholder pushed with
+  `ccJournal.push()` — so the bubble lands in its true position relative to
+  the tool rows around it; journalling it only at `message` time would place
+  it after that turn's `step_start`/`step_args`/`step_end` entries and a
+  reopened panel would show tools above text that came before them. Later
+  deltas render live and journal nothing. `message` fills that same entry by
+  reference and calls `ccJournal.resize()`, never `record()`, which would push
+  a second entry for the same bubble. Every path that can end a stream without
+  a `message` ever arriving — `ready` (a disposed session on a model change or
+  "Phiên mới"), `turn_end`, `socket.onclose`, and the model `change` handler —
+  calls `flushStreamingEntry()` first to copy whatever reached the screen into
+  that placeholder, or a reopened panel shows an empty bubble where the text
+  was.
 - The panel declares `protocol: 2` in its `start` frame. A bridge is upgraded by
   the installer while the extension only changes when the user reloads it in
   `chrome://extensions`, so the server still emits the pre-timeline `tool` event
