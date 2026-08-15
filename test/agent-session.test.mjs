@@ -620,7 +620,10 @@ function makeSession(extra = {}) {
     ends.every((e) => starts.some((s) => s.id === e.id)),
     JSON.stringify({ starts: starts.map((s) => s.id), ends: ends.map((e) => e.id) }));
   check("step_end never precedes its own step_start",
-    ends.every((e) => events.indexOf(events.find((x) => x.type === "step_start" && x.id === e.id)) < events.indexOf(e)),
+    ends.every((e) => {
+      const i = events.findIndex((x) => x.type === "step_start" && x.id === e.id);
+      return i >= 0 && i < events.indexOf(e);
+    }),
     JSON.stringify(events.map((e) => `${e.type}:${e.id ?? ""}`)));
   check("a successful tool reports ok", ends[0]?.ok === true, JSON.stringify(ends[0]));
   check("and reports how long it took", typeof ends[0]?.ms === "number" && ends[0].ms >= 0, JSON.stringify(ends[0]));
@@ -703,7 +706,10 @@ function makeSession(extra = {}) {
     added.some((e) => e.type === "step_end" && e.id === "toolu_dangling" && e.aborted === true),
     JSON.stringify(added));
   check("the abort is closed BEFORE turn_end, so the panel never sees a turn end with a step still running",
-    added.findIndex((e) => e.type === "step_end") < added.findIndex((e) => e.type === "turn_end"),
+    (() => {
+      const i = added.findIndex((e) => e.type === "step_end");
+      return i >= 0 && i < added.findIndex((e) => e.type === "turn_end");
+    })(),
     JSON.stringify(added.map((e) => e.type)));
   session.dispose();
 }
