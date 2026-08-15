@@ -321,5 +321,40 @@ async function waitUntil(cond, timeoutMs = 5000) {
   rmSync(work, { recursive: true, force: true });
 }
 
+// --- 7. the installer is invoked through the right interpreter --------------
+//
+// A .ps1 handed to bash, or a .sh handed to powershell, fails in a way that
+// looks exactly like "the installer errored" — and it would only ever show up
+// on the platform nobody develops on.
+
+{
+  const home = mkdtempSync(join(tmpdir(), "cc-runner-interp-"));
+  const installDir = join(home, ".cc-chrome-bridge");
+  mkdirSync(installDir, { recursive: true });
+  const source = join(home, "source");
+  mkdirSync(source, { recursive: true });
+  const argvLog = join(home, "argv.txt");
+  const work = mkdtempSync(join(tmpdir(), "cc-runner-work-interp-"));
+
+  // A .sh installer that records how it was invoked, then does nothing.
+  const shInstaller = join(home, "fake.sh");
+  writeFileSync(shInstaller, `#!/bin/sh\necho "$0" > "${argvLog}"\n`);
+  chmodSync(shInstaller, 0o755);
+
+  const version = { value: "9.9.9" };
+  const server = await healthServer(version);
+  await runRunner([
+    "--source", source, "--work", work, "--install-dir", installDir, "--installer", shInstaller,
+    "--port", String(server.address().port), "--expect-version", "9.9.9",
+    "--status-file", join(home, "status.json"),
+  ]);
+  server.close();
+  check("a .sh installer is run through bash and actually executes",
+    existsSync(argvLog) && readFileSync(argvLog, "utf8").includes("fake.sh"),
+    existsSync(argvLog) ? readFileSync(argvLog, "utf8") : "(not run)");
+  rmSync(home, { recursive: true, force: true });
+  rmSync(work, { recursive: true, force: true });
+}
+
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

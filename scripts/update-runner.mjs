@@ -129,14 +129,18 @@ async function main() {
   // exactly when installDir is wrecked and backupDir is the only intact copy
   // on the machine. So the advice here must never be "delete it".
   if (existsSync(backupDir)) {
-    rmSync(work, { recursive: true, force: true });
+    // A leftover temp dir must never change the reported outcome — this whole
+    // branch exists to explain the refusal clearly, and an EPERM/EBUSY here
+    // must not escape to main().catch() and get mislabelled "crashed".
+    try { rmSync(work, { recursive: true, force: true }); } catch { /* best-effort cleanup only */ }
     writeStatus({
       ok: false,
       step: "already-running",
       version: expectVersion,
       reason: `Có vẻ một bản cập nhật trước đã dừng giữa chừng. Bản cài cũ đang nằm ở ${backupDir}. ` +
         `Nếu bridge hiện tại chạy bình thường, đổi tên ${backupDir} thành một tên khác rồi thử lại. ` +
-        `Nếu bridge không chạy, đổi tên ${backupDir} thành ${installDir} để khôi phục bản cũ. ` +
+        `Nếu bridge không chạy: đổi tên ${installDir} thành ${installDir}.broken (nếu nó còn tồn tại), ` +
+        `rồi đổi tên ${backupDir} thành ${installDir} để khôi phục bản cũ. ` +
         `Nhật ký lần trước: ${logPath}`,
     });
     process.exit(4);
