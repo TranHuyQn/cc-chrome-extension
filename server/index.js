@@ -845,6 +845,7 @@ async function mainHttp() {
     }
   });
 
+  const INSTALL_DIR = join(homedir(), ".cc-chrome-bridge");
   const PANEL_CWD = join(homedir(), ".cc-chrome-bridge", "panel");
   // Outside the install directory on purpose: a rollback overwrites the whole
   // install dir and would swallow the very record explaining why it rolled back.
@@ -1223,8 +1224,29 @@ async function mainHttp() {
     }
   }
 
-  function spawnUpdateRunner() {
-    throw new Error("Trình cập nhật chưa được cài đặt (Task 5).");
+  // Detached and unref'd: this child must outlive the process spawning it,
+  // because the installer's first act is to stop the service that IS this
+  // process. stdio is fully detached for the same reason — a pipe to a dead
+  // parent would kill it.
+  function spawnUpdateRunner({ source, version }) {
+    const installer = process.platform === "win32"
+      ? join(INSTALL_DIR, "install.ps1")
+      : join(INSTALL_DIR, "install.sh");
+    const child = spawn(process.execPath, [
+      join(INSTALL_DIR, "update-runner.mjs"),
+      "--source", source,
+      "--install-dir", INSTALL_DIR,
+      "--installer", installer,
+      "--port", String(PORT),
+      "--expect-version", version,
+      "--status-file", UPDATE_STATUS_FILE,
+    ], {
+      detached: true,
+      stdio: "ignore",
+      cwd: tmpdir(),
+      windowsHide: true,
+    });
+    child.unref();
   }
 
   // WebSocket endpoints: /ws for the extension bridge, /panel for the side panel
