@@ -1,48 +1,73 @@
 # Answers the two Windows questions the update design depends on. Run on a real
-# Windows machine with the bridge already installed. Writes nothing outside
-# $env:TEMP and never touches the installed bridge.
+# Windows machine. Writes only under %TEMP% and registers one throwaway
+# scheduled task which it removes again. Needs no administrator rights.
+#
+# ASCII ONLY, deliberately. Windows PowerShell 5.1 reads a .ps1 without a BOM as
+# ANSI, so any character above 0x7F becomes mojibake and can terminate a string
+# early. The first version of this script died exactly that way.
 $ErrorActionPreference = 'Stop'
-$probe = Join-Path $env:TEMP "cc-probe-$(Get-Random)"
+
+$probe = Join-Path $env:TEMP ('cc-probe-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Path $probe | Out-Null
 Write-Host "probe dir: $probe"
 
-# --- Q2 first: does a detached child outlive its parent being killed? ---------
-# The child writes a heartbeat line every second for 20s. We kill the PARENT
-# (this shell's spawned intermediary) after 3s and see whether the file keeps
-# growing — that is exactly the shape update-runner needs to survive.
-$beat = Join-Path $probe 'heartbeat.txt'
-$childScript = Join-Path $probe 'child.ps1'
-@"
-1..20 | ForEach-Object { Add-Content -Path '$beat' -Value "beat `$_"; Start-Sleep -Seconds 1 }
-"@ | Set-Content $childScript
+# --- Q2: does a detached child survive the scheduled task being stopped? -----
+# Production shape: the bridge runs as a Task Scheduler task, spawns the updater
+# detached, and the installer then stops that task. What matters is whether
+# stopping the task takes the detached child with it.
+$beat     = Join-Path $probe 'heartbeat.txt'
+$child    = Join-Path $probe 'child.ps1'
+$parent   = Join-Path $probe 'parent.ps1'
+$taskName = 'CcProbeDetachedChild'
 
-$parent = Start-Process -FilePath 'powershell' `
-    -ArgumentList '-NoProfile','-WindowStyle','Hidden','-File',$childScript `
-    -PassThru
-Start-Sleep -Seconds 3
-Stop-Process -Id $parent.Id -Force
-Write-Host "killed pid $($parent.Id) after 3s"
-$before = (Get-Content $beat -ErrorAction SilentlyContinue).Count
+# Paths are baked into the generated scripts rather than passed as arguments:
+# argument quoting through Task Scheduler is its own source of parse failures,
+# and it is not what we are trying to measure.
+Set-Content -Path $child -Value ("1..30 | ForEach-Object { Add-Content -Path '$beat' -Value ('beat ' + `$_); Start-Sleep -Seconds 1 }")
+Set-Content -Path $parent -Value ("Start-Process -FilePath 'powershell' -ArgumentList '-NoProfile','-WindowStyle','Hidden','-File','$child' | Out-Null; Start-Sleep -Seconds 300")
+
+$action    = New-ScheduledTaskAction -Execute 'powershell' -Argument ('-NoProfile -WindowStyle Hidden -File "' + $parent + '"')
+$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive
+Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Force | Out-Null
+
+Start-ScheduledTask -TaskName $taskName
 Start-Sleep -Seconds 6
-$after = (Get-Content $beat -ErrorAction SilentlyContinue).Count
-Write-Host "Q2 heartbeat lines: before=$before after=$after"
-if ($after -gt $before) { Write-Host "Q2 ANSWER: detached child SURVIVES parent kill" }
-else { Write-Host "Q2 ANSWER: detached child DIES with parent — design change needed" }
+$before = @(Get-Content $beat -ErrorAction SilentlyContinue).Count
+Write-Host "heartbeat lines before stopping the task: $before"
+if ($before -eq 0) {
+    Write-Host 'Q2 INCONCLUSIVE: the child never started, so nothing was measured. Report this.'
+} else {
+    Stop-ScheduledTask -TaskName $taskName
+    Start-Sleep -Seconds 8
+    $after = @(Get-Content $beat -ErrorAction SilentlyContinue).Count
+    Write-Host "heartbeat lines after stopping the task: $after"
+    if ($after -gt $before) {
+        Write-Host 'Q2 ANSWER: detached child SURVIVES the task being stopped'
+    } else {
+        Write-Host 'Q2 ANSWER: detached child DIES with the task - design change needed'
+    }
+}
+Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
 
 # --- Q1: does install.ps1 accept a reshaped CC_CHROME_SOURCE? ----------------
-# Build the checkout layout the updater will build, from the installed copy
-# (same file set a release tarball carries), then run install.ps1 -WhatIf-style
-# by pointing HOME at a throwaway dir so nothing real is touched.
-$src = Join-Path $probe 'source'
+# Build the same checkout layout the updater will build, from the installed copy
+# (the same file set a release tarball carries).
+$src       = Join-Path $probe 'source'
 $installed = Join-Path $env:USERPROFILE '.cc-chrome-bridge'
-New-Item -ItemType Directory -Path (Join-Path $src 'scripts') | Out-Null
-New-Item -ItemType Directory -Path (Join-Path $src '.claude\commands') -Force | Out-Null
-Copy-Item -Recurse (Join-Path $installed 'server')    (Join-Path $src 'server')
-Copy-Item -Recurse (Join-Path $installed 'extension') (Join-Path $src 'extension')
-Copy-Item (Join-Path $installed 'ccchrome.md')     (Join-Path $src '.claude\commands\ccchrome.md')
-Copy-Item (Join-Path $installed 'uninstall.ps1')   (Join-Path $src 'scripts\uninstall.ps1')
-Copy-Item (Join-Path $installed 'service-task.ps1') (Join-Path $src 'scripts\service-task.ps1')
-Write-Host "Q1 reshaped source at: $src"
-Write-Host "Q1 NEXT: run this by hand and report the full output:"
-Write-Host "    `$env:CC_CHROME_SOURCE='$src'; powershell -File '$installed\..\<repo>\scripts\install.ps1'"
-Write-Host "  (or from a checkout: `$env:CC_CHROME_SOURCE='$src'; .\scripts\install.ps1)"
+if (-not (Test-Path $installed)) {
+    Write-Host "Q1 SKIPPED: no install found at $installed"
+} else {
+    New-Item -ItemType Directory -Path (Join-Path $src 'scripts') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $src '.claude\commands') -Force | Out-Null
+    Copy-Item -Recurse (Join-Path $installed 'server')    (Join-Path $src 'server')
+    Copy-Item -Recurse (Join-Path $installed 'extension') (Join-Path $src 'extension')
+    Copy-Item (Join-Path $installed 'ccchrome.md')      (Join-Path $src '.claude\commands\ccchrome.md')
+    Copy-Item (Join-Path $installed 'uninstall.ps1')    (Join-Path $src 'scripts\uninstall.ps1')
+    Copy-Item (Join-Path $installed 'service-task.ps1') (Join-Path $src 'scripts\service-task.ps1')
+    Write-Host ''
+    Write-Host 'Q1 reshaped source built at:'
+    Write-Host "    $src"
+    Write-Host 'Q1 NEXT: from the repo checkout, run these two lines and report all output:'
+    Write-Host ('    $env:CC_CHROME_SOURCE = ' + "'$src'")
+    Write-Host '    .\scripts\install.ps1'
+}
