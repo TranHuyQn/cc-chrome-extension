@@ -60,7 +60,10 @@ function makeSession(extra = {}) {
   check("ends with turn_end ok", events.at(-1)?.type === "turn_end" && events.at(-1)?.ok === true,
     JSON.stringify(events.at(-1)));
   check("no event type outside the contract",
-    events.every((e) => ["turn_start", "delta", "message", "tool", "turn_end"].includes(e.type)),
+    events.every((e) => [
+      "turn_start", "delta", "message", "tool", "turn_end",
+      "step_start", "step_args", "step_end", "phase", "turn_stats",
+    ].includes(e.type)),
     JSON.stringify([...new Set(events.map((e) => e.type))]));
   session.dispose();
 }
@@ -595,6 +598,150 @@ function makeSession(extra = {}) {
   check("clipInput degrades a huge input to a preview", big.__truncated === true, JSON.stringify(big).slice(0, 80));
   check("that preview is bounded", big.__preview.length === STEP_INPUT_MAX, String(big.__preview?.length));
   check("clipInput survives null", JSON.stringify(clipInput(null)) === "{}", JSON.stringify(clipInput(null)));
+}
+
+// --- 11. một lượt có gọi tool sinh ra timeline đầy đủ ------------------------
+//
+// Phát lại bản chụp thật ở test/fixtures/claude-stream-tool.ndjson (Task 1).
+// Điều đang test là việc GHÉP CẶP: step_start và step_end phải cùng một id, và
+// step_end không bao giờ được đến trước step_start của nó.
+{
+  const toolFixture = join(root, "test", "fixtures", "claude-stream-tool.ndjson");
+  const { session, events } = makeSession({ env: { CC_FAKE_FIXTURE: toolFixture } });
+  session.send("chạy thử");
+  for (let i = 0; i < 100 && !events.some((e) => e.type === "turn_end"); i++) await sleep(50);
+
+  const starts = events.filter((e) => e.type === "step_start");
+  const ends = events.filter((e) => e.type === "step_end");
+  check("a tool call opens a step", starts.length >= 1, JSON.stringify(starts));
+  check("that step is named", typeof starts[0]?.name === "string" && starts[0].name.length > 0, JSON.stringify(starts[0]));
+  check("the step closes", ends.length === starts.length, `${starts.length} starts vs ${ends.length} ends`);
+  check("it closes under the SAME id it opened with",
+    ends.every((e) => starts.some((s) => s.id === e.id)),
+    JSON.stringify({ starts: starts.map((s) => s.id), ends: ends.map((e) => e.id) }));
+  check("step_end never precedes its own step_start",
+    ends.every((e) => events.indexOf(events.find((x) => x.type === "step_start" && x.id === e.id)) < events.indexOf(e)),
+    JSON.stringify(events.map((e) => `${e.type}:${e.id ?? ""}`)));
+  check("a successful tool reports ok", ends[0]?.ok === true, JSON.stringify(ends[0]));
+  check("and reports how long it took", typeof ends[0]?.ms === "number" && ends[0].ms >= 0, JSON.stringify(ends[0]));
+  check("the tool's arguments arrive",
+    events.some((e) => e.type === "step_args" && e.id === starts[0].id && e.input && typeof e.input === "object"),
+    JSON.stringify(events.filter((e) => e.type === "step_args")));
+
+  check("waiting on the API is reported as a phase",
+    events.some((e) => e.type === "phase" && e.phase === "requesting"),
+    JSON.stringify(events.filter((e) => e.type === "phase")));
+  check("answering is reported as a phase",
+    events.some((e) => e.type === "phase" && e.phase === "answering"),
+    JSON.stringify(events.filter((e) => e.type === "phase")));
+  check("the turn's own numbers arrive at the end",
+    events.some((e) => e.type === "turn_stats" && typeof e.ms === "number"),
+    JSON.stringify(events.filter((e) => e.type === "turn_stats")));
+  session.dispose();
+}
+
+// --- 11b. tool MCP: content là MẢNG, không phải chuỗi ------------------------
+//
+// claude-stream.ndjson là bản chụp một tool MCP thật, tức đúng dạng mà panel
+// chạy vào hằng ngày. Nếu toolResultText bỏ sót nhánh mảng thì summary ở đây là
+// "[object Object]" — im lặng, không lỗi, và chỉ lộ ra khi người dùng nhìn.
+{
+  const { session, events } = makeSession();
+  session.send("gọi tool mcp");
+  for (let i = 0; i < 100 && !events.some((e) => e.type === "turn_end"); i++) await sleep(50);
+  const end = events.find((e) => e.type === "step_end");
+  check("an MCP tool result closes its step", !!end, JSON.stringify(events.map((e) => e.type)));
+  check("its summary is real text, not [object Object]",
+    typeof end?.summary === "string" && !end.summary.includes("[object Object]"),
+    JSON.stringify(end?.summary?.slice(0, 120)));
+  session.dispose();
+}
+
+// --- 11c. không có step_end mồ côi ------------------------------------------
+//
+// Nếu CLI ngừng gửi content_block_start (chạy không có --include-partial-messages,
+// hoặc format đổi ở bản sau), tool_result vẫn phải đóng được một bước — server tự
+// mở bù. Panel giữ Map<id, element>; một step_end cho id chưa từng thấy sẽ rơi
+// vào hư không và người dùng mất hẳn dòng đó.
+{
+  const { session, events } = makeSession();
+  session.send("khởi động");
+  for (let i = 0; i < 100 && !events.some((e) => e.type === "turn_end"); i++) await sleep(50);
+  const before = events.length;
+  session.onStdout(JSON.stringify({
+    type: "user",
+    message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_never_announced", content: "xong" }] },
+  }) + "\n");
+  const added = events.slice(before);
+  check("an unannounced tool_result still opens a step first",
+    added[0]?.type === "step_start" && added[0].id === "toolu_never_announced",
+    JSON.stringify(added));
+  check("and then closes it",
+    added[1]?.type === "step_end" && added[1].id === "toolu_never_announced",
+    JSON.stringify(added));
+  session.dispose();
+}
+
+// --- 11d. dừng giữa chừng phải đóng mọi bước còn treo -----------------------
+//
+// Bấm Dừng khi read_page đang chạy: tool_result sẽ không bao giờ đến. Không quét
+// dọn thì dòng đó quay ⠹ vĩnh viễn — đúng cái triệu chứng mà cả tính năng này
+// sinh ra để xoá.
+{
+  const { session, events } = makeSession();
+  session.send("mở một bước rồi bỏ dở");
+  for (let i = 0; i < 100 && !events.some((e) => e.type === "turn_end"); i++) await sleep(50);
+  // Mở một bước bằng tay, rồi kết thúc lượt mà không có tool_result cho nó.
+  session.onStdout(JSON.stringify({
+    type: "stream_event",
+    event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_dangling", name: "mcp__chrome__read_page", input: {} } },
+  }) + "\n");
+  const before = events.length;
+  session.endTurn({ ok: false, error: "đã dừng theo yêu cầu" });
+  const added = events.slice(before);
+  check("ending a turn closes every step still open",
+    added.some((e) => e.type === "step_end" && e.id === "toolu_dangling" && e.aborted === true),
+    JSON.stringify(added));
+  check("the abort is closed BEFORE turn_end, so the panel never sees a turn end with a step still running",
+    added.findIndex((e) => e.type === "step_end") < added.findIndex((e) => e.type === "turn_end"),
+    JSON.stringify(added.map((e) => e.type)));
+  session.dispose();
+}
+
+// --- 12. giao thức: panel cũ vẫn nhận sự kiện `tool` cũ ---------------------
+//
+// Người dùng nâng bridge nhưng chưa reload extension là đường đi thật. Bỏ hẳn
+// `tool` thì panel cũ không hiện gì; phát cả hai cho panel mới thì mỗi tool ra
+// hai dòng. Trường `protocol` trong `start` quyết định.
+{
+  const toolFixture = join(root, "test", "fixtures", "claude-stream-tool.ndjson");
+  const { session, events } = makeSession({ env: { CC_FAKE_FIXTURE: toolFixture } });
+  session.send("panel cũ");
+  for (let i = 0; i < 100 && !events.some((e) => e.type === "turn_end"); i++) await sleep(50);
+  check("protocol 1 (the default) still emits the legacy tool event",
+    events.some((e) => e.type === "tool"), JSON.stringify(events.map((e) => e.type)));
+  session.dispose();
+
+  const events2 = [];
+  const modern = new AgentSession({
+    sessionId: "77777777-6666-5555-4444-333333333333",
+    mcpUrl: "http://127.0.0.1:8787/mcp?panel=test",
+    allowedTools: "mcp__chrome",
+    cwd: workdir,
+    protocol: 2,
+    claudeBin: process.execPath,
+    claudeArgsPrefix: [fakeClaude],
+    env: { CC_FAKE_FIXTURE: toolFixture },
+    onEvent: (event) => events2.push(event),
+    log: () => {},
+  });
+  modern.send("panel mới");
+  for (let i = 0; i < 100 && !events2.some((e) => e.type === "turn_end"); i++) await sleep(50);
+  check("protocol 2 drops the legacy tool event", !events2.some((e) => e.type === "tool"),
+    JSON.stringify(events2.map((e) => e.type)));
+  check("but still gets the step events", events2.some((e) => e.type === "step_start"),
+    JSON.stringify(events2.map((e) => e.type)));
+  modern.dispose();
 }
 
 rmSync(workdir, { recursive: true, force: true });

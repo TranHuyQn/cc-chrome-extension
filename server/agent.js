@@ -168,6 +168,11 @@ export class AgentSession {
     // the very first turn must --resume instead of --session-id. A panel that
     // reopens and replays a remembered id is exactly this case.
     resuming = false,
+    // Panel protocol version, replayed by the panel in `start`. 1 = the
+    // pre-timeline panel, which only understands `tool`. Anything ≥ 2 gets the
+    // step events instead. A bridge is upgraded independently of the extension,
+    // so both have to keep working.
+    protocol = 1,
     claudeBin = "claude",
     // Overridable so a test can point at a fixture instead of whatever the
     // machine running the suite happens to have configured.
@@ -184,6 +189,7 @@ export class AgentSession {
     this.allowedTools = allowedTools;
     this.cwd = cwd;
     this.systemPrompt = systemPrompt;
+    this.protocol = protocol;
     this.claudeBin = claudeBin;
     this.userSettingsPath = userSettingsPath;
     this.claudeArgsPrefix = claudeArgsPrefix;
@@ -193,6 +199,13 @@ export class AgentSession {
 
     this.child = null;
     this.buffer = "";
+    // tool_use_id -> { name, t0 }. The only thing that can pair "Claude called
+    // read_page" with "read_page came back", because those arrive as two
+    // unrelated top-level lines several seconds apart.
+    this.steps = new Map();
+    // Last phase reported to the panel, so a transition is emitted once rather
+    // than on every delta.
+    this.phase = null;
     // A turn that has already started must --resume; the very first one has no
     // conversation to resume into and would fail. A caller that hands over an
     // id from an earlier panel seeds this true, because for that id the
@@ -219,6 +232,65 @@ export class AgentSession {
   emit(event) {
     if (this.disposed) return;
     this.onEvent(event);
+  }
+
+  setPhase(phase) {
+    if (this.phase === phase) return;
+    this.phase = phase;
+    if (phase) this.emit({ type: "phase", phase });
+  }
+
+  startStep(id, name) {
+    if (!id || this.steps.has(id)) return;
+    this.steps.set(id, { name, t0: performance.now() });
+    // A running step outranks any phase in the panel's status bar. Clearing it
+    // also matters for the NEXT transition: the CLI sends status:requesting
+    // again for the following API round trip, and setPhase only emits on change.
+    this.phase = null;
+    this.emit({ type: "step_start", id, name });
+  }
+
+  endStep(block) {
+    const id = block.tool_use_id;
+    if (!id) return;
+    // Never a step_end the panel has no row for. If content_block_start never
+    // arrived — a CLI run without --include-partial-messages, or a future format
+    // change — open the step here so every pair is complete. The panel keys its
+    // rows by id; an unmatched step_end would vanish with no error.
+    if (!this.steps.has(id)) this.startStep(id, block.name || "tool");
+    const started = this.steps.get(id);
+    this.steps.delete(id);
+    const ok = block.is_error !== true;
+    const { summary, size } = summarizeResult(toolResultText(block.content), ok);
+    this.emit({
+      type: "step_end",
+      id,
+      ok,
+      ms: Math.round(performance.now() - started.t0),
+      summary,
+      size,
+    });
+  }
+
+  // Every way a turn can end goes through here. A step whose tool_result never
+  // arrives — stop button, crashed child, killed process — still closes, so the
+  // panel never spins a row forever. That symptom is the whole reason this
+  // feature exists; leaving one behind here would recreate it.
+  endTurn(payload) {
+    for (const [id, step] of this.steps) {
+      this.emit({
+        type: "step_end",
+        id,
+        ok: false,
+        aborted: true,
+        ms: Math.round(performance.now() - step.t0),
+        summary: "",
+        size: 0,
+      });
+    }
+    this.steps.clear();
+    this.phase = null;
+    this.emit({ type: "turn_end", ...payload });
   }
 
   // Written to a file rather than passed inline as JSON. Two reasons, both
@@ -316,6 +388,8 @@ export class AgentSession {
     this.stopping = false;
     this.finished = false;
     this.buffer = "";
+    this.steps.clear();
+    this.phase = null;
     this.lastStderrLine = null;
     this.emit({ type: "turn_start" });
 
@@ -331,7 +405,7 @@ export class AgentSession {
     // through PATH by the OS, and its ENOENT is handled in the error listener.
     if (/[\\/]/.test(this.claudeBin) && !existsSync(this.claudeBin)) {
       this.finished = true;
-      this.emit({ type: "turn_end", ok: false, error: this.missingClaudeMessage() });
+      this.endTurn({ ok: false, error: this.missingClaudeMessage() });
       return;
     }
 
@@ -374,7 +448,7 @@ export class AgentSession {
       // installer is what bakes the absolute path in (CC_CHROME_CLAUDE_BIN),
       // so re-running it is the fix after installing or moving the CLI.
       const message = err.code === "ENOENT" ? this.missingClaudeMessage() : err.message;
-      this.emit({ type: "turn_end", ok: false, error: message });
+      this.endTurn({ ok: false, error: message });
     });
 
     child.on("close", (code) => {
@@ -382,9 +456,9 @@ export class AgentSession {
       if (this.finished) return;
       this.finished = true;
       if (this.stopping) {
-        this.emit({ type: "turn_end", ok: false, error: "đã dừng theo yêu cầu" });
+        this.endTurn({ ok: false, error: "đã dừng theo yêu cầu" });
       } else if (code === 0) {
-        this.emit({ type: "turn_end", ok: true });
+        this.endTurn({ ok: true });
       } else {
         // The exit code alone reads the same for a dead session id, a crash, a
         // bad model name and an auth failure. The CLI's own last line is what
@@ -394,8 +468,7 @@ export class AgentSession {
         // button is the panel's call, and a classifier here would be a second
         // place to keep in sync with the CLI's wording.
         const cause = this.lastStderrLine;
-        this.emit({
-          type: "turn_end",
+        this.endTurn({
           ok: false,
           error: cause ? `claude thoát với mã ${code}: ${cause}` : `claude thoát với mã ${code}`,
         });
@@ -443,10 +516,29 @@ export class AgentSession {
 
   translate(event) {
     if (event.type === "stream_event") {
-      const delta = event.event?.delta;
-      if (delta?.type === "text_delta" && delta.text) {
-        this.emit({ type: "delta", text: delta.text });
+      const inner = event.event;
+      // The earliest moment the tool is knowable: id and name arrive here,
+      // before the arguments have finished streaming. Measured 2026-08-15.
+      if (inner?.type === "content_block_start" && inner.content_block?.type === "tool_use") {
+        this.startStep(inner.content_block.id, inner.content_block.name);
+        return;
       }
+      const delta = inner?.delta;
+      if (delta?.type === "text_delta" && delta.text) {
+        this.setPhase("answering");
+        this.emit({ type: "delta", text: delta.text });
+        return;
+      }
+      if (delta?.type === "thinking_delta") {
+        // The `thinking` field is ALWAYS the empty string on CLI 2.1.197 —
+        // measured twice, ultrathink included. The only information here is
+        // that thinking is happening at all, so that is all that is reported.
+        this.setPhase("thinking");
+      }
+      return;
+    }
+    if (event.type === "system" && event.subtype === "status" && event.status === "requesting") {
+      this.setPhase("requesting");
       return;
     }
     if (event.type === "assistant") {
@@ -454,20 +546,39 @@ export class AgentSession {
         if (block.type === "text" && block.text) {
           this.emit({ type: "message", text: block.text });
         } else if (block.type === "tool_use" && block.name) {
-          this.emit({ type: "tool", name: block.name });
+          // Idempotent: content_block_start has usually opened this step
+          // already. When partial messages are off, this is where it opens.
+          this.startStep(block.id, block.name);
+          this.emit({ type: "step_args", id: block.id, input: clipInput(block.input) });
+          // A panel that predates the timeline only understands this one.
+          if (this.protocol < 2) this.emit({ type: "tool", name: block.name });
         }
-        // Any other content block type (e.g. "thinking", or something newer
-        // than this probe) carries nothing the panel renders — skip silently
-        // rather than throw, since Anthropic's block-type surface is larger
-        // than what one fixture happened to exercise.
+        // A "thinking" block carries no text (see translate's thinking_delta
+        // branch); anything newer than this probe is skipped rather than thrown
+        // on, since Anthropic's block-type surface is larger than one fixture.
       }
       return;
     }
-    // "system" (session bootstrap and this machine's SessionStart hook noise),
-    // "user" (tool results fed back to the model), "rate_limit_event" and
-    // "result" carry nothing the panel renders — the final text already
-    // arrived as an assistant message. Any unrecognised top-level type is
-    // ignored the same way rather than throwing.
+    if (event.type === "user") {
+      // Tool results come back as a `user` message. This is the ONLY line that
+      // says a tool finished, and dropping it is why the panel used to go quiet.
+      for (const block of event.message?.content || []) {
+        if (block.type === "tool_result") this.endStep(block);
+      }
+      return;
+    }
+    if (event.type === "result") {
+      this.emit({
+        type: "turn_stats",
+        ms: event.duration_ms ?? null,
+        costUsd: event.total_cost_usd ?? null,
+        inputTokens: event.usage?.input_tokens ?? null,
+        outputTokens: event.usage?.output_tokens ?? null,
+      });
+      return;
+    }
+    // "rate_limit_event", the other "system" subtypes (hook noise, init) and
+    // any unrecognised top-level type carry nothing the panel renders.
   }
 
   // One wording, two callers: the pre-flight check in send() and the spawn
