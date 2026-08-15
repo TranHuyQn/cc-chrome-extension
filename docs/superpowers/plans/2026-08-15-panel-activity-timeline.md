@@ -77,6 +77,7 @@ const has = {
   blockStart: L.some((e) => e.type === "stream_event" && e.event?.type === "content_block_start" && e.event.content_block?.type === "tool_use" && e.event.content_block.id && e.event.content_block.name),
   argsDelta: L.some((e) => e.type === "stream_event" && e.event?.delta?.type === "input_json_delta"),
   toolUse: L.some((e) => e.type === "assistant" && (e.message?.content || []).some((b) => b.type === "tool_use" && b.id && b.input)),
+  textDelta: L.some((e) => e.type === "stream_event" && e.event?.delta?.type === "text_delta"),
   stringResult: L.some((e) => e.type === "user" && (e.message?.content || []).some((b) => b.type === "tool_result" && typeof b.content === "string")),
   status: L.some((e) => e.type === "system" && e.subtype === "status" && e.status === "requesting"),
   result: L.some((e) => e.type === "result" && typeof e.duration_ms === "number"),
