@@ -10,6 +10,7 @@ import { gunzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import AdmZip from "adm-zip";
 import { chromium } from "playwright";
 
@@ -181,6 +182,22 @@ check(
   "dist/install.ps1 is byte-identical to scripts/install.ps1",
   existsSync(distInstallPs1Path) && readFileSync(distInstallPs1Path, "utf8") === readFileSync(join(root, "scripts", "install.ps1"), "utf8")
 );
+
+// The updater refuses to install a tarball whose hash does not match this file.
+// If a release ships without it, every automatic update fails closed — which is
+// the right failure, but only if someone notices here first.
+{
+  const sumPath = join(root, "dist", "cc-chrome-bridge.tar.gz.sha256");
+  check("release writes a checksum beside the tarball", existsSync(sumPath), sumPath);
+  const text = readFileSync(sumPath, "utf8");
+  const hex = (text.match(/\b[0-9a-f]{64}\b/i) || [])[0];
+  check("the checksum file contains a sha256", !!hex, text.slice(0, 80));
+
+  const actual = createHash("sha256").update(readFileSync(join(root, "dist", "cc-chrome-bridge.tar.gz"))).digest("hex");
+  check("the checksum matches the tarball it ships with", hex?.toLowerCase() === actual, `${hex} vs ${actual}`);
+  check("the checksum file names the tarball, so `shasum -c` works by hand",
+    text.includes("cc-chrome-bridge.tar.gz"), text.slice(0, 80));
+}
 
 const listing = execFileSync("tar", ["-tzf", tarPath], { encoding: "utf8" });
 // Exact entry names, not substring matching against the raw listing — a

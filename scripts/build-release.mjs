@@ -4,9 +4,10 @@
 // same three dependencies rather than whatever npm resolves that day.
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, rmSync, copyFileSync, existsSync } from "node:fs";
+import { mkdirSync, rmSync, copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = join(root, "dist");
@@ -89,6 +90,14 @@ execFileSync("tar", [
 rmSync(stage, { recursive: true, force: true });
 console.log("wrote dist/cc-chrome-bridge.tar.gz");
 
+// Written in `shasum -a 256` format so a human can verify a download by hand
+// with `shasum -c cc-chrome-bridge.tar.gz.sha256`, and so the updater's parser
+// (server/updater.js parseChecksumFile) has something standard to read.
+const tarballPath = join(dist, "cc-chrome-bridge.tar.gz");
+const digest = createHash("sha256").update(readFileSync(tarballPath)).digest("hex");
+writeFileSync(`${tarballPath}.sha256`, `${digest}  cc-chrome-bridge.tar.gz\n`);
+console.log("wrote dist/cc-chrome-bridge.tar.gz.sha256");
+
 // install.sh also ships as a STANDALONE release asset, copied straight to
 // dist/ rather than only left inside the tarball above. The one-line install
 // documented everywhere (README.md, .claude/commands/ccchrome.md) is
@@ -97,9 +106,9 @@ console.log("wrote dist/cc-chrome-bridge.tar.gz");
 // packing it exclusively inside cc-chrome-bridge.tar.gz would make that
 // command 404 no matter how carefully a release is published by hand.
 // The same argument applies to install.ps1 and the Windows one-liner
-// `irm .../releases/latest/download/install.ps1 | iex`, so THREE assets have
-// to be attached to every GitHub Release, not two. test/build.test.mjs asserts
-// both standalone copies exist and match their source byte for byte.
+// `irm .../releases/latest/download/install.ps1 | iex`, so FOUR assets have
+// to be attached to every GitHub Release, not three. test/build.test.mjs asserts
+// the checksum file exists and matches the tarball byte for byte.
 copyFileSync(join(root, "scripts", "install.sh"), join(dist, "install.sh"));
 console.log("wrote dist/install.sh");
 copyFileSync(join(root, "scripts", "install.ps1"), join(dist, "install.ps1"));

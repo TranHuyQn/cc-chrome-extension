@@ -148,18 +148,23 @@ They run in a different realm, so:
 
 ## Publishing a GitHub Release
 
-`npm run build:release` (`scripts/build-release.mjs`) writes exactly three things to `dist/`:
+`npm run build:release` (`scripts/build-release.mjs`) writes exactly four things to `dist/`:
 `cc-chrome-bridge.tar.gz` (the full install payload — `server/`, `extension/`, `node_modules`,
-`uninstall.sh`, `service-unit.sh`, `uninstall.ps1`, `service-task.ps1`, `ccchrome.md`) and,
-standalone, `install.sh` and `install.ps1`. **All three must be uploaded as release assets**, not
-just the tarball — each documented one-line install fetches its own script first, before the tarball
-that script then pulls at `CC_CHROME_RELEASE_URL`:
+`uninstall.sh`, `service-unit.sh`, `uninstall.ps1`, `service-task.ps1`, `ccchrome.md`),
+`cc-chrome-bridge.tar.gz.sha256` (the SHA256 checksum the updater uses to verify downloads before
+installing), and standalone, `install.sh` and `install.ps1`. **All four must be uploaded as release
+assets**, not just the tarball — each documented one-line install fetches its own script first,
+before the tarball that script then pulls at `CC_CHROME_RELEASE_URL`:
 `curl -fsSL .../releases/latest/download/install.sh | bash` and
 `irm .../releases/latest/download/install.ps1 | iex`, both in `README.md` and
-`.claude/commands/ccchrome.md`. A missing standalone asset makes its command 404 silently, and the
-Windows user sees literally nothing happen. No CI workflow does this upload, so it is a manual step
-on every release: run `npm run build:release`, then attach `dist/cc-chrome-bridge.tar.gz`,
-`dist/install.sh` and `dist/install.ps1` to the GitHub Release. `test/build.test.mjs` asserts both
+`.claude/commands/ccchrome.md`. A missing `.sha256` file is invisible on the manual install path, but
+breaks every automatic update for users who have already installed — the updater refuses any tarball
+whose hash does not match this file, so it fails closed, which is the right failure, but only if
+someone notices the missing file first. A missing `install.sh` or `install.ps1` makes its command
+404 silently, and the user sees literally nothing happen. No CI workflow does this upload, so it is
+a manual step on every release: run `npm run build:release`, then attach `dist/cc-chrome-bridge.tar.gz`,
+`dist/cc-chrome-bridge.tar.gz.sha256`, `dist/install.sh` and `dist/install.ps1` to the GitHub Release.
+`test/build.test.mjs` asserts the checksum file exists and matches the tarball, and asserts both
 standalone copies exist and are byte-identical to their sources, but nothing can assert that a human
 attached them.
 
