@@ -242,13 +242,29 @@ async function run() {
   await otherPage.close();
 
   // --- 5: session persists across reopen (proves --resume) --------------------
-  const storedSessionId = await sw.evaluate(async () => (await chrome.storage.local.get("panelSessionId")).panelSessionId);
+  // The session id lives under a per-window key (panelSession.<windowId>),
+  // not an extension-global "panelSessionId" -- that global key stopped being
+  // written when the panel moved to per-window keys (commit 1a60f52), on
+  // purpose: one extension-global key made two Chrome windows resume the same
+  // conversation. Resolve the real key the same way the panel does.
+  const storedSessionId = await sw.evaluate(async () => {
+    const all = await chrome.storage.local.get(null);
+    const key = Object.keys(all).find((k) => k.startsWith("panelSession."));
+    return key ? all[key].sessionId : null;
+  });
   check("panelSessionId persisted to storage", !!storedSessionId, storedSessionId);
 
   await page.close();
   const page2 = await context.newPage();
   await page2.goto(`chrome-extension://${extensionId}/sidepanel.html`);
   await page2.waitForSelector("#dot.connected", { timeout: 15000 });
+  // Snapshot AFTER connect (so the journal replay from earlier sections on
+  // this same window has already finished, not raced) and BEFORE the prompt:
+  // reopening now legitimately replays every earlier error-line this run
+  // produced (e.g. the stop-mid-turn section above), so an absolute
+  // `resumedErrors.length === 0` can never hold again. What actually proves
+  // resume worked is that NOTHING NEW went wrong.
+  const errorsBeforePrompt = await page2.$$eval(".msg.error", (els) => els.length);
   await page2.fill("#input", "Câu đầu tiên tôi nhờ bạn nói là câu gì? Trả lời ngắn gọn, không dùng tool nào.");
   await page2.press("#input", "Enter");
   // Wait for busy to actually flip on, then off -- checking only "disabled ===
@@ -262,7 +278,9 @@ async function run() {
   const resumedErrors = await page2.$$eval(".msg.error", (els) => els.map((e) => e.textContent));
   console.log("resumed transcript:", JSON.stringify(resumedAssistant));
   console.log("resumed errors:", JSON.stringify(resumedErrors));
-  check("reopened panel resumes (no error, gets a reply)", resumedErrors.length === 0 && resumedAssistant.length > 0);
+  check("reopened panel resumes (no NEW error, gets a reply)",
+    resumedErrors.length === errorsBeforePrompt && resumedAssistant.length > 0,
+    JSON.stringify({ before: errorsBeforePrompt, after: resumedErrors }));
 
   // --- 6: "Phiên mới" clears and forgets ---------------------------------------
   await page2.click("#newSession");
@@ -318,11 +336,18 @@ async function run() {
   // silently swallowed every subsequent prompt. Confirm one actually gets
   // through after the reset -- safely, since `ws` above is never OPEN (dead
   // endpoint), so `send()` is a guaranteed no-op and nothing is dispatched to
-  // any real server no matter what happens here.
+  // any real server no matter what happens here. f1Page replayed this
+  // window's journal on open, which by now legitimately carries every user
+  // message earlier sections typed -- so the assertion has to be about the
+  // DELTA this Enter press adds, not an absolute count that can never be 1
+  // again.
+  const userMsgCountBeforePrompt = await f1Page.$$eval(".msg.user", (els) => els.length);
   await f1Page.fill("#input", "F1 kiểm tra: gõ được sau khi ready đến giữa lượt");
   await f1Page.press("#input", "Enter");
   const userMsgCountAfterReady = await f1Page.$$eval(".msg.user", (els) => els.length);
-  check("F1: a prompt typed after that reset is not silently swallowed by a stuck busy flag (no live turn spent)", userMsgCountAfterReady === 1, `count=${userMsgCountAfterReady}`);
+  check("F1: a prompt typed after that reset is not silently swallowed by a stuck busy flag (no live turn spent)",
+    userMsgCountAfterReady === userMsgCountBeforePrompt + 1,
+    `before=${userMsgCountBeforePrompt} after=${userMsgCountAfterReady}`);
 
   // --- late-delta-after-"Phiên mới" small fix ----------------------------------
   // "Phiên mới" clears the log synchronously, before the server has disposed
@@ -380,6 +405,239 @@ async function run() {
   /* eslint-enable no-undef */
   const f6Bubbles = await f6Page.$$eval(".msg.assistant", (els) => els.map((e) => e.textContent));
   check("F6: [tool_use, text] block ordering does not duplicate the assistant bubble", f6Bubbles.length === 1 && f6Bubbles[0] === "Đang kiểm tra trang...", JSON.stringify(f6Bubbles));
+
+  // --- T1: một bước chạy rồi xong ------------------------------------------
+  // Đây là toàn bộ lý do tính năng tồn tại: một dòng phải chuyển từ "đang chạy"
+  // sang "xong", nhìn thấy được, không cần đọc log server.
+  /* eslint-disable no-undef */
+  await f6Page.evaluate(() => {
+    handle({ type: "turn_start" });
+    handle({ type: "phase", phase: "requesting" });
+    handle({ type: "step_start", id: "t1", name: "mcp__chrome__read_page" });
+    handle({ type: "step_args", id: "t1", input: { url: "https://example.com" } });
+  });
+  /* eslint-enable no-undef */
+  const t1Running = await f6Page.$$eval(".step.running .step-label", (els) => els.map((e) => e.textContent));
+  check("T1: a started step renders a running row with a Vietnamese label",
+    t1Running.includes("Đọc trang"), JSON.stringify(t1Running));
+  const t1Sub = await f6Page.$eval(".step .step-sub", (el) => el.textContent);
+  check("T1: its arguments become the subtitle", t1Sub === "https://example.com", t1Sub);
+  const t1Status = await f6Page.$eval("#statusText", (el) => el.textContent);
+  check("T1: the status bar names the running tool, not the phase", t1Status === "Đọc trang", t1Status);
+
+  /* eslint-disable no-undef */
+  await f6Page.evaluate(() => {
+    handle({ type: "step_end", id: "t1", ok: true, ms: 1234, summary: "URL: https://example.com", size: 12700 });
+  });
+  /* eslint-enable no-undef */
+  const t1Done = await f6Page.$eval(".step", (el) => ({ cls: el.className, icon: el.querySelector(".step-icon").textContent, time: el.querySelector(".step-time").textContent }));
+  check("T1: the step ends as ok, with a tick and its duration",
+    t1Done.cls.includes("ok") && !t1Done.cls.includes("running") && t1Done.icon === "✓" && t1Done.time === "1.2s",
+    JSON.stringify(t1Done));
+
+  // --- T2: một lượt bị bỏ dở không để lại dòng quay mãi ---------------------
+  /* eslint-disable no-undef */
+  await f6Page.evaluate(() => {
+    handle({ type: "step_start", id: "t2", name: "mcp__chrome__get_page_text" });
+    handle({ type: "step_end", id: "t2", ok: false, aborted: true, ms: 800, summary: "", size: 0 });
+    handle({ type: "turn_end", ok: false, error: "đã dừng theo yêu cầu" });
+  });
+  /* eslint-enable no-undef */
+  const stillRunning = await f6Page.$$eval(".step.running", (els) => els.length);
+  check("T2: no row is left spinning after the turn ends", stillRunning === 0, String(stillRunning));
+  const statusHidden = await f6Page.$eval("#status", (el) => el.className);
+  check("T2: the status bar switches itself off", !statusHidden.includes("on"), statusHidden);
+
+  // --- T3: kết quả tool không bao giờ được diễn giải thành HTML -------------
+  // `summary` là văn bản do trang web sinh ra. Đây là chỗ duy nhất trong panel
+  // mà nội dung của một trang lạ đi thẳng vào DOM.
+  /* eslint-disable no-undef */
+  await f6Page.evaluate(() => {
+    handle({ type: "step_start", id: "t3", name: "mcp__chrome__get_page_text" });
+    handle({ type: "step_end", id: "t3", ok: true, ms: 10, summary: "<img src=x onerror=\"window.__ccXss = 1\">", size: 40 });
+  });
+  /* eslint-enable no-undef */
+  /* eslint-disable no-undef */
+  const xss = await f6Page.evaluate(() => window.__ccXss);
+  /* eslint-enable no-undef */
+  check("T3: a tool result containing markup is inserted as text, not parsed", xss === undefined, String(xss));
+
+  // --- T4 + T5: ngôn ngữ bám theo prompt, và nhật ký vẽ lại được ------------
+  //
+  // Hai mục này chạy trên một panel CỐ Ý không kết nối được: wsUrl bị trỏ vào
+  // một cổng không có ai nghe. Lý do là để Enter thật sự chạy qua handler thật
+  // (nơi đặt locale và ghi nhật ký) mà `send()` không gửi được gì đi — nếu socket
+  // mở, dòng đó sẽ khởi động một lượt `claude` thật, tốn usage và bắn sự kiện
+  // vào giữa các khẳng định dưới đây. Nhật ký không phụ thuộc socket, nên phần
+  // đang test vẫn chạy đầy đủ.
+  await sw.evaluate(async () => {
+    await chrome.storage.local.set({ wsUrl: "ws://127.0.0.1:1/ws?token=offline-on-purpose" });
+  });
+
+  const t4Page = await context.newPage();
+  await t4Page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+  await t4Page.waitForSelector("#input");
+  await t4Page.fill("#input", "open the console and check for errors");
+  await t4Page.press("#input", "Enter");
+  /* eslint-disable no-undef */
+  await t4Page.evaluate(() => {
+    handle({ type: "turn_start" });
+    handle({ type: "step_start", id: "t4", name: "mcp__chrome__read_console_messages" });
+  });
+  /* eslint-enable no-undef */
+  const t4En = await t4Page.$eval("#statusText", (el) => el.textContent);
+  check("T4: an English prompt switches the activity wording to English", t4En === "Read console", t4En);
+  const t4Buttons = await t4Page.$eval("#newSession", (el) => el.textContent);
+  check("T4: but the buttons stay Vietnamese, per the repo convention", t4Buttons === "Phiên mới", t4Buttons);
+
+  // Nhật ký ghi có debounce 500ms (SAVE_DEBOUNCE_MS trong panel-journal.js).
+  // Mở trang mới trước khi nó kịp ghi thì T5 đỏ vì lý do không liên quan.
+  await t4Page.waitForTimeout(900);
+
+  // Chỉ chứng minh được bằng một trang MỚI trên CÙNG cửa sổ: cùng windowId, nên
+  // cùng khoá panelLog.<windowId>.
+  const t5Page = await context.newPage();
+  await t5Page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+  await t5Page.waitForSelector("#input");
+  const t5Text = await t5Page.textContent("#log");
+  check("T5: reopening the panel replays what was already drawn",
+    t5Text.includes("open the console and check for errors"), t5Text.slice(0, 200));
+  const t5Interrupted = await t5Page.$$eval(".step", (els) => els.map((e) => e.querySelector(".step-icon").textContent));
+  check("T5: a step left open when the panel closed comes back marked interrupted, not running",
+    t5Interrupted.includes("⦸"), JSON.stringify(t5Interrupted));
+  const t5Running = await t5Page.$$eval(".step.running", (els) => els.length);
+  check("T5: and nothing is left pulsing after a replay", t5Running === 0, String(t5Running));
+
+  // T4 above typed an English prompt, and saveState() persisted `locale: "en"`
+  // into this window's panelSession.<windowId> entry -- by design (see the
+  // loadState() comment in sidepanel.js: locale is sticky per window so a
+  // reopened panel keeps the language the user was actually typing). Every
+  // page opened on this window from here on would otherwise silently inherit
+  // English tool/phase labels, which is correct product behavior but not what
+  // T6/T7 below want to assert against -- reset it explicitly, preserving the
+  // real sessionId/mcpSessionId already stored alongside it.
+  const localeResetWinId = await t5Page.evaluate(async () => (await chrome.windows.getCurrent()).id);
+  const localeResetKey = `panelSession.${localeResetWinId}`;
+  await sw.evaluate(async (key) => {
+    const stored = await chrome.storage.local.get({ [key]: {} });
+    const saved = stored[key] || {};
+    await chrome.storage.local.set({ [key]: { ...saved, locale: "vi" } });
+  }, localeResetKey);
+
+  // --- T6: a model change mid-tool must not leave a row pulsing, and must ----
+  // not poison the NEXT turn's status bar. The server closes open steps only
+  // through its own endTurn, and a disposed session emits nothing at all, so
+  // the panel has to sweep its own rows on a model change too. Still on the
+  // dead port from T4/T5 above: the #model "change" listener also calls
+  // send(), and on a live socket that would start a real claude turn -- the
+  // same reason T4/T5 needed an offline page in the first place.
+  const t6Page = await context.newPage();
+  await t6Page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+  await t6Page.waitForSelector("#input");
+  /* eslint-disable no-undef */
+  await t6Page.evaluate(() => {
+    handle({ type: "turn_start" });
+    handle({ type: "step_start", id: "t6", name: "mcp__chrome__read_page" });
+  });
+  await t6Page.evaluate(() => {
+    const el = document.getElementById("model");
+    el.value = "haiku";
+    el.dispatchEvent(new Event("change"));
+  });
+  /* eslint-enable no-undef */
+  const t6Running = await t6Page.$$eval(".step.running", (els) => els.length);
+  check("T6: a model change sweeps any row still running", t6Running === 0, String(t6Running));
+  const t6Icon = await t6Page.$eval(".step .step-icon", (el) => el.textContent);
+  check("T6: the swept row shows the interrupted icon, not ok/fail", t6Icon === "⦸", t6Icon);
+
+  // The real proof: a fresh turn right after must show the phase, not the
+  // dead tool's name -- a leftover `steps` entry outranks the phase in
+  // paintStatus.
+  /* eslint-disable no-undef */
+  await t6Page.evaluate(() => {
+    handle({ type: "turn_start" });
+    handle({ type: "phase", phase: "thinking" });
+  });
+  /* eslint-enable no-undef */
+  const t6Status = await t6Page.$eval("#statusText", (el) => el.textContent);
+  check("T6: the next turn's status bar shows the phase, not a leftover dead tool name", t6Status === "Đang suy nghĩ", t6Status);
+
+  // --- T7: journal replay must preserve the order of a [text, tool] turn -----
+  // Live, the deltas build the bubble before the tool row lands under it.
+  // Replay must reproduce that, not flip it. Pure handle() calls never call
+  // send(), so this section needed no live socket to begin with -- staying on
+  // the dead port just keeps it consistent with T4/T5/T6 above.
+  const t7Page = await context.newPage();
+  await t7Page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+  await t7Page.waitForSelector("#input");
+  /* eslint-disable no-undef */
+  await t7Page.evaluate(() => {
+    handle({ type: "turn_start" });
+    handle({ type: "delta", text: "t7-assistant-text-unique " });
+    handle({ type: "delta", text: "phần hai" });
+    handle({ type: "step_start", id: "t7", name: "mcp__chrome__find" });
+    handle({ type: "step_args", id: "t7", input: { query: "t7 query" } });
+    handle({ type: "step_end", id: "t7", ok: true, ms: 5, summary: "ok", size: 2 });
+    handle({ type: "message", text: "t7-assistant-text-unique phần hai" });
+    handle({ type: "turn_end", ok: true });
+  });
+  /* eslint-enable no-undef */
+  await t7Page.waitForTimeout(900); // journal write debounce, same as T5 above
+
+  // Only provable with a NEW page: same window, so the same panelLog.<windowId>
+  // key the entries above were just written under.
+  const t7ReplayPage = await context.newPage();
+  await t7ReplayPage.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+  await t7ReplayPage.waitForSelector("#input");
+  const t7Positions = await t7ReplayPage.$$eval("#log > *", (els) =>
+    els.map((e) => ({ cls: e.className, snippet: e.textContent.slice(0, 40) }))
+  );
+  const t7BubbleIdx = t7Positions.findIndex((e) => e.snippet.includes("t7-assistant-text-unique"));
+  const t7StepIdx = t7Positions.findIndex((e) => e.cls.includes("step") && e.snippet.includes("Tìm trên trang"));
+  check("T7: replay puts the assistant bubble above the tool row, not below it",
+    t7BubbleIdx !== -1 && t7StepIdx !== -1 && t7BubbleIdx < t7StepIdx, JSON.stringify(t7Positions));
+  const t7BubbleCount = t7Positions.filter((e) => e.snippet.includes("t7-assistant-text-unique")).length;
+  check("T7: the text appears exactly once, not duplicated by its own placeholder", t7BubbleCount === 1, String(t7BubbleCount));
+
+  // --- T8: a corrupt journal must never cost the user their connection -------
+  // The journal is a nicety; the socket is the product. Needs the REAL bridge
+  // here, since the point being proven is that the connection survives.
+  await sw.evaluate(async (wsUrl) => {
+    await chrome.storage.local.set({ wsUrl });
+  }, `ws://127.0.0.1:${MCP_PORT}/ws?token=${TOKEN}`);
+
+  const t8JournalKey = `panelLog.${localeResetWinId}`;
+  await sw.evaluate(async (key) => {
+    await chrome.storage.local.set({
+      [key]: [
+        null,
+        "a bare string, not an object",
+        42,
+        { text: "an object with no type field" },
+        { type: "error-line", text: "t8-valid-entry-one" },
+        { type: "error-line", text: "t8-valid-entry-two" },
+      ],
+    });
+  }, t8JournalKey);
+
+  const t8Page = await context.newPage();
+  await t8Page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+  await t8Page.waitForSelector("#dot.connected", { timeout: 15000 }).catch(() => {});
+  const t8DotClass = await t8Page.getAttribute("#dot", "class");
+  check("T8: a corrupt journal never costs the user their connection", t8DotClass === "dot connected", t8DotClass);
+  const t8Log = await t8Page.textContent("#log");
+  check("T8: the two valid entries among the corrupt ones still rendered",
+    t8Log.includes("t8-valid-entry-one") && t8Log.includes("t8-valid-entry-two"), t8Log.slice(0, 300));
+
+  // Trả lại URL thật cho mọi trang mở sau, và dọn nhật ký test khỏi
+  // chrome.storage.local của hồ sơ Chromium tạm này (kể cả nhật ký hỏng của
+  // T8, dùng chung tiền tố panelLog.).
+  await sw.evaluate(async (wsUrl) => {
+    await chrome.storage.local.set({ wsUrl });
+    const all = await chrome.storage.local.get(null);
+    const logKeys = Object.keys(all).filter((k) => k.startsWith("panelLog."));
+    if (logKeys.length) await chrome.storage.local.remove(logKeys);
+  }, `ws://127.0.0.1:${MCP_PORT}/ws?token=${TOKEN}`);
 
   // --- small fixes: never render the literal string "undefined" ---------------
   /* eslint-disable no-undef */
