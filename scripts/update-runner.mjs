@@ -74,7 +74,14 @@ function runInstaller() {
       windowsHide: true,
     });
     const finish = (code) => {
-      if (logFd !== null) { try { closeSync(logFd); } catch { /* already closed */ } }
+      // A failed spawn emits BOTH 'error' and 'close', so this runs twice. Null
+      // the fd out after the first close — otherwise the second closeSync could
+      // land on an unrelated descriptor that has since reclaimed the same
+      // integer (a health-probe socket, another openSync).
+      if (logFd !== null) {
+        try { closeSync(logFd); } catch { /* already closed */ }
+        logFd = null;
+      }
       resolve(code);
     };
     child.on("error", () => finish(1));
@@ -116,13 +123,21 @@ async function main() {
   // A second runner (the restarted bridge, after the first one's installer
   // killed it) must not stomp the first one's only copy of a working install.
   // Its own first act used to be an unconditional rmSync of this directory.
+  //
+  // backupDir most often survives because a PREVIOUS runner crashed — and a
+  // runner crashes most often during or after the installer ran, which is
+  // exactly when installDir is wrecked and backupDir is the only intact copy
+  // on the machine. So the advice here must never be "delete it".
   if (existsSync(backupDir)) {
+    rmSync(work, { recursive: true, force: true });
     writeStatus({
       ok: false,
       step: "already-running",
       version: expectVersion,
-      reason: `Đã có một bản cập nhật đang chạy (hoặc lần trước dừng giữa chừng). ` +
-        `Nếu chắc chắn không có, xoá ${backupDir} rồi thử lại.`,
+      reason: `Có vẻ một bản cập nhật trước đã dừng giữa chừng. Bản cài cũ đang nằm ở ${backupDir}. ` +
+        `Nếu bridge hiện tại chạy bình thường, đổi tên ${backupDir} thành một tên khác rồi thử lại. ` +
+        `Nếu bridge không chạy, đổi tên ${backupDir} thành ${installDir} để khôi phục bản cũ. ` +
+        `Nhật ký lần trước: ${logPath}`,
     });
     process.exit(4);
   }
@@ -167,11 +182,16 @@ async function main() {
 main().catch((err) => {
   // A crash that leaves no record is the worst outcome here: the panel would
   // show the PREVIOUS update's result, which may well say everything is fine.
+  // A crash inside rollback() is the highest-stakes one there is, so the
+  // record must name every path that might hold a copy of something —
+  // not just the error message.
+  if (work) rmSync(work, { recursive: true, force: true });
   writeStatus({
     ok: false,
     step: "crashed",
     version: expectVersion,
-    reason: `Trình cập nhật gặp lỗi: ${err && err.message ? err.message : String(err)}`,
+    reason: `Trình cập nhật gặp lỗi: ${err && err.message ? err.message : String(err)}. ` +
+      `Bản cài cũ (nếu còn) ở ${backupDir}; bản cài lỗi (nếu có) ở ${installDir}.failed; nhật ký ở ${logPath}.`,
   });
   process.exit(3);
 });

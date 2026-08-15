@@ -858,6 +858,7 @@ async function mainHttp() {
   // handler to its first `await` without yielding, which is what makes the
   // race structurally impossible rather than merely untested.
   let updateInFlight = false;
+  let updateInFlightTimer = null;
   // Everything under here is derived from the design's tool-set decision: the
   // agent gets the chrome MCP tools and nothing else.
   const PANEL_ALLOWED_TOOLS = process.env.CC_CHROME_PANEL_TOOLS || "mcp__chrome";
@@ -1054,11 +1055,16 @@ async function mainHttp() {
       // kill this process long before the timer fires. It exists for the case
       // where the handover succeeds but the install never gets that far, which
       // would otherwise refuse every future update until the bridge restarts.
-      setTimeout(() => { updateInFlight = false; }, 10 * 60 * 1000).unref();
+      // Cancelled wherever the flag is cleared: an uncancelled timer from an
+      // earlier attempt would otherwise fire mid-way through a later one and
+      // unlatch an update that really is in flight.
+      updateInFlightTimer = setTimeout(() => { updateInFlight = false; }, 10 * 60 * 1000);
+      updateInFlightTimer.unref();
       try {
         await startUpdate(send);
       } catch (err) {
         updateInFlight = false;
+        if (updateInFlightTimer) { clearTimeout(updateInFlightTimer); updateInFlightTimer = null; }
         send({ type: "update_failed", reason: err.message });
       }
       return;

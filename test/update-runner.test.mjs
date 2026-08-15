@@ -207,6 +207,14 @@ async function waitUntil(cond, timeoutMs = 5000) {
   check("runner B refuses while A's backup still exists", codeB === 4, String(codeB));
   const recordB = JSON.parse(readFileSync(statusB, "utf8"));
   check("B records why it refused", recordB.ok === false && recordB.step === "already-running", JSON.stringify(recordB));
+  // backupDir usually survives because a PREVIOUS runner crashed, at which
+  // point it is the only intact install on the machine — the refusal message
+  // must tell the user to rename/restore it, never to delete it.
+  check("the refusal never tells the user to delete the only good backup",
+    !/xoá\s+\S*\.bak/i.test(recordB.reason || ""), recordB.reason);
+  check("the refusal tells the user how to restore from the backup instead",
+    /đổi tên/i.test(recordB.reason || "") && recordB.reason.includes(backupDir), recordB.reason);
+  check("B's own payload work dir is cleaned up even on refusal", !existsSync(workB), workB);
 
   const { code: codeA } = await runA;
   check("runner A still completes normally, undisturbed by B", codeA === 0, String(codeA));
@@ -254,8 +262,16 @@ async function waitUntil(cond, timeoutMs = 5000) {
 
   check("a missing installer still exits non-zero, not a hang", code !== 0 && code !== null, String(code));
   const record = JSON.parse(readFileSync(status, "utf8"));
-  check("it still produces a status record", typeof record.step === "string" && record.step.length > 0, JSON.stringify(record));
-  check("the old install is still there (rolled back around the failed spawn)",
+  check("it rolls back (installer never ran, health never matched)",
+    record.ok === false && record.step === "rolled-back", JSON.stringify(record));
+  // The old-content check alone is vacuous here — the installer never touched
+  // installDir, so it would pass even with rollback() deleted outright. Proving
+  // rollback actually ran means proving the backup was CONSUMED by it: a
+  // successful rollback renames backupDir into installDir, so backupDir no
+  // longer exists afterward.
+  check("the backup was consumed by the rollback, not left untouched",
+    !existsSync(`${installDir}.bak`), `${installDir}.bak`);
+  check("the install directory still holds the old contents after rollback",
     readFileSync(join(installDir, "server", "index.js"), "utf8") === "// OLD");
 
   rmSync(home, { recursive: true, force: true });
@@ -296,6 +312,10 @@ async function waitUntil(cond, timeoutMs = 5000) {
   const record = JSON.parse(readFileSync(status, "utf8"));
   check("the crash record replaces the previous run's record", record.step === "crashed", JSON.stringify(record));
   check("it does not still say ok:true from the previous run", record.ok === false, JSON.stringify(record));
+  check("the crash record names where the pieces might be, not just the error",
+    typeof record.reason === "string" && record.reason.includes(".bak") && record.reason.includes(".failed"),
+    record.reason);
+  check("the payload work dir is cleaned up even when the runner crashes", !existsSync(work), work);
 
   rmSync(home, { recursive: true, force: true });
   rmSync(work, { recursive: true, force: true });
