@@ -8,7 +8,11 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { AgentSession, buildSpawn, winQuote, claudeBinFromEnv, panelHooksFrom } from "../server/agent.js";
+import {
+  AgentSession, buildSpawn, winQuote, claudeBinFromEnv, panelHooksFrom,
+  toolResultText, summarizeResult, clipInput,
+  STEP_SUMMARY_MAX, STEP_ERROR_SUMMARY_MAX, STEP_INPUT_MAX,
+} from "../server/agent.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(root, "test", "fixtures", "claude-stream.ndjson");
@@ -552,6 +556,45 @@ function makeSession(extra = {}) {
   });
   check("no --settings when the user configured no hooks", !plain.buildArgs().includes("--settings"), JSON.stringify(plain.buildArgs()));
   plain.dispose();
+}
+
+// --- 10. cắt và chuẩn hoá dữ liệu tool -------------------------------------
+//
+// tool_result.content có hai dạng, cả hai đều đo được ngày 2026-08-15 trên CLI
+// 2.1.197: chuỗi thuần (tool built-in) và mảng content block (tool MCP — tức là
+// mọi tool mà panel thật sự dùng). Bỏ sót dạng mảng thì mọi kết quả tool chrome
+// hiện "[object Object]".
+{
+  check("toolResultText passes a plain string through", toolResultText("hello") === "hello");
+  check(
+    "toolResultText joins an MCP content array",
+    toolResultText([{ type: "text", text: "a" }, { type: "text", text: "b" }]) === "a\nb",
+    toolResultText([{ type: "text", text: "a" }, { type: "text", text: "b" }]),
+  );
+  check("toolResultText survives null", toolResultText(null) === "");
+  check("toolResultText survives a block with no text", toolResultText([{ type: "image" }]) === "");
+
+  const long = "x".repeat(5000);
+  const okCut = summarizeResult(long, true);
+  check("a successful result is cut at 800", okCut.summary.length === STEP_SUMMARY_MAX + 1, String(okCut.summary.length));
+  check("the cut is marked with an ellipsis", okCut.summary.endsWith("…"), okCut.summary.slice(-3));
+  check("the real size travels even though the text was cut", okCut.size === 5000, String(okCut.size));
+
+  const failCut = summarizeResult(long, false);
+  check("a FAILING result gets more room, because that is the text the user must read",
+    failCut.summary.length === STEP_ERROR_SUMMARY_MAX + 1, String(failCut.summary.length));
+
+  const short = summarizeResult("ngắn", true);
+  check("a short result is not cut and gets no ellipsis", short.summary === "ngắn", short.summary);
+  check("size is measured in bytes, not characters", summarizeResult("é", true).size === 2, String(summarizeResult("é", true).size));
+
+  check("clipInput keeps a small input as an object, so the panel can read args.url",
+    clipInput({ url: "https://example.com" }).url === "https://example.com",
+    JSON.stringify(clipInput({ url: "https://example.com" })));
+  const big = clipInput({ code: "y".repeat(4000) });
+  check("clipInput degrades a huge input to a preview", big.__truncated === true, JSON.stringify(big).slice(0, 80));
+  check("that preview is bounded", big.__preview.length === STEP_INPUT_MAX, String(big.__preview?.length));
+  check("clipInput survives null", JSON.stringify(clipInput(null)) === "{}", JSON.stringify(clipInput(null)));
 }
 
 rmSync(workdir, { recursive: true, force: true });

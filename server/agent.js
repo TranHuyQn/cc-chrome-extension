@@ -103,6 +103,58 @@ export function panelHooksFrom(userSettings) {
   return Object.keys(kept).length ? { hooks: kept } : null;
 }
 
+// A tool result can be hundreds of KB of page text. The panel puts what it
+// receives into the DOM and keeps it in its journal, so the cut happens here,
+// before it crosses the socket — not in the browser.
+export const STEP_SUMMARY_MAX = 800;
+// A failure is the one case the user actually has to read, so it gets more room.
+export const STEP_ERROR_SUMMARY_MAX = 2000;
+export const STEP_INPUT_MAX = 2000;
+
+// `tool_result.content` has two shapes, both measured on 2026-08-15 against CLI
+// 2.1.197: a plain string for built-in tools, and an array of content blocks for
+// MCP tools — which is every tool this panel actually uses. Missing the array
+// case renders "[object Object]" for every chrome tool.
+export function toolResultText(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((block) => (typeof block === "string" ? block : block?.text ?? ""))
+      .join("\n");
+  }
+  if (content == null) return "";
+  try {
+    return JSON.stringify(content);
+  } catch {
+    return "";
+  }
+}
+
+export function summarizeResult(text, ok) {
+  const max = ok ? STEP_SUMMARY_MAX : STEP_ERROR_SUMMARY_MAX;
+  return {
+    // The real size travels separately so the panel can say "12.4KB" even
+    // though only the first slice of it arrived.
+    summary: text.length > max ? `${text.slice(0, max)}…` : text,
+    size: Buffer.byteLength(text, "utf8"),
+  };
+}
+
+// Kept as an object rather than a pre-rendered string: the panel reads
+// well-known keys (url, query, ref…) to build the one-line subtitle under a
+// step. Only when the whole thing is too big does it degrade to a flat preview.
+export function clipInput(input) {
+  let json;
+  try {
+    json = JSON.stringify(input ?? {});
+  } catch {
+    return { __truncated: true, __preview: "" };
+  }
+  if (json === undefined) return {};
+  if (json.length <= STEP_INPUT_MAX) return input ?? {};
+  return { __truncated: true, __preview: json.slice(0, STEP_INPUT_MAX) };
+}
+
 export class AgentSession {
   constructor({
     sessionId,
