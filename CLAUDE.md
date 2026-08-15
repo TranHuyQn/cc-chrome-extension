@@ -396,6 +396,41 @@ attached them.
   the installer while the extension only changes when the user reloads it in
   `chrome://extensions`, so the server still emits the pre-timeline `tool` event
   to anything that does not ask for 2. Do not delete that branch.
+- The update path is the one place a **local** action replaces the bridge with
+  code fetched from the internet, so its gate is deliberately the narrowest one
+  in the repo: `/panel` only — no HTTP endpoint, no MCP tool, so **Claude cannot
+  update the machine it is running on**, even if asked. Two invariants hold that
+  line: `msg.url` from the panel is never read (the URL comes from a constant in
+  `server/updater.js` plus the tag GitHub reports), and the tag is refused unless
+  it matches `/^v?\d+\.\d+\.\d+$/` before it can shape a request. The SHA256
+  check catches a corrupt, truncated or tampered download; it does **not** catch
+  a compromised GitHub account, which can rewrite the tarball and the checksum
+  together. Do not document it as more than that.
+- `scripts/update-runner.mjs` is the only process that outlives the bridge. It
+  has to be: the installer's first act is to stop the service, which kills the
+  bridge mid-command. It runs detached, with a cwd outside the install directory
+  (on Windows, running inside the directory being replaced is the surest way to
+  lock it), and it never starts the service itself — launchd `KeepAlive`,
+  systemd `Restart=always` and the repeating Task Scheduler trigger each do that.
+  Rollback restores `~/.cc-chrome-bridge.bak` wholesale rather than undoing
+  individual changes, because an installer deletes files as well as replacing
+  them and a file-by-file repair silently misses the deletions. Measured on real
+  Windows hardware: a detached child does survive Task Scheduler stopping the
+  task (9 heartbeat lines logged before the stop, 17 after), and `install.ps1`
+  does accept a `CC_CHROME_SOURCE` pointing at a checkout-shaped directory (the
+  bridge was installed this way and reported `ok:true, version 1.1.0`).
+- The release tarball must carry `update-runner.mjs`, `install.sh` and
+  `install.ps1` inside it, because the installed copy is what the bridge spawns.
+  A release missing them installs fine and then cannot ever self-update —
+  `test/build.test.mjs` asserts all three are in the tarball for that reason.
+- The real update path — download, checksum, extract, install, health-check —
+  has **no automated coverage at all**, permanently and by design. Letting a
+  test drive it would mean `npm test` installing a release over the developer's
+  own bridge. It is covered by reading and by the first real update after a
+  release. And because the update button ships *in* 1.2.0, it cannot appear on
+  a machine running anything older — 1.2.0 itself has to be installed the old
+  way, so the first genuine end-to-end test of the feature is updating **from
+  1.2.0 to 1.2.1**, not the 1.2.0 release itself.
 
 ## Conventions
 

@@ -500,6 +500,29 @@ gian — hiện chưa có gì tự dọn, tự xóa bằng tay nếu thấy phì
 Biến môi trường riêng cho khung chat: `CC_CHROME_PANEL_TOOLS` — xem bảng
 [Cấu hình](#cấu-hình).
 
+### Cập nhật bridge
+
+Mỗi lần mở khung chat, bridge tự hỏi GitHub xem có bản phát hành mới hơn bản
+đang chạy không. Có bản mới thì một dòng thông báo hiện ngay trên khung chat
+("Có bản x.y.z (đang chạy a.b.c)."), kèm nút **Cập nhật** — bridge **không tự
+cài** gì cả nếu bạn không bấm nút đó.
+
+Bấm **Cập nhật**: bridge tải file `.tar.gz` của bản mới về, **đối chiếu SHA256**
+với file checksum GitHub phát hành kèm bản đó trước khi đụng đến bất cứ thứ gì
+trên máy — tải hỏng, tải thiếu hay bị sửa dọc đường đều bị chặn ở bước này.
+Qua được thì bridge tự sao lưu bản đang chạy, cài bản mới đè lên, khởi động
+lại dịch vụ nền, rồi tự kiểm tra bản mới có sống dậy được không. **Nếu bridge
+mới không lên được, nó tự khôi phục lại bản cũ** — không cần bạn can thiệp gì.
+
+Cài xong (thành công), khung chat báo "Đã cài x.y.z. Nạp lại extension để dùng
+giao diện mới." kèm nút **Nạp lại extension** — **phải bấm nút này** thì Chrome
+mới nạp lại phần giao diện (popup, khung chat...) của bản mới; bản thân bridge
+đã chạy phiên bản mới ngay sau bước cài, nhưng extension trong Chrome vẫn giữ
+mã cũ trong bộ nhớ cho tới khi được nạp lại.
+
+Toàn bộ quá trình chỉ chạy khi bạn chủ động bấm nút trong khung chat trên
+chính máy này — Claude (agent) không có cách nào tự kích hoạt việc cập nhật.
+
 ## Cấu hình
 
 | Biến | Mặc định | Ý nghĩa |

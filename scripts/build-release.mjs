@@ -49,6 +49,15 @@ for (const f of [
 }
 copyFileSync(join(root, ".claude", "commands", "ccchrome.md"), join(stage, "ccchrome.md"));
 
+// spawnUpdateRunner (server/index.js) looks for these three inside the
+// INSTALLED copy, not wherever this build ran from — the update button spawns
+// update-runner.mjs, which in turn calls install.sh/install.ps1 to lay down
+// the new release. A tarball that ships without them installs fine and then
+// can never self-update; test/build.test.mjs asserts all three are present.
+copyFileSync(join(root, "scripts", "update-runner.mjs"), join(stage, "update-runner.mjs"));
+copyFileSync(join(root, "scripts", "install.sh"), join(stage, "install.sh"));
+copyFileSync(join(root, "scripts", "install.ps1"), join(stage, "install.ps1"));
+
 // node_modules/.bin holds npm's CLI shims, and on this dependency tree exactly
 // one of them is a symlink (`node-which` -> ../which/bin/node-which). Windows'
 // bundled tar.exe cannot create a symlink without Developer Mode or elevation,

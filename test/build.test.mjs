@@ -221,6 +221,9 @@ for (const required of [
   "uninstall.ps1",
   "service-task.ps1",
   "ccchrome.md",
+  "update-runner.mjs",
+  "install.sh",
+  "install.ps1",
 ]) {
   check(`tarball contains ${required}`, entries.has(required), listing.slice(0, 500));
 }
