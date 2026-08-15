@@ -64,6 +64,27 @@ const MCP_PORT = await freePort();
 const TOKEN = "paneltoken12345";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// The startup IIFE's journal replay (restore()) is async -- loadState() and
+// ccJournal.load() both go through chrome.storage.local, so it does not
+// finish in the same tick #log's static markup exists in. On a page that
+// reaches a real bridge, waitForSelector("#dot.connected") is a sufficient
+// proxy (connect() only runs after restore() resolves), but a deliberately
+// offline page never reaches that state. Polling until #log's own child
+// count stops moving between two reads is the general signal: it is true
+// regardless of whether the page ever connects, and replay is the only thing
+// that can still be appending to #log at page-load time.
+async function waitForLogSettled(page) {
+  let prev = -1;
+  for (let i = 0; i < 40; i++) {
+    const count = await page.$$eval("#log > *", (els) => els.length);
+    if (count === prev) return count;
+    prev = count;
+    await sleep(100);
+  }
+  return prev;
+}
+
 let failures = 0;
 function check(name, cond, detail = "") {
   const ok = !!cond;
@@ -319,6 +340,13 @@ async function run() {
   const f1Page = await context.newPage();
   await f1Page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
   await f1Page.waitForSelector("#input", { timeout: 15000 }); // page loaded; no live connection needed or wanted here
+  // This page is deliberately offline, so it never reaches #dot.connected --
+  // the signal the sibling live-bridge sections use to know restore()'s
+  // journal replay has finished. Wait for #log to stop growing instead,
+  // before the delta baseline below is read: a still-in-flight replay could
+  // otherwise land its own .msg.user entries between that baseline and the
+  // post-Enter read, misreporting a correct panel as swallowing the prompt.
+  await waitForLogSettled(f1Page);
   /* eslint-disable no-undef -- window.handle is a page global, evaluated by Playwright inside the page, not by this Node process */
   await f1Page.evaluate(() => { handle({ type: "turn_start" }); });
   /* eslint-enable no-undef */
@@ -550,17 +578,24 @@ async function run() {
   const t6Icon = await t6Page.$eval(".step .step-icon", (el) => el.textContent);
   check("T6: the swept row shows the interrupted icon, not ok/fail", t6Icon === "⦸", t6Icon);
 
-  // The real proof: a fresh turn right after must show the phase, not the
-  // dead tool's name -- a leftover `steps` entry outranks the phase in
-  // paintStatus.
+  // The real proof, and it has to skip turn_start to be one: turn_start's own
+  // case sweeps `steps` unconditionally too (see its comment above), so
+  // routing through a fresh turn_start before painting would pass even with
+  // the modelEl handler's own sweep deleted -- it would only catch BOTH sweep
+  // sites disappearing at once. Because turn_start sweeps, a leftover row can
+  // never actually reach a user through the "next turn" path; what the
+  // modelEl sweep uniquely protects is the window BETWEEN the model change
+  // and the next turn_start -- the row still pulsing with no turn running,
+  // and the status bar still naming it. `busy` is still true here (nothing
+  // in this offline run ever sends `ready`, the only thing that clears it),
+  // so paintStatus() does not take its `!busy` early return and this reads
+  // the real computed text, not a hidden bar's stale leftover content.
   /* eslint-disable no-undef */
-  await t6Page.evaluate(() => {
-    handle({ type: "turn_start" });
-    handle({ type: "phase", phase: "thinking" });
-  });
+  await t6Page.evaluate(() => { handle({ type: "phase", phase: "thinking" }); });
   /* eslint-enable no-undef */
   const t6Status = await t6Page.$eval("#statusText", (el) => el.textContent);
-  check("T6: the next turn's status bar shows the phase, not a leftover dead tool name", t6Status === "Đang suy nghĩ", t6Status);
+  check("T6: the status bar between the model change and the next turn shows the phase, not a leftover dead tool name",
+    t6Status === "Đang suy nghĩ", t6Status);
 
   // --- T7: journal replay must preserve the order of a [text, tool] turn -----
   // Live, the deltas build the bubble before the tool row lands under it.
@@ -623,6 +658,16 @@ async function run() {
   const t8Page = await context.newPage();
   await t8Page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
   await t8Page.waitForSelector("#dot.connected", { timeout: 15000 }).catch(() => {});
+  // These two checks guard two DIFFERENT regressions, not one -- the startup
+  // IIFE calls connect() unconditionally after restore()'s try/catch, so a
+  // thrown entry does not, by itself, stop connect() from running:
+  //  - the connection check catches someone removing that try/catch around
+  //    restore() entirely (a real defect fixed earlier in this plan), which
+  //    would leave the panel with no socket at all;
+  //  - the entries-rendered check catches someone removing restore()'s
+  //    per-entry guard (`typeof entry.type !== "string"` etc.), which throws
+  //    on the first corrupt entry and aborts the loop before it ever reaches
+  //    the two valid entries placed after them.
   const t8DotClass = await t8Page.getAttribute("#dot", "class");
   check("T8: a corrupt journal never costs the user their connection", t8DotClass === "dot connected", t8DotClass);
   const t8Log = await t8Page.textContent("#log");
