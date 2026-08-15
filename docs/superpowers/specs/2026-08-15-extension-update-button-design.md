@@ -188,6 +188,32 @@ Hai điều chưa ai biết, và đoán sai thì lật một phần thiết kế
 
 Việc đo này là bước đầu tiên của kế hoạch thực thi, và phải làm trên máy Windows thật.
 
+### Kết quả đã đo được
+
+**Q2 — Tiến trình tách rời có sống sót qua việc dừng scheduled task không? TRẢ LỜI: CÓ.**
+
+Chạy trên máy Windows thật ngày 2026-08-16. Output:
+```
+task LastRunTime : 08/16/2026 00:17:51
+task LastTaskResult : 267009
+task state : Running
+parent started marker exists : True
+child script exists : True
+heartbeat lines before stopping the task: 9
+heartbeat lines after stopping the task: 17
+Q2 ANSWER: detached child SURVIVES the task being stopped
+```
+
+Con chạy tiếp sau khi `Stop-ScheduledTask` 8 dòng nữa (từ 9 lên 17). `LastTaskResult 267009` là `0x41301` — "task is currently running", tương thích với `state: Running`, không phải lỗi. **Hệ quả**: Bridge có thể sinh trình cập nhật rồi buông tay; việc installer dừng dịch vụ không kéo nó theo. Không cần thiết kế lại.
+
+Lần chạy đầu trả `Q2 INCONCLUSIVE` với 0 heartbeat: scheduled task của Windows và `Start-Process` bên trong nó là hai lần gọi `powershell` tách rời, không thừa kế `-ExecutionPolicy Bypass`, và máy Windows mặc định policy là `Restricted` — từ chối chạy `.ps1` từ file. Cả hai lần gọi giờ truyền flag rồi. Đó là lý do kiểm tra INCONCLUSIVE tồn tại — nếu không, "0 dòng" sẽ bị hiểu nhầm là "con chết rồi", dẫn tới thiết kế lại không cần thiết.
+
+**Q1 — `install.ps1` có chạy được với `CC_CHROME_SOURCE` trỏ vào thư mục dựng lại từ tarball không? TRẢ LỜI: CÓ.**
+
+Người dùng cài bridge trên Windows từ checkout có `CC_CHROME_SOURCE` trỏ vào thư mục checkout. `/health` sau đó trả `ok:true, version 1.1.0`. Kết hợp với test của `reshapeToCheckout` (chứng minh tarball được dựng lại thành cấu trúc checkout đúng), tuyên bố "một đường duy nhất cho cả ba OS" giờ được đo trên máy thật chứ không phải suy đoán.
+
+Sự thật một cái từ máy này cần ghi vào spec: policy của máy là `Restricted`, và `npm` trong PowerShell qua shim `npm.ps1`, nên `npm install` bình thường bị từ chối. Đường sản phẩm không bị ảnh hưởng — `scripts/update-runner.mjs` đã truyền `-ExecutionPolicy Bypass` khi chạy installer `.ps1`, và `install.ps1` dot-source `service-task.ps1` vào cùng một process nên nó thừa kế bypass — nhưng điều này có nghĩa máy Restricted-policy mới là mặc định thực tế, không phải edge case.
+
 ## H. Ngoài phạm vi
 
 - **Không** tự động cập nhật nền. Chỉ kiểm tra khi panel mở, và chỉ cài khi người dùng bấm.

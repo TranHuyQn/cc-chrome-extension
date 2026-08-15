@@ -87,9 +87,9 @@ if (-not (Test-Path $installed)) {
     Write-Host "Q1: no install found at $installed"
     Write-Host 'Q1 ALTERNATIVE: a checkout IS already the layout CC_CHROME_SOURCE expects,'
     Write-Host 'so Q1 can be answered from the repo directly. From the checkout root run:'
-    Write-Host '    cd server; npm install; cd ..'
+    Write-Host '    cd server; npm.cmd install; cd ..'
     Write-Host '    $env:CC_CHROME_SOURCE = (Get-Location).Path'
-    Write-Host '    .\scripts\install.ps1'
+    Write-Host '    powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1'
     Write-Host 'That INSTALLS the bridge on this machine. Report the full output either way.'
 } else {
     New-Item -ItemType Directory -Path (Join-Path $src 'scripts') -Force | Out-Null
