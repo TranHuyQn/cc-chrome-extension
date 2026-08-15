@@ -1,4 +1,4 @@
-# Answers the two Windows questions the update design depends on. Run on a real
+﻿# Answers the two Windows questions the update design depends on. Run on a real
 # Windows machine. Writes only under %TEMP% and registers one throwaway
 # scheduled task which it removes again. Needs no administrator rights.
 #
