@@ -518,8 +518,12 @@ mới không lên được, nó tự khôi phục lại bản cũ** — chép ng
 chỗ cũ, và nếu lúc đó dịch vụ nền đang không chạy thì tự bật lại dịch vụ luôn,
 rồi chờ `/health` trả lời để chắc chắn bridge đã sống lại.
 
-Trường hợp duy nhất phải tự tay xử lý: bước bật lại dịch vụ ở trên cũng thất
-bại. Khi đó khung chat sẽ báo thẳng "Chưa khởi động lại được dịch vụ nền (…)",
+Vẫn còn vài trường hợp phải tự tay xử lý: bước bật lại dịch vụ ở trên cũng thất
+bại, hoặc không có bản sao lưu để khôi phục (`failed-no-backup`), hoặc trình cập
+nhật gặp lỗi giữa chừng (`crashed`), hoặc một lần cập nhật trước đã dừng dở và
+còn để lại `~/.cc-chrome-bridge.bak` (`already-running`). Cả bốn đều ghi lý do
+vào `~/.ccchrome-update.json`. Với trường hợp đầu, khung chat sẽ báo thẳng
+"Chưa khởi động lại được dịch vụ nền (…)",
 nhưng nếu bridge không lên thì khung chat cũng không mở được để đọc dòng đó —
 nên cứ thấy khung chat tắt ngóm và không tự quay lại sau vài phút thì chạy lại
 lệnh cài ở mục [Cài đặt](#cài-đặt) (nó cài đè, giữ nguyên token, và dựng lại

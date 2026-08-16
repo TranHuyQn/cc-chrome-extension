@@ -18,7 +18,7 @@
 // inside the directory being replaced is the surest way to lock it.
 
 import { spawn, spawnSync } from "node:child_process";
-import { cpSync, rmSync, existsSync, writeFileSync, renameSync, openSync, closeSync } from "node:fs";
+import { cpSync, rmSync, existsSync, writeFileSync, renameSync, openSync, closeSync, chmodSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 
 function arg(name, fallback = null) {
@@ -134,9 +134,20 @@ function runInstaller() {
     const args = isPs1 ? ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", installer] : [installer];
     // The one process that can leave a machine unbootable must not throw its
     // own output away: a failure otherwise has an exit code and nothing else.
+    //
+    // 0600, and re-applied every run: install.sh's last instruction prints
+    // `ws://127.0.0.1:<port>/ws?token=<token>` for the user to paste into the
+    // popup, so this log captures the bridge token. At the default 0644 any
+    // other local user could read it and drive this browser. Same secret and
+    // same reasoning as AgentSession.mcpConfigPath()'s 0600 — and the mode
+    // argument only applies when the file is CREATED, so an existing log from
+    // before this fix has to be chmod'ed as well.
     let logFd = null;
     try {
-      if (logPath) logFd = openSync(logPath, "w");
+      if (logPath) {
+        logFd = openSync(logPath, "w", 0o600);
+        chmodSync(logPath, 0o600);
+      }
     } catch { /* logging is best-effort; it must never block the update itself */ }
     // CC_CHROME_PORT: a systemd-run --user transient unit runs with the USER
     // MANAGER's environment, not the bridge's, so on a non-default port an
@@ -182,14 +193,17 @@ function runInstaller() {
 // cannot serve.
 //
 // On win32 the task must be re-REGISTERED, not merely started: Stop-CcTask
-// calls Disable-ScheduledTask before killing, and Register-CcTask (-Force) is
-// what clears that. Register-CcTask reads bridge-launcher.vbs out of the
+// calls Disable-ScheduledTask before killing (service-task.ps1, verifiable in
+// the source), so a bare Start-CcTask would be starting a disabled task.
+// Register-CcTask (-Force) is expected to clear that by replacing the whole
+// registration — but that is REASONED, not measured: nothing here has run this
+// branch on Windows. Register-CcTask reads bridge-launcher.vbs out of the
 // install directory, which the restore just put back.
 function startRestoredService() {
   const script = process.platform === "win32"
     ? join(installDir, "service-task.ps1")
     : join(installDir, "service-unit.sh");
-  if (!existsSync(script)) return { ok: false, detail: `không tìm thấy ${script}` };
+  if (!existsSync(script)) return { ok: false, attempted: false, detail: `không tìm thấy ${script}` };
 
   const opts = { stdio: "ignore", windowsHide: true, timeout: 60000, env: childEnv() };
   let result;
@@ -206,9 +220,9 @@ function startRestoredService() {
     // install directory with a quote or a space in it must not become code.
     result = spawnSync("bash", ["-c", '. "$1" && cc_service_start', "bash", script], opts);
   }
-  if (result.error) return { ok: false, detail: result.error.message };
-  if (result.status !== 0) return { ok: false, detail: `mã thoát ${result.status}` };
-  return { ok: true, detail: "" };
+  if (result.error) return { ok: false, attempted: true, detail: result.error.message };
+  if (result.status !== 0) return { ok: false, attempted: true, detail: `mã thoát ${result.status}` };
+  return { ok: true, attempted: true, detail: "" };
 }
 
 // Makes sure something is serving /health again after a restore, and reports
@@ -222,11 +236,24 @@ function startRestoredService() {
 // reason, and `launchctl bootout` + a failing `bootstrap` would leave the user
 // with none at all.
 async function ensureServiceUp() {
-  if ((await healthVersion()) !== null) {
-    return { restarted: false, ok: true, detail: "dịch vụ vẫn đang chạy, không cần khởi động lại" };
+  // Probed TWICE, a second apart, and only a double miss decides to bounce.
+  // This is the one place in the recovery path that can leave a machine worse
+  // off than it started: a single 3s timeout that misreads a loaded but
+  // crash-looping job as dead sends us into `bootout` + `bootstrap`, and a
+  // failing bootstrap leaves the job UNLOADED — where before it would at least
+  // have been respawned by KeepAlive against the freshly restored files.
+  // A second probe costs a second and removes that path.
+  for (let i = 0; i < 2; i++) {
+    if ((await healthVersion()) !== null) {
+      return { restarted: false, ok: true, detail: "dịch vụ vẫn đang chạy, không cần khởi động lại" };
+    }
+    if (i === 0) await sleep(1000);
   }
   const started = startRestoredService();
-  if (!started.ok) return { restarted: true, ok: false, detail: started.detail };
+  // `attempted` distinguishes "we ran a start command and it failed" from "we
+  // never had a script to run" — reporting a restart that was never tried
+  // would send the user looking for a launchd failure that did not happen.
+  if (!started.ok) return { restarted: started.attempted === true, ok: false, detail: started.detail };
 
   const deadline = Date.now() + SERVICE_START_TIMEOUT_MS;
   while (Date.now() < deadline) {
