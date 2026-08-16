@@ -7,6 +7,13 @@
 # cannot fire on their own even if left behind - see the Q2/Q3 section).
 # Needs no administrator rights.
 #
+# Run it with `powershell`, NOT `pwsh`. This script writes every file with
+# -Encoding Default, which is what Windows PowerShell 5.1's own "a BOM-less
+# .ps1 is ANSI" read behaviour pairs with - and which PowerShell 6+ removed.
+# Under pwsh the very first Add-Content fails on parameter binding and leaves
+# a zero-byte result file: the one failure mode where the file itself says
+# nothing at all.
+#
 # ASCII ONLY, deliberately, for THIS file. Windows PowerShell 5.1 reads a
 # .ps1 without a BOM as the system ANSI code page, so any character above
 # 0x7F in a BOM-less file becomes mojibake and can terminate a string early.
@@ -440,7 +447,12 @@ if (-not ($runnerRegistered -and $runnerStarted)) {
             "    & taskkill /pid $PID /T /F *> `$null",
             "    `$killExit = `$LASTEXITCODE",
             "} catch {",
-            "    `$killExit = -1",
+            # $LASTEXITCODE is set by the native command BEFORE PowerShell
+            # promotes its stderr into a NativeCommandError, so it still holds
+            # taskkill's real code here. A hardcoded -1 would conflate "taskkill
+            # failed with output" with "taskkill was not found" - and this
+            # branch is the exact path H2 exists to record.
+            "    `$killExit = `$LASTEXITCODE",
             "}",
             # H2: confirm the target actually died instead of trusting the
             # exit code alone - retry briefly, since TerminateProcess is
@@ -511,7 +523,10 @@ if (-not ($runnerRegistered -and $runnerStarted)) {
 
         if ($observerRegistered) {
             Write-Host "observer task started; it will kill this window's process tree (pid $PID) in ~2 seconds, the way Stop-CcTask kills the bridge"
-            Add-Content -Path $result -Value "killing pid $PID (this window) via taskkill /T /F in ~2s, as Stop-CcTask does to the bridge" -Encoding Default
+            # The timing belongs in the FILE too: a reader who opens it the
+            # moment this window vanishes finds no Q2 line yet, and without
+            # this would reasonably report the probe as having failed.
+            Add-Content -Path $result -Value "killing pid $PID (this window) via taskkill /T /F in ~2s, as Stop-CcTask does to the bridge. The Q2 ANSWER lands here about 20-25 seconds later - re-read this file after that." -Encoding Default
             Write-Host 'this window is likely to die now. The final Q2 ANSWER lands in the result file in about 20-25 more seconds.'
             Write-Host 'Open a NEW PowerShell window and run:'
             Write-Host "    Get-Content '$result'"
@@ -555,6 +570,14 @@ if (-not ($runnerRegistered -and $runnerStarted)) {
                 }
                 Write-Host $oinfoMsg
                 Add-Content -Path $result -Value $oinfoMsg -Encoding Default
+                # This is the one path that leaves both tasks registered, and
+                # the recovery lines are ~200 lines earlier in the file. Repeat
+                # them where they actually become relevant.
+                Write-Host "    $recoverRunner"
+                Write-Host "    $recoverObserver"
+                Add-Content -Path $result -Value "both tasks are still registered - run these two lines to clean up:" -Encoding Default
+                Add-Content -Path $result -Value "    $recoverRunner" -Encoding Default
+                Add-Content -Path $result -Value "    $recoverObserver" -Encoding Default
             }
         }
     }
