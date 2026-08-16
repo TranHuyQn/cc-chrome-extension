@@ -428,18 +428,35 @@ attached them.
   self-update — `test/build.test.mjs` asserts all three are in the tarball for
   that reason.
 - The updater must not be a descendant of the service, and each platform kills
-  differently — measured 2026-08-16 against the command the installer actually
-  runs, not an equivalent. macOS's `launchctl bootout` leaves a detached child
-  running (heartbeat 18 → 26), so darwin still spawns directly. Windows'
-  `Stop-CcTask` ends in `taskkill /pid <bridge> /T /F`, which kills descendants
-  by parent PID, so the runner is registered as a one-shot scheduled task and
-  Task Scheduler owns it. Linux's `systemctl --user disable --now` takes the
-  whole cgroup — `detached: true` is `setsid()`, which changes session, not
-  cgroup — so it goes through `systemd-run --user --collect --unit=…`; a
-  `--scope` would stay in the caller's cgroup and die with it. **The Linux
-  branch is reasoned, not measured: there is no Linux machine to run it on.**
+  differently. **Exactly one of the three branches rests on a measurement; read
+  the per-platform note before trusting any of them.** Whatever is claimed here
+  must be claimed against the command the installer actually runs — an earlier
+  Windows probe measured `Stop-ScheduledTask` while `install.ps1` calls
+  `Stop-CcTask`, and returned a true answer to a question nobody had asked.
+  - **macOS — measured 2026-08-16.** `launchctl bootout` leaves a detached child
+    running (heartbeat 18 → 26), so darwin still spawns the runner directly.
+  - **Windows — reasoned; the probe exists but has not been run.**
+    `Stop-CcTask` ends in `taskkill /pid <bridge> /T /F`, which kills descendants
+    by parent PID, so the runner is handed to Task Scheduler instead: one
+    `powershell -Command` doing `Register-ScheduledTask` — deliberately with **no**
+    `-Trigger`, so it is on-demand only — followed by `Start-ScheduledTask` in the
+    same process. Not `schtasks /create … /tr`: the `/tr` string this product
+    builds measures 459–501 characters against a documented 262-character
+    maximum, `schtasks` defaults block a task on battery, and a separate
+    `/create` and `/run` were two unordered spawns. `scripts/probe-windows-update.ps1`
+    is written to settle this on real hardware and has not yet been run there.
+  - **Linux — reasoned, and measured only in CI.** `systemctl --user disable
+    --now` takes the whole cgroup, and `detached: true` is `setsid()`, which
+    changes session, not cgroup — so it goes through
+    `systemd-run --user --collect --unit=…`; a `--scope` would stay in the
+    caller's cgroup and die with it. There is no Linux machine here; the
+    `linux-handover` job in `.github/workflows/ci.yml` runs the three-arm probe
+    on `ubuntu-latest`, where a plain detached child and a `--scope` must both
+    die and only `--unit` may survive.
+
   `buildRunnerSpawn` takes the platform as an argument, like `buildSpawn` in
-  `server/agent.js`, precisely so the branch nobody can run is still tested.
+  `server/agent.js`, precisely so the branches nobody can run here are still
+  tested.
 - The release check is cached for 30 minutes (`RELEASE_CACHE_MS` in
   `server/index.js`). The panel asks on every `ready` — which includes every
   reconnect, and the panel reconnects with backoff capped at 30s — against
