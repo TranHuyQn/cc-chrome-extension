@@ -84,7 +84,14 @@ export function reshapeToCheckout(extractedDir, targetDir) {
   // of this function is to fail while nothing has been touched yet; validating
   // lazily, inline with the copies, just moves the half-finished state from the
   // install directory into the staging directory the installer is handed next.
-  const scripts = ["uninstall.sh", "service-unit.sh", "uninstall.ps1", "service-task.ps1"];
+  // The last three are what spawnUpdateRunner reads out of the install
+  // directory. They are listed here, not just in the tarball, so a release
+  // missing them fails while nothing has been touched — the tarball carrying a
+  // file is not the same as the installer putting it where the bridge looks.
+  const scripts = [
+    "uninstall.sh", "service-unit.sh", "uninstall.ps1", "service-task.ps1",
+    "update-runner.mjs", "install.sh", "install.ps1",
+  ];
   const sources = {
     server: need("server"),
     extension: need("extension"),

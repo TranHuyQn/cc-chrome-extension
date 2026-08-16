@@ -79,7 +79,8 @@ mkdirSync(join(extracted, "server"), { recursive: true });
 mkdirSync(join(extracted, "extension"), { recursive: true });
 writeFileSync(join(extracted, "server", "index.js"), "// server");
 writeFileSync(join(extracted, "extension", "manifest.json"), "{}");
-for (const f of ["ccchrome.md", "uninstall.sh", "service-unit.sh", "uninstall.ps1", "service-task.ps1"]) {
+for (const f of ["ccchrome.md", "uninstall.sh", "service-unit.sh", "uninstall.ps1", "service-task.ps1",
+                 "update-runner.mjs", "install.sh", "install.ps1"]) {
   writeFileSync(join(extracted, f), f);
 }
 
@@ -93,6 +94,33 @@ check("ccchrome.md lands where install.sh looks for it",
 for (const f of ["uninstall.sh", "service-unit.sh", "uninstall.ps1", "service-task.ps1"]) {
   check(`${f} lands in scripts/`, readFileSync(join(target, "scripts", f), "utf8") === f);
 }
+
+// The three files spawnUpdateRunner reads out of the install directory. A
+// release tarball missing any of them must fail HERE, while nothing has been
+// touched — not at the moment the user presses the button, which is where the
+// first version of this feature failed on every machine.
+for (const f of ["update-runner.mjs", "install.sh", "install.ps1"]) {
+  check(`${f} lands in scripts/ — spawnUpdateRunner reads it from the install dir`,
+    readFileSync(join(target, "scripts", f), "utf8") === f);
+}
+
+const missingRunner = join(work, "no-runner");
+mkdirSync(join(missingRunner, "server"), { recursive: true });
+mkdirSync(join(missingRunner, "extension"), { recursive: true });
+for (const f of ["ccchrome.md", "uninstall.sh", "service-unit.sh", "uninstall.ps1", "service-task.ps1",
+                 "install.sh", "install.ps1"]) {
+  writeFileSync(join(missingRunner, f), f);
+}
+let runnerErr = null;
+try {
+  reshapeToCheckout(missingRunner, join(work, "no-runner-out"));
+} catch (err) {
+  runnerErr = err.message;
+}
+check("a tarball missing update-runner.mjs is refused, by name",
+  runnerErr && runnerErr.includes("update-runner.mjs"), String(runnerErr));
+check("and leaves no half-built directory behind",
+  !existsSync(join(work, "no-runner-out")), join(work, "no-runner-out"));
 
 // A tarball missing a file the installer needs must fail loudly here, not
 // halfway through an install that has already stopped the service.
