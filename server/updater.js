@@ -112,3 +112,41 @@ export function reshapeToCheckout(extractedDir, targetDir) {
     copyFileSync(sources.scripts[file], join(targetDir, "scripts", file));
   }
 }
+
+// How the updater is launched so that stopping the service does not kill it.
+//
+// Takes the platform as an argument, like buildSpawn() in server/agent.js does,
+// so all three branches are testable from one machine — which matters here more
+// than usual, because the branch that was wrong last time was the one nobody
+// could run.
+//
+// Measured 2026-08-16, each against the command the installer actually runs:
+//   macOS   `launchctl bootout`            -> detached child SURVIVES (18 -> 26 heartbeats)
+//   Windows `Stop-CcTask` (taskkill /T /F) -> kills descendants by parent PID
+//   Linux   `systemctl --user disable --now` -> kills the whole cgroup; NOT measured
+//            on real hardware (no Linux machine), reasoned from KillMode=control-group
+export function buildRunnerSpawn(platform, { node, runner, args, taskName }) {
+  if (platform === "darwin") {
+    return { command: node, args: [runner, ...args] };
+  }
+  if (platform === "linux") {
+    // --unit, not --scope: a scope runs in the CALLER's cgroup and would die
+    // with it. --unit asks systemd to fork the process itself, giving it its
+    // own cgroup and its own lifetime. --collect removes the unit when it exits.
+    return {
+      command: "systemd-run",
+      args: ["--user", "--collect", `--unit=${taskName}`, node, runner, ...args],
+    };
+  }
+  if (platform === "win32") {
+    // Task Scheduler becomes the parent, so taskkill /T against the bridge
+    // cannot reach the runner. /f overwrites a stale task of the same name;
+    // the runner deletes the task itself when it finishes.
+    const command = [node, runner, ...args].map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(" ");
+    return {
+      command: "schtasks",
+      args: ["/create", "/tn", taskName, "/tr", command, "/sc", "ONCE", "/st", "00:00", "/f"],
+    };
+  }
+  throw new Error(`Không hỗ trợ cập nhật tự động trên nền tảng '${platform}'.`);
+}

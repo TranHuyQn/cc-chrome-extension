@@ -10,7 +10,7 @@
 // It runs with a cwd outside the install directory. On Windows, running from
 // inside the directory being replaced is the surest way to lock it.
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { cpSync, rmSync, existsSync, writeFileSync, renameSync, openSync, closeSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -31,11 +31,23 @@ const port = Number(arg("port", "8787"));
 const expectVersion = arg("expect-version");
 const statusFile = arg("status-file");
 const healthTimeoutMs = Number(arg("health-timeout-ms", "30000"));
+const taskName = arg("task-name");
 const backupDir = `${installDir}.bak`;
 // Beside the status record, not inside the install directory being replaced.
 const logPath = statusFile ? join(dirname(statusFile), "ccchrome-update.log") : null;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Windows only: the one-shot task that gave this process a parent other than
+// the bridge. Left behind it would sit in Task Scheduler forever with a start
+// time in the past. Best effort — a leftover task is harmless, and failing to
+// remove it must never change the outcome that was already recorded.
+function removeOwnTask() {
+  if (process.platform !== "win32" || !taskName) return;
+  try {
+    spawnSync("schtasks", ["/delete", "/tn", taskName, "/f"], { stdio: "ignore", windowsHide: true });
+  } catch { /* best effort */ }
+}
 
 function writeStatus(record) {
   try {
@@ -117,6 +129,7 @@ function rollback() {
 async function main() {
   if (!source || !work || !installDir || !installer || !expectVersion || !statusFile) {
     writeStatus({ ok: false, step: "bad-args", reason: "Thiếu tham số cho trình cập nhật." });
+    removeOwnTask();
     process.exit(2);
   }
 
@@ -143,6 +156,7 @@ async function main() {
         `rồi đổi tên ${backupDir} thành ${installDir} để khôi phục bản cũ. ` +
         `Nhật ký lần trước: ${logPath}`,
     });
+    removeOwnTask();
     process.exit(4);
   }
 
@@ -166,6 +180,7 @@ async function main() {
   if (seen === expectVersion) {
     rmSync(backupDir, { recursive: true, force: true });
     writeStatus({ ok: true, step: "installed", version: expectVersion });
+    removeOwnTask();
     process.exit(0);
   }
 
@@ -180,6 +195,7 @@ async function main() {
       : `Bản ${expectVersion} cài thất bại và không có bản sao lưu để khôi phục. ` +
         `Xem log tại ${logPath}. Chạy lại lệnh cài trong README.`,
   });
+  removeOwnTask();
   process.exit(1);
 }
 
@@ -200,5 +216,6 @@ main().catch((err) => {
     reason: `Trình cập nhật gặp lỗi: ${err && err.message ? err.message : String(err)}. ` +
       `Bản cài cũ (nếu còn) ở ${backupDir}; bản cài lỗi (nếu có) ở ${installDir}.failed; nhật ký ở ${logPath}.`,
   });
+  removeOwnTask();
   process.exit(3);
 });

@@ -29,7 +29,7 @@ import { z } from "zod";
 import { TokenStore } from "./tokens.js";
 import { AgentSession, claudeBinFromEnv } from "./agent.js";
 import { isLoopbackHost, isLoopbackAddress, forwardedHeadersIn } from "./loopback.js";
-import { compareVersions, isValidTag, releaseUrls, parseChecksumFile, sha256File, reshapeToCheckout, isCacheFresh, LATEST_RELEASE_API } from "./updater.js";
+import { compareVersions, isValidTag, releaseUrls, parseChecksumFile, sha256File, reshapeToCheckout, isCacheFresh, buildRunnerSpawn, LATEST_RELEASE_API } from "./updater.js";
 
 const PORT = Number(process.env.CC_CHROME_PORT || 8787);
 // Loopback by default: the mode this replaced (stdio) bound 127.0.0.1
@@ -1277,8 +1277,8 @@ async function mainHttp() {
     const installer = process.platform === "win32"
       ? join(INSTALL_DIR, "install.ps1")
       : join(INSTALL_DIR, "install.sh");
-    const child = spawn(process.execPath, [
-      join(INSTALL_DIR, "update-runner.mjs"),
+    const taskName = `cc-chrome-update-${version.replace(/\./g, "-")}-${process.pid}`;
+    const runnerArgs = [
       "--source", source,
       "--work", work,
       "--install-dir", INSTALL_DIR,
@@ -1286,13 +1286,31 @@ async function mainHttp() {
       "--port", String(PORT),
       "--expect-version", version,
       "--status-file", UPDATE_STATUS_FILE,
-    ], {
+      "--task-name", taskName,
+    ];
+    const { command, args } = buildRunnerSpawn(process.platform, {
+      node: process.execPath,
+      runner: join(INSTALL_DIR, "update-runner.mjs"),
+      args: runnerArgs,
+      taskName,
+    });
+    const child = spawn(command, args, {
       detached: true,
       stdio: "ignore",
       cwd: tmpdir(),
       windowsHide: true,
     });
     child.unref();
+
+    // schtasks /create only registers the task; it still has to be started.
+    // This second call is short-lived and its death is harmless — by the time
+    // the installer stops the service, Task Scheduler already owns the runner.
+    if (process.platform === "win32") {
+      const starter = spawn("schtasks", ["/run", "/tn", taskName], {
+        detached: true, stdio: "ignore", windowsHide: true,
+      });
+      starter.unref();
+    }
   }
 
   // WebSocket endpoints: /ws for the extension bridge, /panel for the side panel

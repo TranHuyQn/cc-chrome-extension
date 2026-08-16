@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   compareVersions, isValidTag, releaseUrls, parseChecksumFile, sha256File, reshapeToCheckout, isCacheFresh, REPO,
+  buildRunnerSpawn,
 } from "../server/updater.js";
 
 let failures = 0;
@@ -158,6 +159,53 @@ check("exactly at the TTL boundary is NOT fresh (< , not <=)",
   isCacheFresh({ at: 1_000_000 - 1000 }, 1_000_000, 1000) === false);
 check("well past the TTL is not fresh",
   isCacheFresh({ at: 1_000_000 - 5000 }, 1_000_000, 1000) === false);
+
+// --- how the runner is handed over, per platform ----------------------------
+//
+// The runner must not be a descendant of the service, because stopping the
+// service is the installer's first act and every platform's stop kills
+// differently. Measured 2026-08-16: macOS's `launchctl bootout` leaves a
+// detached child running (heartbeat 18 -> 26), so darwin keeps spawning
+// directly. Windows' Stop-CcTask ends in `taskkill /T /F`, which kills
+// descendants by parent PID, and Linux's `systemctl --user disable --now` takes
+// the whole cgroup — detached:true is setsid(), which does not leave a cgroup.
+{
+  const base = { node: "/usr/bin/node", runner: "/inst/update-runner.mjs", args: ["--port", "8787"], taskName: "cc-update-1" };
+
+  const mac = buildRunnerSpawn("darwin", base);
+  check("darwin spawns node directly — measured safe under launchctl bootout",
+    mac.command === "/usr/bin/node" && mac.args[0] === "/inst/update-runner.mjs", JSON.stringify(mac));
+  check("darwin passes the runner's own arguments through",
+    mac.args.includes("--port") && mac.args.includes("8787"), JSON.stringify(mac.args));
+
+  const linux = buildRunnerSpawn("linux", base);
+  check("linux hands the runner to systemd so it gets its own cgroup",
+    linux.command === "systemd-run", linux.command);
+  check("linux runs it as a user unit, not a scope — a scope stays a child of the caller",
+    linux.args.includes("--user") && linux.args.some((a) => a.startsWith("--unit=")), JSON.stringify(linux.args));
+  check("linux lets systemd clean the unit up afterwards",
+    linux.args.includes("--collect"), JSON.stringify(linux.args));
+  check("linux still ends with node, the runner and its arguments",
+    linux.args.includes("/usr/bin/node") && linux.args.includes("/inst/update-runner.mjs") && linux.args.includes("8787"),
+    JSON.stringify(linux.args));
+
+  const win = buildRunnerSpawn("win32", base);
+  check("win32 goes through schtasks so Task Scheduler becomes the parent",
+    win.command === "schtasks", win.command);
+  check("win32 creates the task under the name it was given",
+    win.args.includes("/tn") && win.args.includes("cc-update-1"), JSON.stringify(win.args));
+  check("win32 schedules it to run once, not on a repeating trigger",
+    win.args.includes("/sc") && win.args.includes("ONCE"), JSON.stringify(win.args));
+
+  let badPlatform = null;
+  try {
+    buildRunnerSpawn("sunos", base);
+  } catch (err) {
+    badPlatform = err.message;
+  }
+  check("an unsupported platform is refused by name rather than silently spawning something",
+    badPlatform && badPlatform.includes("sunos"), String(badPlatform));
+}
 
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);
