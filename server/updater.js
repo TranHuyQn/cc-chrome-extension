@@ -138,16 +138,24 @@ function psQuote(value) {
 // could run.
 //
 // What is known about each platform's stop, stated against the command the
-// installer actually runs — and exactly one of the three is a measurement:
+// installer actually runs — two of the three are now measurements:
 //   macOS   MEASURED 2026-08-16. `launchctl bootout` -> a detached child
 //           SURVIVES (heartbeat 18 -> 26).
-//   Windows REASONED, not measured. `Stop-CcTask` ends in
-//           `taskkill /pid <bridge> /T /F`, which kills descendants by parent
-//           PID. The probe that ran on real hardware measured
-//           `Stop-ScheduledTask`, which is NOT the command install.ps1 calls,
-//           so it answered a question nobody asked;
-//           scripts/probe-windows-update.ps1 exists to settle this one and has
-//           not been run.
+//   Windows MEASURED 2026-08-16 on real hardware (Win 10.0.26100, PowerShell
+//           5.1, non-elevated), by scripts/probe-windows-update.ps1, twice —
+//           once on AC and once on battery, identical both times. A runner
+//           launched through Register-ScheduledTask + Start-ScheduledTask
+//           SURVIVES `taskkill /pid <launcher> /T /F`, which is what
+//           `Stop-CcTask` does to the bridge: heartbeat 9 immediately before
+//           the kill -> 14 -> 19 after it, with the kill itself verified
+//           (exit 0, target gone) so "nothing was killed" is excluded.
+//           Registration also succeeded without administrator rights.
+//           An EARLIER probe measured `Stop-ScheduledTask`, which is NOT the
+//           command install.ps1 calls, and so answered a question nobody had
+//           asked; that is why this one asserts the kill actually landed.
+//           Still not measured: the product's own much longer command line —
+//           a green probe proves the cmdlet shape works, not that shape at
+//           full length. That closes on the first real update.
 //   Linux   REASONED, and measured only in CI. `systemctl --user disable --now`
 //           takes the whole cgroup (KillMode=control-group); there is no Linux
 //           machine here, so the `linux-update-handover` job runs

@@ -312,3 +312,61 @@ không phải nơi bridge đọc.
 | Bản mới cài được nhưng hỏng theo cách khác (bridge lên, tính năng vỡ) | Ngoài tầm rollback tự động — `.bak` đã bị xoá khi health đạt. Người dùng cài lại bản cũ bằng tay |
 | Người dùng bấm cập nhật giữa lượt chat | `update_start` bị từ chối khi đang có lượt chạy; panel nói rõ lý do |
 | Extension mới + bridge cũ (người dùng chưa bấm nạp lại) | Đã có sẵn cơ chế `protocol` từ 1.1.0 lo việc này |
+
+## G3. KẾT QUẢ ĐO THẬT 2026-08-16 — Windows đã có câu trả lời
+
+Mục G2 để ngỏ hai ô trong bảng đo. Ô Windows nay đã đóng, bằng
+`scripts/probe-windows-update.ps1` chạy trên phần cứng thật của chủ dự án
+(Windows 10.0.26100, PowerShell 5.1.26100.9168, cửa sổ **không nâng quyền**),
+**hai lần: một lần cắm sạc, một lần chạy pin, kết quả giống hệt nhau**.
+
+### Q2 — trình cập nhật có sống sót lệnh dừng thật không
+
+| Mốc | Cắm sạc (`BatteryStatus=2`) | Chạy pin (`BatteryStatus=1`) |
+|---|---|---|
+| heartbeat ngay trước khi giết (`mid`) | 9 | 9 |
+| `taskkill` exit code | 0 | 0 |
+| tiến trình mục tiêu còn sống? | False | False |
+| ~5 giây sau khi giết (`after1`) | 14 | 14 |
+| ~10 giây sau khi giết (`after2`) | 19 | 19 |
+| **Kết luận** | **SỐNG SÓT** | **SỐNG SÓT** |
+
+Bảng ở G2 ghi Windows là **CHẾT** với nguồn "suy từ mã". Điều đó vẫn đúng **với
+thiết kế cũ** — trình cập nhật là con trực tiếp của bridge. Ô đó nói về cơ chế
+đã bị thay, không phải cơ chế hiện tại.
+
+Ba tính chất khiến kết quả này là một phép đo chứ không phải một dấu tích xanh:
+
+1. **Cú giết được xác minh đã xảy ra** — `exit code 0` và `target still running:
+   False`. Nếu không kiểm điều này thì "chẳng có gì bị giết" và "bị giết nhưng
+   sống sót" cho ra cùng một bảng số.
+2. **Toàn bộ tăng trưởng nằm sau cú giết** — 9 → 14 → 19, biên 10 dòng so với
+   ngưỡng tối thiểu 3. Phiên bản probe đầu lấy mốc *trước* khi dàn dựng, nên in
+   `SURVIVES` bất kể sự thật; đó là lỗi đã sửa, không phải lỗi còn tồn tại.
+3. **Lần chạy pin là phép đo riêng của nó.** Nó chứng minh
+   `-AllowStartIfOnBatteries` trên **cả hai** task — một lỗi Critical bị bắt
+   trong review sau khi task observer ra đời mà thiếu bộ setting đó. Dòng
+   `observer started, about to kill <pid>` do chính observer ghi vào file là bằng
+   chứng nó *chạy*, khác với "lệnh start trả về không lỗi".
+
+### Q3 — đăng ký scheduled task có cần quyền admin không
+
+`IsInRole(Administrator) = False` và `registration succeeded`, ở cả hai lần chạy.
+Bất biến "không trình cài nào trong repo này cần nâng quyền" nay áp dụng được cho
+cả đường cập nhật, và là đo chứ không phải suy.
+
+### Q1 — xác nhận lỗi C1 trên phần cứng thật
+
+Bản cài Windows đang tồn tại (cài trước kế hoạch này) trả về `False` cho cả ba
+file `update-runner.mjs`, `install.sh`, `install.ps1`. Đây là lỗi C1 được nhìn
+thấy trên một máy thật: nút cập nhật trên máy đó **vốn đã chết**. Hệ quả vận
+hành: muốn thử nút cập nhật trên Windows phải cài lại từ code sau bản sửa này.
+
+### Còn lại chưa đo
+
+- **Dòng lệnh thật, đầy đủ độ dài.** Probe đăng ký task với tham số ngắn.
+  `Register-ScheduledTask` không có giới hạn 262 ký tự như `schtasks /tr` — đó
+  chính là lý do đổi — nhưng "hình dạng cmdlet chạy được" vẫn không đồng nghĩa
+  "chạy được ở độ dài thật". Chỉ đóng lại ở lần cập nhật thật đầu tiên.
+- **Linux.** Vẫn là suy luận, cộng với job `linux-update-handover` chạy mỗi lần
+  push. Không có máy Linux để đo tay.

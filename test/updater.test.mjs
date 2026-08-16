@@ -183,15 +183,16 @@ check("updateTaskName ends with the pid, so two concurrent runners cannot collid
 //
 // The runner must not be a descendant of the service, because stopping the
 // service is the installer's first act and every platform's stop kills
-// differently. Exactly one of the three claims below is a measurement, and
-// server/updater.js's own header says which is which — do not upgrade the other
-// two by repeating them here. MEASURED 2026-08-16: macOS's `launchctl bootout`
-// leaves a detached child running (heartbeat 18 -> 26), so darwin keeps
-// spawning directly. REASONED: Windows' Stop-CcTask ends in `taskkill /T /F`,
-// which kills descendants by parent PID (the Windows probe that did run
-// measured a different command), and Linux's `systemctl --user disable --now`
-// takes the whole cgroup — detached:true is setsid(), which does not leave a
-// cgroup — with CI's linux-update-handover job as the only measurement of it.
+// differently. server/updater.js's own header says which claim is a measurement
+// and which is not — do not upgrade the remaining one by repeating it here.
+// MEASURED 2026-08-16: macOS's `launchctl bootout` leaves a detached child
+// running (heartbeat 18 -> 26), so darwin keeps spawning directly. ALSO
+// MEASURED 2026-08-16, on real hardware, twice (AC and battery): a runner
+// launched through Register-ScheduledTask + Start-ScheduledTask survives the
+// `taskkill /T /F` that Stop-CcTask does to the bridge, 9 -> 14 -> 19 with the
+// kill verified. REASONED: Linux's `systemctl --user disable --now` takes the
+// whole cgroup — detached:true is setsid(), which does not leave a cgroup —
+// with CI's linux-update-handover job as the only measurement of it.
 //
 // Windows does NOT go through `schtasks /create ... /tr ...`: that /tr command
 // line hit schtasks' documented 262-character maximum with a realistic

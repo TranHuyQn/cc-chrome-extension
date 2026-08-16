@@ -475,16 +475,26 @@ attached them.
   `Stop-CcTask`, and returned a true answer to a question nobody had asked.
   - **macOS — measured 2026-08-16.** `launchctl bootout` leaves a detached child
     running (heartbeat 18 → 26), so darwin still spawns the runner directly.
-  - **Windows — reasoned; the probe exists but has not been run.**
-    `Stop-CcTask` ends in `taskkill /pid <bridge> /T /F`, which kills descendants
-    by parent PID, so the runner is handed to Task Scheduler instead: one
-    `powershell -Command` doing `Register-ScheduledTask` — deliberately with **no**
-    `-Trigger`, so it is on-demand only — followed by `Start-ScheduledTask` in the
-    same process. Not `schtasks /create … /tr`: the `/tr` string this product
-    builds measures 459–501 characters against a documented 262-character
-    maximum, `schtasks` defaults block a task on battery, and a separate
-    `/create` and `/run` were two unordered spawns. `scripts/probe-windows-update.ps1`
-    is written to settle this on real hardware and has not yet been run there.
+  - **Windows — measured 2026-08-16 on real hardware**, by
+    `scripts/probe-windows-update.ps1` (Win 10.0.26100, PowerShell 5.1,
+    non-elevated), run **twice — once on AC and once on battery, identical both
+    times**. `Stop-CcTask` ends in `taskkill /pid <bridge> /T /F`, which kills
+    descendants by parent PID, so the runner is handed to Task Scheduler
+    instead: one `powershell -Command` doing `Register-ScheduledTask` —
+    deliberately with **no** `-Trigger`, so it is on-demand only — followed by
+    `Start-ScheduledTask` in the same process. Not `schtasks /create … /tr`: the
+    `/tr` string this product builds measures 459–501 characters against a
+    documented 262-character maximum, `schtasks` defaults block a task on
+    battery, and a separate `/create` and `/run` were two unordered spawns.
+    Measured: heartbeat **9 immediately before the kill → 14 → 19 after it**,
+    with the kill itself verified (`exit 0`, target gone) so "nothing was
+    killed" is excluded, and registration succeeding with
+    `IsInRole(Administrator) = False`. The battery run matters on its own: it is
+    what proves `-AllowStartIfOnBatteries` on **both** tasks, a defect caught in
+    review after the observer task shipped without it. **Still unmeasured:** the
+    product's own much longer command line — a green probe proves the cmdlet
+    shape works, not that shape at full length. That closes on the first real
+    update.
   - **Linux — reasoned, and measured only in CI.** `systemctl --user disable
     --now` takes the whole cgroup, and `detached: true` is `setsid()`, which
     changes session, not cgroup — so it goes through
