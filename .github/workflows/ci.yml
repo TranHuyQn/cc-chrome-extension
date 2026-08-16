@@ -47,9 +47,16 @@ jobs:
   # `systemctl --user disable --now`, the exact command
   # scripts/service-unit.sh runs to stop the real bridge. ubuntu-latest is a
   # real systemd box, so this settles it here and keeps settling it on every
-  # push. Two of the three arms probed are controls that must DIE; if they
-  # do not, the harness itself is broken and the third arm surviving proves
-  # nothing. Exit 2 (environment cannot run the experiment, e.g. no --user
+  # push. Arm A — a plain detached child — is the control, and it must DIE:
+  # if it does not, the harness never had anything in the unit's cgroup and
+  # arm C surviving proves nothing. Arm C is the property under test and must
+  # SURVIVE. Arm B (`--scope`) is measured and REPORTED ONLY, and cannot fail
+  # the run either way: systemd-run(1) says a scope is a unit under a slice,
+  # so it is likely a sibling of the bridge unit rather than a child, and
+  # asserting an expectation nobody here has measured would make this gate
+  # red-by-construction while blaming a property that is intact. Every arm
+  # prints its real /proc/self/cgroup, so the log carries the evidence rather
+  # than an inference. Exit 2 (environment cannot run the experiment, e.g. no --user
   # bus) is treated as a failure too — a gate that silently skips is a gate
   # that lies. See scripts/probe-linux-handover.sh for the full design.
   linux-update-handover:
