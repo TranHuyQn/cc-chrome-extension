@@ -156,10 +156,13 @@ function psQuote(value) {
 //           Still not measured: the product's own much longer command line —
 //           a green probe proves the cmdlet shape works, not that shape at
 //           full length. That closes on the first real update.
-//   Linux   REASONED, and measured only in CI. `systemctl --user disable --now`
-//           takes the whole cgroup (KillMode=control-group); there is no Linux
-//           machine here, so the `linux-update-handover` job runs
-//           scripts/probe-linux-handover.sh on every push instead.
+//   Linux   MEASURED 2026-08-16 in CI, and re-measured on every push. There is
+//           no Linux machine here, so the `linux-update-handover` job runs
+//           scripts/probe-linux-handover.sh on ubuntu-latest: a plain detached
+//           child DIES under `systemctl --user disable --now` while a
+//           `systemd-run --user --collect --unit=` transient service SURVIVES.
+//           See the linux branch below for the cgroup paths and for what that
+//           run retracted.
 //
 // `sync` tells the caller whether the returned command IS the runner (must be
 // launched and let go) or a short-lived LAUNCHER that hands the runner to a
@@ -174,22 +177,24 @@ export function buildRunnerSpawn(platform, { node, runner, args, taskName, worki
     return { command: node, args: [runner, ...args], sync: false };
   }
   if (platform === "linux") {
-    // --unit, not --scope. What is actually known: a transient --unit is
-    // forked by the systemd --user manager itself, giving it its own cgroup
-    // and its own lifetime independent of whatever spawned it — that is the
-    // property this needs. --collect removes the unit once it exits.
-    // --scope is deliberately not used here, and not because its cgroup
-    // placement relative to the caller is known to be worse — it isn't
-    // measured. systemd-run(1) documents --scope units as living under a
-    // slice (app.slice by default for --user), the same place a --unit
-    // service lives, which is a real reason to doubt the "dies with the
-    // caller" reasoning this comment used to give. --unit stays the choice
-    // because its lifetime and cleanup semantics (forked by the manager,
-    // not migrated into by the caller; --collect handles teardown) are the
-    // ones this feature was designed around, not because --scope was ruled
-    // out by measurement. scripts/probe-linux-handover.sh's arm B exists to
-    // supply that measurement; see its own comments for the current state
-    // of that question.
+    // --unit, and MEASURED 2026-08-16 by the linux-update-handover CI job
+    // (run 31928465612), which prints each arm's real /proc/self/cgroup:
+    //   A  plain detached child  -> DIES,     cgroup …/app.slice/<bridge>.service
+    //   B  systemd-run --scope   -> SURVIVES, cgroup …/app.slice/<name>.scope
+    //   C  systemd-run --unit    -> SURVIVES, cgroup …/app.slice/<name>.service
+    // A is inside the bridge unit's own cgroup and dies with it, which is what
+    // makes the run a measurement rather than a green tick; C is the shape this
+    // function emits and it survives with margin.
+    //
+    // Arm B also RETRACTS what this comment used to claim. "A --scope runs in
+    // the CALLER's cgroup and would die with it" is false: a scope is a unit,
+    // units live under a slice, and the measurement shows it as a SIBLING of
+    // the bridge unit — surviving exactly as C does. So --unit is not chosen
+    // because --scope would die. It is chosen because the transient unit is
+    // forked by the --user manager itself, so systemd owns the process's
+    // lifetime rather than the bridge that is about to be stopped, and
+    // --collect handles teardown. That is the whole claim; do not inflate it
+    // back into a story about cgroup placement.
     // workingDir is not used here — the unit gets systemd's own default cwd,
     // which is fine since update-runner.mjs resolves all its own paths from
     // absolute --args.

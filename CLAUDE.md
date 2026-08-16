@@ -495,21 +495,31 @@ attached them.
     product's own much longer command line — a green probe proves the cmdlet
     shape works, not that shape at full length. That closes on the first real
     update.
-  - **Linux — reasoned, and measured only in CI.** `systemctl --user disable
-    --now` takes the whole cgroup, and `detached: true` is `setsid()`, which
-    changes session, not cgroup — so it goes through
-    `systemd-run --user --collect --unit=…`. `--scope` is **not** ruled out by
-    measurement, and the belief that it "stays in the caller's cgroup and dies
-    with it" was retracted in `0d3d6cb`: `systemd-run(1)` documents a scope as a
-    unit under a slice, i.e. likely a sibling of the bridge unit. `--unit` stays
-    the choice for its lifetime and cleanup semantics (forked by the manager,
-    `--collect` tears it down), not because `--scope` was tested and failed.
-    There is no Linux machine here; the `linux-update-handover` job in
-    `.github/workflows/ci.yml` runs the three-arm probe on `ubuntu-latest`:
-    arm A (plain detached child) is the hard control and must DIE, arm C
-    (`--unit`) is the property under test and must SURVIVE, and arm B
-    (`--scope`) is **reported only** — it cannot fail the run in either
-    direction, precisely because nobody here has measured what it should do.
+  - **Linux — measured 2026-08-16 in CI, and re-measured on every push.** There
+    is no Linux machine here; the `linux-update-handover` job in
+    `.github/workflows/ci.yml` runs a three-arm probe on `ubuntu-latest` and
+    prints each arm's real `/proc/self/cgroup`, so the log carries evidence
+    rather than an inference. From run `31928465612`:
+
+    | Arm | Spawned by | cgroup | Result |
+    |---|---|---|---|
+    | A | plain detached child (`setsid`) | `…/app.slice/<bridge>.service` | **DIES** (growth 1) |
+    | B | `systemd-run --user --scope` | `…/app.slice/<name>.scope` | SURVIVES (growth 7) |
+    | C | `systemd-run --user --collect --unit=` | `…/app.slice/<name>.service` | **SURVIVES** (growth 7) |
+
+    Arm A is the control that makes this a measurement: its cgroup **is** the
+    bridge unit's, so it proves the stop really does kill that cgroup. Arm C is
+    the shape `buildRunnerSpawn` emits.
+
+    Arm B **retracted a claim this file used to make.** "A `--scope` stays in
+    the caller's cgroup and dies with it" is false — a scope is a unit, units
+    live under a slice, and it measured as a *sibling* of the bridge unit,
+    surviving exactly as C does. So `--unit` is **not** chosen because `--scope`
+    would die. It is chosen because the transient unit is forked by the `--user`
+    manager, so systemd owns the process's lifetime rather than the bridge that
+    is about to be stopped, and `--collect` tears it down afterwards. Arm B stays
+    **reported only** and cannot fail the run: its expectation is not a property
+    this project depends on.
 
   `buildRunnerSpawn` takes the platform as an argument, like `buildSpawn` in
   `server/agent.js`, precisely so the branches nobody can run here are still

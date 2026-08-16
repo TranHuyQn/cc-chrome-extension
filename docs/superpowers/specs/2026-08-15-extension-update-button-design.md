@@ -370,3 +370,50 @@ hành: muốn thử nút cập nhật trên Windows phải cài lại từ code 
   "chạy được ở độ dài thật". Chỉ đóng lại ở lần cập nhật thật đầu tiên.
 - **Linux.** Vẫn là suy luận, cộng với job `linux-update-handover` chạy mỗi lần
   push. Không có máy Linux để đo tay.
+
+## G4. KẾT QUẢ ĐO LINUX 2026-08-16 — và một khẳng định bị rút lại
+
+Ô Linux trong bảng G2 ghi **CHẾT**, nguồn "suy từ mặc định `KillMode=control-group`;
+không đo được — không có máy Linux". Nay đã đo, bằng job `linux-update-handover`
+chạy `scripts/probe-linux-handover.sh` trên `ubuntu-latest` mỗi lần push. Kết quả
+run `31928465612`:
+
+| Nhánh | Spawn bằng | cgroup thật | Kết quả |
+|---|---|---|---|
+| A | con detached thường (`setsid`) | `…/app.slice/cc-probe-bridge-….service` | **CHẾT** (growth 1) |
+| B | `systemd-run --user --scope` | `…/app.slice/cc-probe-b-….scope` | SỐNG (growth 7) |
+| C | `systemd-run --user --collect --unit=` | `…/app.slice/cc-probe-c-….service` | **SỐNG** (growth 7) |
+
+Lệnh dừng là `systemctl --user disable --now`, đúng lệnh `cc_service_stop` chạy
+với bridge thật.
+
+**Nhánh A là thứ biến lần chạy này thành một phép đo.** cgroup của nó *chính là*
+cgroup của unit đóng vai bridge, nên việc nó chết chứng minh lệnh dừng thật sự giết
+cả cgroup đó. Không có A thì C sống chẳng chứng minh được gì — có thể chẳng có gì bị
+giết cả. `growth=1` của A cũng khớp đúng dự đoán khi đặt ngưỡng biên 3: đúng một
+nhịp heartbeat lọt vào khe giữa lúc ra lệnh và lúc SIGTERM đáp.
+
+### Khẳng định bị rút lại
+
+Mục G2 và các comment trong `server/updater.js` từng viết: *"`--scope` chạy trong
+cgroup của caller nên chết theo nó"*. **Sai, và nay sai đã được đo.** Scope cũng là
+một unit; unit nằm dưới một slice, không nằm trong unit khác. Nhánh B đo ra là **anh
+em** của unit bridge (`app.slice/…​.scope`) và **sống sót y như C**.
+
+Hệ quả: `--unit` **không** được chọn vì `--scope` sẽ chết. Nó được chọn vì transient
+unit do chính `--user` manager fork ra, nên systemd sở hữu vòng đời tiến trình thay
+vì cái bridge sắp bị dừng, và `--collect` lo phần dọn dẹp. **Đó là toàn bộ khẳng
+định** — không được thổi ngược nó thành một câu chuyện về vị trí cgroup nữa.
+
+Vì vậy nhánh B giữ nguyên trạng thái **chỉ báo cáo, không phán quyết**: kỳ vọng của
+nó không phải là tính chất mà dự án này dựa vào, nên nó không được phép làm đỏ CI
+theo bất kỳ chiều nào.
+
+### Bài học lặp lại lần thứ hai
+
+G2 đã ghi: *"một phép đo chỉ có giá trị nếu nó gọi đúng đường mã mà sản phẩm chạy"*.
+Lần này là biến thể của nó: **một phép đo chỉ có giá trị nếu nó đo cái nó nói là
+đang đo.** Cách duy nhất phát hiện được chuyện `--scope` là bắt probe in ra
+`/proc/self/cgroup` thật của từng nhánh, thay vì suy vị trí cgroup từ việc sống hay
+chết. Suy luận đó đã sai suốt nhiều vòng review mà không ai bắt được, kể cả khi kết
+luận cuối cùng vẫn đúng.
