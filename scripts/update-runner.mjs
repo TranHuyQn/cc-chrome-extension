@@ -80,7 +80,13 @@ function runInstaller() {
       if (logPath) logFd = openSync(logPath, "a");
     } catch { /* logging is best-effort; it must never block the update itself */ }
     const child = spawn(command, args, {
-      env: { ...process.env, CC_CHROME_SOURCE: source },
+      // CC_CHROME_PORT: a systemd-run --user transient unit runs with the
+      // USER MANAGER's environment, not the bridge's, so on a non-default
+      // port an installer that fell back to CC_CHROME_PORT's default (8787)
+      // would silently move the service to the wrong port and the extension
+      // would lose the bridge. Reasoned, not measured — no Linux machine
+      // available to confirm systemd-run drops the caller's environment.
+      env: { ...process.env, CC_CHROME_SOURCE: source, CC_CHROME_PORT: String(port) },
       cwd: process.env.TMPDIR || process.env.TEMP || "/tmp",
       stdio: ["ignore", logFd ?? "ignore", logFd ?? "ignore"],
       windowsHide: true,

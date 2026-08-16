@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   compareVersions, isValidTag, releaseUrls, parseChecksumFile, sha256File, reshapeToCheckout, isCacheFresh, REPO,
-  buildRunnerSpawn,
+  buildRunnerSpawn, updateTaskName,
 } from "../server/updater.js";
 
 let failures = 0;
@@ -160,6 +160,18 @@ check("exactly at the TTL boundary is NOT fresh (< , not <=)",
 check("well past the TTL is not fresh",
   isCacheFresh({ at: 1_000_000 - 5000 }, 1_000_000, 1000) === false);
 
+// --- the task-name sanitiser --------------------------------------------------
+//
+// A dotted systemd unit name parses its trailing segment as the unit TYPE, so
+// "cc-chrome-update-1.2.1-99.service" would not be the unit anyone thinks it
+// is. This used to be inline in server/index.js, on the branch nobody could
+// run, and dropping the .replace() there turned no test red.
+
+check("updateTaskName replaces every dot so the systemd unit type can't be confused",
+  !updateTaskName("1.2.1", 99).includes("."), updateTaskName("1.2.1", 99));
+check("updateTaskName still carries the version and pid, dash-joined",
+  updateTaskName("1.2.1", 99).includes("1-2-1"), updateTaskName("1.2.1", 99));
+
 // --- how the runner is handed over, per platform ----------------------------
 //
 // The runner must not be a descendant of the service, because stopping the
@@ -169,33 +181,65 @@ check("well past the TTL is not fresh",
 // directly. Windows' Stop-CcTask ends in `taskkill /T /F`, which kills
 // descendants by parent PID, and Linux's `systemctl --user disable --now` takes
 // the whole cgroup — detached:true is setsid(), which does not leave a cgroup.
+//
+// Windows does NOT go through `schtasks /create ... /tr ...`: that /tr command
+// line hit schtasks' documented 262-character maximum with a realistic
+// node.exe + install-dir + work-dir path (measured 459-501 chars on the
+// controller's machine, 2026-08-16), so /create silently failed and pressing
+// the update button did nothing at all. It goes through one PowerShell
+// invocation (Register-ScheduledTask + Start-ScheduledTask) instead.
 {
-  const base = { node: "/usr/bin/node", runner: "/inst/update-runner.mjs", args: ["--port", "8787"], taskName: "cc-update-1" };
+  const base = {
+    node: "/usr/bin/node", runner: "/inst/update-runner.mjs", args: ["--port", "8787"],
+    taskName: "cc-update-1", workingDir: "/tmp/cc-update-work",
+  };
 
   const mac = buildRunnerSpawn("darwin", base);
   check("darwin spawns node directly — measured safe under launchctl bootout",
     mac.command === "/usr/bin/node" && mac.args[0] === "/inst/update-runner.mjs", JSON.stringify(mac));
   check("darwin passes the runner's own arguments through",
     mac.args.includes("--port") && mac.args.includes("8787"), JSON.stringify(mac.args));
+  check("darwin is asynchronous — the spawned process IS the runner and must outlive us",
+    mac.sync === false, String(mac.sync));
 
   const linux = buildRunnerSpawn("linux", base);
   check("linux hands the runner to systemd so it gets its own cgroup",
     linux.command === "systemd-run", linux.command);
   check("linux runs it as a user unit, not a scope — a scope stays a child of the caller",
-    linux.args.includes("--user") && linux.args.some((a) => a.startsWith("--unit=")), JSON.stringify(linux.args));
+    linux.args.includes("--user") && linux.args.some((a) => a.startsWith("--unit=")) && !linux.args.includes("--scope"),
+    JSON.stringify(linux.args));
   check("linux lets systemd clean the unit up afterwards",
     linux.args.includes("--collect"), JSON.stringify(linux.args));
   check("linux still ends with node, the runner and its arguments",
     linux.args.includes("/usr/bin/node") && linux.args.includes("/inst/update-runner.mjs") && linux.args.includes("8787"),
     JSON.stringify(linux.args));
+  check("linux is synchronous — systemd-run is a launcher we must wait on and check",
+    linux.sync === true, String(linux.sync));
 
   const win = buildRunnerSpawn("win32", base);
-  check("win32 goes through schtasks so Task Scheduler becomes the parent",
-    win.command === "schtasks", win.command);
-  check("win32 creates the task under the name it was given",
-    win.args.includes("/tn") && win.args.includes("cc-update-1"), JSON.stringify(win.args));
-  check("win32 schedules it to run once, not on a repeating trigger",
-    win.args.includes("/sc") && win.args.includes("ONCE"), JSON.stringify(win.args));
+  check("win32 goes through powershell, not schtasks /create directly",
+    win.command === "powershell", win.command);
+  check("win32 passes -NoProfile -ExecutionPolicy Bypass -Command",
+    win.args[0] === "-NoProfile" && win.args[1] === "-ExecutionPolicy" && win.args[2] === "Bypass" && win.args[3] === "-Command",
+    JSON.stringify(win.args.slice(0, 4)));
+  const winScript = win.args[4];
+  check("win32's script registers a scheduled task",
+    winScript.includes("Register-ScheduledTask"), winScript);
+  check("win32's script starts it in the same invocation, not a separate schtasks /run",
+    winScript.includes("Start-ScheduledTask"), winScript);
+  check("win32's script allows running on battery power",
+    winScript.includes("-AllowStartIfOnBatteries") && winScript.includes("-DontStopIfGoingOnBatteries"), winScript);
+  check("win32's script names the task it was given",
+    winScript.includes("cc-update-1"), winScript);
+  check("win32's script carries the runner path and its own arguments",
+    winScript.includes("/inst/update-runner.mjs") && winScript.includes("--port") && winScript.includes("8787"), winScript);
+  check("win32 is synchronous — powershell is a launcher we must wait on and check",
+    win.sync === true, String(win.sync));
+
+  const winQuoted = buildRunnerSpawn("win32", { ...base, taskName: "cc-up'date" });
+  const quotedScript = winQuoted.args[4];
+  check("win32 doubles a single quote in an interpolated value instead of ending the string early",
+    quotedScript.includes("cc-up''date") && !quotedScript.includes("cc-up'date"), quotedScript);
 
   let badPlatform = null;
   try {

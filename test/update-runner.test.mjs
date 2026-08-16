@@ -404,5 +404,47 @@ async function waitUntil(cond, timeoutMs = 5000) {
   rmSync(home, { recursive: true, force: true });
 }
 
+// --- 9. the installer learns the port through CC_CHROME_PORT too ------------
+//
+// A `systemd-run --user` transient unit runs with the USER MANAGER's own
+// environment, not the bridge's, so on a non-default port an installer that
+// fell back to its own default (8787) would silently move the running service
+// to the wrong port and the extension would lose the bridge. Reasoned, not
+// measured — no Linux machine available to confirm systemd-run drops the
+// caller's environment; what IS measured here is that the runner passes
+// CC_CHROME_PORT to the installer's child process regardless of platform.
+
+{
+  const home = mkdtempSync(join(tmpdir(), "cc-runner-port-env-"));
+  const installDir = join(home, ".cc-chrome-bridge");
+  mkdirSync(installDir, { recursive: true });
+  const source = join(home, "source");
+  mkdirSync(source, { recursive: true });
+  const work = mkdtempSync(join(tmpdir(), "cc-runner-work-port-"));
+  const portLog = join(home, "port.txt");
+
+  // A fake installer that records the env var it was actually given, not the
+  // --port argv the runner itself was invoked with.
+  const installer = join(home, "fake-install.sh");
+  writeFileSync(installer, `#!/bin/sh\necho "$CC_CHROME_PORT" > "${portLog}"\n`);
+  chmodSync(installer, 0o755);
+
+  const version = { value: "5.5.5" };
+  const server = await healthServer(version);
+  const port = server.address().port;
+  await runRunner([
+    "--source", source, "--work", work, "--install-dir", installDir, "--installer", installer,
+    "--port", String(port), "--expect-version", "5.5.5",
+    "--status-file", join(home, "status.json"),
+  ]);
+  server.close();
+
+  const recordedPort = existsSync(portLog) ? readFileSync(portLog, "utf8").trim() : "";
+  check("the installer is invoked with CC_CHROME_PORT matching the --port it was given",
+    recordedPort === String(port), `expected "${port}", got "${recordedPort}"`);
+  rmSync(home, { recursive: true, force: true });
+  rmSync(work, { recursive: true, force: true });
+}
+
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

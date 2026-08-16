@@ -113,6 +113,23 @@ export function reshapeToCheckout(extractedDir, targetDir) {
   }
 }
 
+// Load-bearing, not cosmetic: a dotted systemd unit name parses its trailing
+// segment as the unit TYPE, so "cc-chrome-update-1.2.1-99.service" is not the
+// unit anyone thinks it is. Moved here (out of server/index.js) so a test can
+// catch a dropped .replace() — it used to live inline, on the branch nobody
+// could run, and deleting the replace turned no test red.
+export function updateTaskName(version, pid) {
+  return `cc-chrome-update-${version.replace(/\./g, "-")}-${pid}`;
+}
+
+// Every value interpolated into a PowerShell single-quoted string must have
+// its own `'` doubled, or the string ends early and whatever follows is
+// parsed as code. Used for every win32 interpolation below, including the
+// task name.
+function psQuote(value) {
+  return String(value).replace(/'/g, "''");
+}
+
 // How the updater is launched so that stopping the service does not kill it.
 //
 // Takes the platform as an argument, like buildSpawn() in server/agent.js does,
@@ -125,27 +142,59 @@ export function reshapeToCheckout(extractedDir, targetDir) {
 //   Windows `Stop-CcTask` (taskkill /T /F) -> kills descendants by parent PID
 //   Linux   `systemctl --user disable --now` -> kills the whole cgroup; NOT measured
 //            on real hardware (no Linux machine), reasoned from KillMode=control-group
-export function buildRunnerSpawn(platform, { node, runner, args, taskName }) {
+//
+// `sync` tells the caller whether the returned command IS the runner (must be
+// launched and let go) or a short-lived LAUNCHER that hands the runner to a
+// supervisor and exits (must be waited for, so a failure to hand over is never
+// silent). On darwin the spawned process is the runner itself and must outlive
+// us, so it can only be asynchronous. On linux and win32 the spawned process is
+// `systemd-run` / `powershell` — it registers the real runner with a
+// supervisor (systemd, Task Scheduler) and returns, so we can and must wait for
+// its exit code.
+export function buildRunnerSpawn(platform, { node, runner, args, taskName, workingDir }) {
   if (platform === "darwin") {
-    return { command: node, args: [runner, ...args] };
+    return { command: node, args: [runner, ...args], sync: false };
   }
   if (platform === "linux") {
     // --unit, not --scope: a scope runs in the CALLER's cgroup and would die
     // with it. --unit asks systemd to fork the process itself, giving it its
     // own cgroup and its own lifetime. --collect removes the unit when it exits.
+    // workingDir is not used here — the unit gets systemd's own default cwd,
+    // which is fine since update-runner.mjs resolves all its own paths from
+    // absolute --args.
     return {
       command: "systemd-run",
       args: ["--user", "--collect", `--unit=${taskName}`, node, runner, ...args],
+      sync: true,
     };
   }
   if (platform === "win32") {
-    // Task Scheduler becomes the parent, so taskkill /T against the bridge
-    // cannot reach the runner. /f overwrites a stale task of the same name;
-    // the runner deletes the task itself when it finishes.
-    const command = [node, runner, ...args].map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(" ");
+    // Register-ScheduledTask + Start-ScheduledTask in one PowerShell process,
+    // not `schtasks /create ... /tr ...`: the /tr command-line string hits
+    // schtasks' documented 262-character maximum well before a realistic
+    // node.exe + install-dir + work-dir path does (measured 459-501 chars on
+    // this machine), so /create silently fails, stdio is ignored and nothing
+    // reads the exit code — pressing the update button did nothing at all. Settings
+    // mirror scripts/service-task.ps1's Register-CcTask: AllowStartIfOnBatteries
+    // / DontStopIfGoingOnBatteries (schtasks defaults block a task on battery),
+    // no ExecutionTimeLimit, MultipleInstances IgnoreNew. LogonType Interactive
+    // + RunLevel Limited is what lets this register without administrator
+    // rights, same reasoning as service-task.ps1. Deliberately no -Trigger: a
+    // trigger-less task is legal and runs on demand only, which also removes
+    // the "one-shot trigger already in the past never fires" race between a
+    // separate /create and /run.
+    const argString = [runner, ...args].map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(" ");
+    const script = [
+      `$a = New-ScheduledTaskAction -Execute '${psQuote(node)}' -Argument '${psQuote(argString)}' -WorkingDirectory '${psQuote(workingDir)}'`,
+      "$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew",
+      '$p = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\\$env:USERNAME" -LogonType Interactive -RunLevel Limited',
+      `Register-ScheduledTask -TaskName '${psQuote(taskName)}' -Action $a -Settings $s -Principal $p -Force | Out-Null`,
+      `Start-ScheduledTask -TaskName '${psQuote(taskName)}'`,
+    ].join("; ");
     return {
-      command: "schtasks",
-      args: ["/create", "/tn", taskName, "/tr", command, "/sc", "ONCE", "/st", "00:00", "/f"],
+      command: "powershell",
+      args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+      sync: true,
     };
   }
   throw new Error(`Không hỗ trợ cập nhật tự động trên nền tảng '${platform}'.`);

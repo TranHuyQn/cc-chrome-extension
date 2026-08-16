@@ -24,12 +24,12 @@ import { readFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync, rmSync
 import { join, dirname } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { z } from "zod";
 import { TokenStore } from "./tokens.js";
 import { AgentSession, claudeBinFromEnv } from "./agent.js";
 import { isLoopbackHost, isLoopbackAddress, forwardedHeadersIn } from "./loopback.js";
-import { compareVersions, isValidTag, releaseUrls, parseChecksumFile, sha256File, reshapeToCheckout, isCacheFresh, buildRunnerSpawn, LATEST_RELEASE_API } from "./updater.js";
+import { compareVersions, isValidTag, releaseUrls, parseChecksumFile, sha256File, reshapeToCheckout, isCacheFresh, buildRunnerSpawn, updateTaskName, LATEST_RELEASE_API } from "./updater.js";
 
 const PORT = Number(process.env.CC_CHROME_PORT || 8787);
 // Loopback by default: the mode this replaced (stdio) bound 127.0.0.1
@@ -1269,15 +1269,28 @@ async function mainHttp() {
     }
   }
 
-  // Detached and unref'd: this child must outlive the process spawning it,
-  // because the installer's first act is to stop the service that IS this
-  // process. stdio is fully detached for the same reason — a pipe to a dead
-  // parent would kill it.
+  // On darwin, `command`/`args` from buildRunnerSpawn IS the runner: detached
+  // and unref'd, because it must outlive the process spawning it — the
+  // installer's first act is to stop the service that IS this process. stdio
+  // is fully detached for the same reason — a pipe to a dead parent would
+  // kill it. `cwd` here is the LAUNCHER's cwd (on linux/win32 that means the
+  // short-lived systemd-run/powershell process, not the runner itself — the
+  // runner's own cwd comes from -WorkingDirectory on win32 and from systemd's
+  // default on linux).
+  //
+  // On linux and win32, `command`/`args` is a short-lived LAUNCHER that hands
+  // the runner to a supervisor (systemd, Task Scheduler) and exits, so it is
+  // run synchronously and its exit code is checked: a failed handover must be
+  // reported to the panel, not silently leave the bridge running with no
+  // update in flight and no explanation. A failed *darwin* spawn can only be
+  // discovered later, from the child's own 'error' event — by then this
+  // function has already returned, so it writes the failure straight into
+  // UPDATE_STATUS_FILE for the panel's next update_check to pick up.
   function spawnUpdateRunner({ source, work, version }) {
     const installer = process.platform === "win32"
       ? join(INSTALL_DIR, "install.ps1")
       : join(INSTALL_DIR, "install.sh");
-    const taskName = `cc-chrome-update-${version.replace(/\./g, "-")}-${process.pid}`;
+    const taskName = updateTaskName(version, process.pid);
     const runnerArgs = [
       "--source", source,
       "--work", work,
@@ -1288,28 +1301,50 @@ async function mainHttp() {
       "--status-file", UPDATE_STATUS_FILE,
       "--task-name", taskName,
     ];
-    const { command, args } = buildRunnerSpawn(process.platform, {
+    const { command, args, sync } = buildRunnerSpawn(process.platform, {
       node: process.execPath,
       runner: join(INSTALL_DIR, "update-runner.mjs"),
       args: runnerArgs,
       taskName,
+      workingDir: tmpdir(),
     });
-    const child = spawn(command, args, {
-      detached: true,
-      stdio: "ignore",
-      cwd: tmpdir(),
-      windowsHide: true,
-    });
-    child.unref();
 
-    // schtasks /create only registers the task; it still has to be started.
-    // This second call is short-lived and its death is harmless — by the time
-    // the installer stops the service, Task Scheduler already owns the runner.
-    if (process.platform === "win32") {
-      const starter = spawn("schtasks", ["/run", "/tn", taskName], {
-        detached: true, stdio: "ignore", windowsHide: true,
+    if (!sync) {
+      const child = spawn(command, args, {
+        detached: true,
+        stdio: "ignore",
+        cwd: tmpdir(),
+        windowsHide: true,
       });
-      starter.unref();
+      child.on("error", (err) => {
+        // No uncaughtException handler exists anywhere in this file, so an
+        // 'error' event with no listener would throw out of the event loop
+        // and take the bridge down — exactly the outcome this whole feature
+        // exists to avoid. startUpdate()'s try has already returned by the
+        // time this fires, so the only way to tell the panel is the status
+        // file its next update_check reads.
+        try {
+          writeFileSync(UPDATE_STATUS_FILE, JSON.stringify({
+            ok: false, step: "handover-failed", version,
+            reason: `Không bàn giao được tiến trình cập nhật: ${err.message}`,
+            at: new Date().toISOString(),
+          }, null, 2));
+        } catch { /* a status we cannot write must not throw again */ }
+      });
+      child.unref();
+      return;
+    }
+
+    // linux / win32: `command` is a short-lived launcher (systemd-run,
+    // powershell), not the runner. Wait for it and read its exit code —
+    // a non-zero one (e.g. systemd-run missing on a no-systemd install, see
+    // scripts/install.sh:265-276) must surface as a thrown Error so
+    // startUpdate()'s catch cleans up `work` and reports the failure to the
+    // panel, instead of leaving the bridge silently stuck mid-update.
+    const result = spawnSync(command, args, { stdio: "ignore", windowsHide: true, timeout: 30000 });
+    if (result.error || result.status !== 0) {
+      const detail = result.error ? result.error.message : `mã thoát ${result.status}`;
+      throw new Error(`Không bàn giao được tiến trình cập nhật cho ${command}: ${detail}.`);
     }
   }
 
