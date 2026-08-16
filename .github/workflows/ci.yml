@@ -54,6 +54,11 @@ jobs:
   # that lies. See scripts/probe-linux-handover.sh for the full design.
   linux-update-handover:
     runs-on: ubuntu-latest
+    # The probe's own sleeps are bounded (well under a minute total), but
+    # `systemctl --user` against a half-dead bus is not, and the default
+    # job timeout is six hours — this keeps a stuck bus from silently
+    # eating a runner for hours instead of failing loudly.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       # A GitHub runner has no login session, so `systemctl --user` normally

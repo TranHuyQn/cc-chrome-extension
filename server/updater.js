@@ -156,9 +156,22 @@ export function buildRunnerSpawn(platform, { node, runner, args, taskName, worki
     return { command: node, args: [runner, ...args], sync: false };
   }
   if (platform === "linux") {
-    // --unit, not --scope: a scope runs in the CALLER's cgroup and would die
-    // with it. --unit asks systemd to fork the process itself, giving it its
-    // own cgroup and its own lifetime. --collect removes the unit when it exits.
+    // --unit, not --scope. What is actually known: a transient --unit is
+    // forked by the systemd --user manager itself, giving it its own cgroup
+    // and its own lifetime independent of whatever spawned it — that is the
+    // property this needs. --collect removes the unit once it exits.
+    // --scope is deliberately not used here, and not because its cgroup
+    // placement relative to the caller is known to be worse — it isn't
+    // measured. systemd-run(1) documents --scope units as living under a
+    // slice (app.slice by default for --user), the same place a --unit
+    // service lives, which is a real reason to doubt the "dies with the
+    // caller" reasoning this comment used to give. --unit stays the choice
+    // because its lifetime and cleanup semantics (forked by the manager,
+    // not migrated into by the caller; --collect handles teardown) are the
+    // ones this feature was designed around, not because --scope was ruled
+    // out by measurement. scripts/probe-linux-handover.sh's arm B exists to
+    // supply that measurement; see its own comments for the current state
+    // of that question.
     // workingDir is not used here — the unit gets systemd's own default cwd,
     // which is fine since update-runner.mjs resolves all its own paths from
     // absolute --args.

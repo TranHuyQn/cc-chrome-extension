@@ -205,7 +205,7 @@ check("updateTaskName still carries the version and pid, dash-joined",
   const linux = buildRunnerSpawn("linux", base);
   check("linux hands the runner to systemd so it gets its own cgroup",
     linux.command === "systemd-run", linux.command);
-  check("linux runs it as a user unit, not a scope — a scope stays a child of the caller",
+  check("linux runs it as a user unit, not a scope — see server/updater.js for what is and isn't measured about why",
     linux.args.includes("--user") && linux.args.some((a) => a.startsWith("--unit=")) && !linux.args.includes("--scope"),
     JSON.stringify(linux.args));
   check("linux lets systemd clean the unit up afterwards",
