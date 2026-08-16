@@ -169,18 +169,29 @@ check("well past the TTL is not fresh",
 
 check("updateTaskName replaces every dot so the systemd unit type can't be confused",
   !updateTaskName("1.2.1", 99).includes("."), updateTaskName("1.2.1", 99));
-check("updateTaskName still carries the version and pid, dash-joined",
+// The pid half is asserted separately and by shape, not just by name: deleting
+// `-${pid}` from updateTaskName left this check green, and on Windows that
+// would put two concurrent runners on one Task Scheduler task name.
+check("updateTaskName carries the version, dash-joined",
   updateTaskName("1.2.1", 99).includes("1-2-1"), updateTaskName("1.2.1", 99));
+check("updateTaskName ends with the pid, so two concurrent runners cannot collide",
+  updateTaskName("1.2.1", 99).endsWith("-99") && updateTaskName("1.2.1", 100).endsWith("-100")
+  && updateTaskName("1.2.1", 99) !== updateTaskName("1.2.1", 100),
+  `${updateTaskName("1.2.1", 99)} / ${updateTaskName("1.2.1", 100)}`);
 
 // --- how the runner is handed over, per platform ----------------------------
 //
 // The runner must not be a descendant of the service, because stopping the
 // service is the installer's first act and every platform's stop kills
-// differently. Measured 2026-08-16: macOS's `launchctl bootout` leaves a
-// detached child running (heartbeat 18 -> 26), so darwin keeps spawning
-// directly. Windows' Stop-CcTask ends in `taskkill /T /F`, which kills
-// descendants by parent PID, and Linux's `systemctl --user disable --now` takes
-// the whole cgroup — detached:true is setsid(), which does not leave a cgroup.
+// differently. Exactly one of the three claims below is a measurement, and
+// server/updater.js's own header says which is which — do not upgrade the other
+// two by repeating them here. MEASURED 2026-08-16: macOS's `launchctl bootout`
+// leaves a detached child running (heartbeat 18 -> 26), so darwin keeps
+// spawning directly. REASONED: Windows' Stop-CcTask ends in `taskkill /T /F`,
+// which kills descendants by parent PID (the Windows probe that did run
+// measured a different command), and Linux's `systemctl --user disable --now`
+// takes the whole cgroup — detached:true is setsid(), which does not leave a
+// cgroup — with CI's linux-update-handover job as the only measurement of it.
 //
 // Windows does NOT go through `schtasks /create ... /tr ...`: that /tr command
 // line hit schtasks' documented 262-character maximum with a realistic

@@ -514,7 +514,18 @@ với file checksum GitHub phát hành kèm bản đó trước khi đụng đ�
 trên máy — tải hỏng, tải thiếu hay bị sửa dọc đường đều bị chặn ở bước này.
 Qua được thì bridge tự sao lưu bản đang chạy, cài bản mới đè lên, khởi động
 lại dịch vụ nền, rồi tự kiểm tra bản mới có sống dậy được không. **Nếu bridge
-mới không lên được, nó tự khôi phục lại bản cũ** — không cần bạn can thiệp gì.
+mới không lên được, nó tự khôi phục lại bản cũ** — chép nguyên bản sao lưu về
+chỗ cũ, và nếu lúc đó dịch vụ nền đang không chạy thì tự bật lại dịch vụ luôn,
+rồi chờ `/health` trả lời để chắc chắn bridge đã sống lại.
+
+Trường hợp duy nhất phải tự tay xử lý: bước bật lại dịch vụ ở trên cũng thất
+bại. Khi đó khung chat sẽ báo thẳng "Chưa khởi động lại được dịch vụ nền (…)",
+nhưng nếu bridge không lên thì khung chat cũng không mở được để đọc dòng đó —
+nên cứ thấy khung chat tắt ngóm và không tự quay lại sau vài phút thì chạy lại
+lệnh cài ở mục [Cài đặt](#cài-đặt) (nó cài đè, giữ nguyên token, và dựng lại
+dịch vụ nền). Muốn xem chuyện gì đã xảy ra: `~/.ccchrome-update.json` là kết
+quả lần cập nhật gần nhất, `~/.ccchrome-update.log` là toàn bộ output của trình
+cài đặt, và bản cũ (nếu chưa khôi phục xong) nằm ở `~/.cc-chrome-bridge.bak`.
 
 Cài xong (thành công), khung chat báo "Đã cài x.y.z. Nạp lại extension để dùng
 giao diện mới." kèm nút **Nạp lại extension** — **phải bấm nút này** thì Chrome

@@ -81,10 +81,23 @@ cc_log_hint() {
 #   claude is not installed yet — server/agent.js then falls back to the bare
 #   name, and its ENOENT message tells the user to install the CLI and re-run
 #   this installer.
+#
+#   An inherited CC_CHROME_CLAUDE_BIN wins over the `command -v` lookup, and
+#   the in-panel update path is why. That update runs this script from a child
+#   of the bridge, which launchd/systemd started with the OS default PATH —
+#   measured on the owner's machine: PATH=/usr/bin:/bin:/usr/sbin:/sbin, where
+#   `command -v claude` finds nothing. Regenerating the unit from that lookup
+#   would silently DROP the value the original install found, the update would
+#   still be declared a success (the new /health answers) and the backup
+#   deleted, and every panel turn from the next start on would fail with
+#   "spawn claude ENOENT". The bridge's own environment carries
+#   CC_CHROME_CLAUDE_BIN — this unit is what put it there — so preferring it
+#   keeps an update from losing what an install already got right. A user with
+#   the variable exported in their shell likewise gets the binary they named.
 cc_write_unit() {
   local dir="$1" port="$2" unit label claude_bin
   unit="$(cc_unit_path)"; label="$(cc_unit_label)"
-  claude_bin="$(command -v claude || true)"
+  claude_bin="${CC_CHROME_CLAUDE_BIN:-$(command -v claude || true)}"
   mkdir -p "$(dirname "$unit")" "${dir}/logs"
   if [ "$(cc_platform)" = macos ]; then
     cat > "$unit" <<PLIST

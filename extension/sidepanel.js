@@ -552,8 +552,10 @@ function handle(msg) {
       if (updateState === "reload") break;
       // A panel that just connected asks once; nothing here is journalled,
       // because it describes the machine right now, not the conversation.
-      // `lastResult.step` may be "rolled-back", "already-running", "crashed" or
-      // "failed-no-backup" -- all are failures, so `ok === false` is the only
+      // `lastResult.step` may be "rolled-back", "already-running", "crashed",
+      // "failed-no-backup" or "handover-failed" (the last one written by the
+      // bridge itself, not the runner, when the runner could not be spawned at
+      // all) -- all are failures, so `ok === false` is the only
       // distinction that matters, and `reason` carries the full explanation
       // (recovery paths included) for every one of them.
       //

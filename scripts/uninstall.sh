@@ -196,7 +196,14 @@ done
 #    nguyên vẹn nếu máy mất điện hay tiến trình bị kill giữa chừng, và nếu
 #    không dọn thì nó chặn luôn "rmdir" bên dưới, khiến cả thư mục cài đặt
 #    không bao giờ biến mất dù script đã báo "gỡ xong".
-for sub in server extension logs ccchrome.md tokens.json uninstall.sh service-unit.sh .new; do
+#
+#    update-runner.mjs, install.sh và install.ps1 là ba file install.sh chép vào
+#    đây cho nút "Cập nhật" trong khung chat. Thiếu chúng trong danh sách này
+#    thì chúng sống sót qua lần gỡ, "rmdir" cuối script im lặng thất bại, và cả
+#    thư mục cài đặt ở lại — đúng thứ mà "chạy một lần, không để lại gì" phải
+#    ngăn. Danh sách này phải khớp với danh sách install.sh cài vào.
+for sub in server extension logs ccchrome.md tokens.json uninstall.sh service-unit.sh \
+           update-runner.mjs install.sh install.ps1 .new; do
   # [ -e ] đi theo symlink — một symlink gãy (trỏ tới đích không còn tồn tại)
   # sẽ báo "không có" và bị bỏ qua mãi mãi; [ -L ] bắt luôn trường hợp đó.
   if [ -e "$INSTALL_DIR/$sub" ] || [ -L "$INSTALL_DIR/$sub" ]; then

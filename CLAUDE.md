@@ -410,8 +410,23 @@ attached them.
   has to be: the installer's first act is to stop the service, which kills the
   bridge mid-command. It runs detached, with a cwd outside the install directory
   (on Windows, running inside the directory being replaced is the surest way to
-  lock it), and it never starts the service itself — launchd `KeepAlive`,
-  systemd `Restart=always` and the repeating Task Scheduler trigger each do that.
+  lock it). What brings the bridge back on the **success** path is the
+  installer's own final step, not a supervisor: launchd `KeepAlive`, systemd
+  `Restart=always` and the repeating Task Scheduler trigger only cover a crash
+  of a service that is still loaded, and the installer's stop step is exactly
+  what unloads it (`launchctl bootout` unloads the job, `systemctl --user
+  disable --now` removes the wants link, `Stop-CcTask` calls
+  `Disable-ScheduledTask` before killing). So on the **rollback** path, where no
+  installer step will ever run again, the runner re-arms and starts the service
+  itself — it sources the RESTORED `service-unit.sh` / `service-task.ps1` (from
+  the backup, so it matches the files it launches) and calls `cc_service_start` /
+  `Register-CcTask` + `Start-CcTask`. It probes `/health` first and skips the
+  restart when something is already answering: an installer that refused at a
+  preflight never stopped the service, and bouncing a healthy bridge there —
+  `bootout` followed by a `bootstrap` that fails — would create the outage this
+  is meant to prevent. The restart is best effort in both directions: a failure
+  is written into the status record AND into the Vietnamese `reason` sentence
+  the panel shows, and it never changes the rollback outcome already determined.
   Rollback restores `~/.cc-chrome-bridge.bak` wholesale rather than undoing
   individual changes, because an installer deletes files as well as replacing
   them and a file-by-file repair silently misses the deletions. Measured on real
@@ -419,6 +434,27 @@ attached them.
   task (9 heartbeat lines logged before the stop, 17 after), and `install.ps1`
   does accept a `CC_CHROME_SOURCE` pointing at a checkout-shaped directory (the
   bridge was installed this way and reported `ok:true, version 1.1.0`).
+- **The bridge's own PATH is not a usable PATH for an installer.** Measured on
+  the owner's macOS machine, on the live service process:
+  `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, with node at
+  `~/.nvm/versions/node/v22.23.1/bin/node` — under that PATH both
+  `command -v node` and `command -v claude` come back NOT FOUND. The runner
+  therefore prepends `dirname(process.execPath)` to every child's PATH
+  (`childEnv()` in `scripts/update-runner.mjs`); without it `install.sh` dies on
+  its own `command -v node` preflight on every machine whose node came from
+  nvm/fnm/volta/homebrew, which is most of them. The second half of the same
+  hazard is quieter: `cc_write_unit` regenerates the unit with
+  `command -v claude`, which resolves empty under that PATH and silently drops
+  `CC_CHROME_CLAUDE_BIN` — the update still reports success, the backup is
+  deleted, and every panel turn from the next start on fails with `spawn claude
+  ENOENT`. So `cc_write_unit` (and `Write-CcLauncher`) prefer an inherited
+  `CC_CHROME_CLAUDE_BIN`, and `server/index.js` forwards the running bridge's
+  value on argv as `--claude-bin` rather than trusting inheritance: only the
+  darwin branch spawns the runner as the bridge's own child, and neither the
+  systemd `--user` manager nor Task Scheduler is known to pass the bridge's
+  environment along. `test/update-runner.test.mjs` drives the real `install.sh`
+  under exactly that PATH, with no `claude` reachable on it, and asserts the
+  regenerated unit still carries the path.
 - The release tarball must carry `update-runner.mjs`, `install.sh` and
   `install.ps1` inside it, **and** both installers must copy them into
   `$INSTALL_DIR`, because that is where `spawnUpdateRunner` reads them from —
@@ -426,7 +462,11 @@ attached them.
   `test/install.test.mjs` guards this half by running a real install. A
   release missing them from the tarball installs fine and then cannot ever
   self-update — `test/build.test.mjs` asserts all three are in the tarball for
-  that reason.
+  that reason. `scripts/uninstall.sh`'s deletion loop must list them too: its
+  trailing `rmdir "$INSTALL_DIR"` is `|| true`, so any file the loop does not
+  know about leaves the whole install directory behind while the script still
+  reports success. The assertion that catches that is `!existsSync(installDir)`
+  after an uninstall, not another per-file check.
 - The updater must not be a descendant of the service, and each platform kills
   differently. **Exactly one of the three branches rests on a measurement; read
   the per-platform note before trusting any of them.** Whatever is claimed here
@@ -448,11 +488,18 @@ attached them.
   - **Linux — reasoned, and measured only in CI.** `systemctl --user disable
     --now` takes the whole cgroup, and `detached: true` is `setsid()`, which
     changes session, not cgroup — so it goes through
-    `systemd-run --user --collect --unit=…`; a `--scope` would stay in the
-    caller's cgroup and die with it. There is no Linux machine here; the
-    `linux-handover` job in `.github/workflows/ci.yml` runs the three-arm probe
-    on `ubuntu-latest`, where a plain detached child and a `--scope` must both
-    die and only `--unit` may survive.
+    `systemd-run --user --collect --unit=…`. `--scope` is **not** ruled out by
+    measurement, and the belief that it "stays in the caller's cgroup and dies
+    with it" was retracted in `0d3d6cb`: `systemd-run(1)` documents a scope as a
+    unit under a slice, i.e. likely a sibling of the bridge unit. `--unit` stays
+    the choice for its lifetime and cleanup semantics (forked by the manager,
+    `--collect` tears it down), not because `--scope` was tested and failed.
+    There is no Linux machine here; the `linux-update-handover` job in
+    `.github/workflows/ci.yml` runs the three-arm probe on `ubuntu-latest`:
+    arm A (plain detached child) is the hard control and must DIE, arm C
+    (`--unit`) is the property under test and must SURVIVE, and arm B
+    (`--scope`) is **reported only** — it cannot fail the run in either
+    direction, precisely because nobody here has measured what it should do.
 
   `buildRunnerSpawn` takes the platform as an argument, like `buildSpawn` in
   `server/agent.js`, precisely so the branches nobody can run here are still

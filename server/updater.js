@@ -137,11 +137,21 @@ function psQuote(value) {
 // than usual, because the branch that was wrong last time was the one nobody
 // could run.
 //
-// Measured 2026-08-16, each against the command the installer actually runs:
-//   macOS   `launchctl bootout`            -> detached child SURVIVES (18 -> 26 heartbeats)
-//   Windows `Stop-CcTask` (taskkill /T /F) -> kills descendants by parent PID
-//   Linux   `systemctl --user disable --now` -> kills the whole cgroup; NOT measured
-//            on real hardware (no Linux machine), reasoned from KillMode=control-group
+// What is known about each platform's stop, stated against the command the
+// installer actually runs — and exactly one of the three is a measurement:
+//   macOS   MEASURED 2026-08-16. `launchctl bootout` -> a detached child
+//           SURVIVES (heartbeat 18 -> 26).
+//   Windows REASONED, not measured. `Stop-CcTask` ends in
+//           `taskkill /pid <bridge> /T /F`, which kills descendants by parent
+//           PID. The probe that ran on real hardware measured
+//           `Stop-ScheduledTask`, which is NOT the command install.ps1 calls,
+//           so it answered a question nobody asked;
+//           scripts/probe-windows-update.ps1 exists to settle this one and has
+//           not been run.
+//   Linux   REASONED, and measured only in CI. `systemctl --user disable --now`
+//           takes the whole cgroup (KillMode=control-group); there is no Linux
+//           machine here, so the `linux-update-handover` job runs
+//           scripts/probe-linux-handover.sh on every push instead.
 //
 // `sync` tells the caller whether the returned command IS the runner (must be
 // launched and let go) or a short-lived LAUNCHER that hands the runner to a

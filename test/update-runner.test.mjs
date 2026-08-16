@@ -135,6 +135,11 @@ async function waitUntil(cond, timeoutMs = 5000) {
   check("it records the rollback", record.ok === false && record.step === "rolled-back", JSON.stringify(record));
   check("and says why, in words a user can act on", typeof record.reason === "string" && record.reason.length > 10,
     JSON.stringify(record));
+  // The installer here exits 0 — it really did install — and only the health
+  // check disagreed. This is the ONE case the "cài xong nhưng bridge không lên"
+  // wording describes, and test 5 covers the case it used to describe wrongly.
+  check("an install that completed and then failed to come up is described as exactly that",
+    /cài xong nhưng bridge không lên/.test(record.reason || ""), record.reason);
   check("the payload work dir is cleaned up even on rollback", !existsSync(work), work);
   rmSync(home, { recursive: true, force: true });
   rmSync(work, { recursive: true, force: true });
@@ -276,6 +281,13 @@ async function waitUntil(cond, timeoutMs = 5000) {
     !existsSync(`${installDir}.bak`), `${installDir}.bak`);
   check("the install directory still holds the old contents after rollback",
     readFileSync(join(installDir, "server", "index.js"), "utf8") === "// OLD");
+  // The installer exited non-zero without installing anything — which is what a
+  // failed preflight looks like from here, and (per the F1 PATH bug) the case
+  // users actually hit. Telling them "Bản x cài xong nhưng bridge không lên"
+  // describes an install that never started, and contradicts the log the same
+  // sentence points at.
+  check("an installer that refused is not described as an install that completed",
+    /không cài gì/.test(record.reason || "") && !/cài xong/.test(record.reason || ""), record.reason);
 
   rmSync(home, { recursive: true, force: true });
   rmSync(work, { recursive: true, force: true });
@@ -535,6 +547,261 @@ async function waitUntil(cond, timeoutMs = 5000) {
     (secondLog.match(/installer ran/g) || []).length === 1, JSON.stringify(secondLog));
 
   rmSync(home, { recursive: true, force: true });
+}
+
+// --- 12. the installer inherits a PATH that can actually find node ----------
+//
+// The bridge runs under launchd/systemd with the OS default PATH. Measured on
+// the owner's macOS machine, on the live service process:
+//
+//   bridge pid 81706   PATH=/usr/bin:/bin:/usr/sbin:/sbin
+//   which node         /Users/…/.nvm/versions/node/v22.23.1/bin/node
+//   under that PATH:   command -v node   -> NOT FOUND
+//                      command -v claude -> NOT FOUND
+//
+// scripts/install.sh's first preflight is `command -v node >/dev/null || die`,
+// so with the runner passing that PATH through untouched, the update died on
+// every machine whose node came from nvm/fnm/volta/homebrew — which is most of
+// them. The machine stayed safe (the die is before the service stop) and the
+// feature could never work once.
+//
+// The first check is the deterministic one: it reads the PATH the installer was
+// actually handed, so it means the same thing on a machine whose node happens
+// to sit in /usr/bin as on one where it does not. The second is the property
+// itself, and test 13 runs it against the real installer.
+
+if (process.platform === "win32") {
+  console.log("SKIP  tests 12-15 drive POSIX shells and PATHs; the win32 branch is not exercised here");
+} else {
+  const SERVICE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"; // the measured value above
+  const nodeDir = dirname(process.execPath);
+
+  {
+    const home = mkdtempSync(join(tmpdir(), "cc-runner-path-"));
+    const installDir = join(home, ".cc-chrome-bridge");
+    mkdirSync(installDir, { recursive: true });
+    const source = join(home, "source");
+    mkdirSync(source, { recursive: true });
+    const work = mkdtempSync(join(tmpdir(), "cc-runner-work-path-"));
+
+    const pathLog = join(home, "path.txt");
+    const nodeLog = join(home, "node.txt");
+    const claudeLog = join(home, "claude.txt");
+    const installer = join(home, "fake-install.sh");
+    writeFileSync(
+      installer,
+      `#!/bin/sh
+echo "$PATH" > "${pathLog}"
+command -v node > "${nodeLog}" 2>&1 || echo "NOT FOUND" > "${nodeLog}"
+echo "[$CC_CHROME_CLAUDE_BIN]" > "${claudeLog}"
+`,
+    );
+    chmodSync(installer, 0o755);
+
+    const version = { value: "3.3.3" };
+    const server = await healthServer(version);
+    await runRunner([
+      "--source", source, "--work", work, "--install-dir", installDir, "--installer", installer,
+      "--port", String(server.address().port), "--expect-version", "3.3.3",
+      "--status-file", join(home, "status.json"),
+      "--claude-bin", "/opt/measured/bin/claude",
+    ], { PATH: SERVICE_PATH });
+    server.close();
+
+    const recordedPath = existsSync(pathLog) ? readFileSync(pathLog, "utf8").trim() : "";
+    const recordedNode = existsSync(nodeLog) ? readFileSync(nodeLog, "utf8").trim() : "";
+    const recordedClaude = existsSync(claudeLog) ? readFileSync(claudeLog, "utf8").trim() : "";
+
+    check("the installer's PATH starts with the directory of the node running the runner",
+      recordedPath.split(":")[0] === nodeDir, `expected "${nodeDir}" first, got "${recordedPath}"`);
+    check("the service's own PATH is kept behind it, not replaced",
+      recordedPath.endsWith(SERVICE_PATH), recordedPath);
+    check("so the installer's `command -v node` preflight resolves a real node",
+      recordedNode.startsWith("/") && existsSync(recordedNode), recordedNode || "(installer never ran)");
+    // Inheritance alone cannot carry this: only the darwin branch spawns the
+    // runner as a child of the bridge — linux hands it to the systemd --user
+    // manager and win32 to Task Scheduler.
+    check("--claude-bin reaches the installer as CC_CHROME_CLAUDE_BIN",
+      recordedClaude === "[/opt/measured/bin/claude]", recordedClaude);
+
+    rmSync(home, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
+
+  // --- 13. the REAL installer, run the way the service would run it ---------
+  //
+  // Test 12 proves what the child is handed; this proves the thing that failed.
+  // scripts/install.sh runs for real, from this checkout, into a throwaway HOME,
+  // with the service stop/start skipped — under the measured service PATH, with
+  // no `claude` reachable anywhere on it. Both halves of the F1 fix have to hold
+  // for this to pass: node must be findable (or the preflight dies before
+  // anything is created) and the regenerated unit must keep the claude path it
+  // can no longer look up.
+
+  {
+    const home = mkdtempSync(join(tmpdir(), "cc-runner-realinstall-"));
+    const installDir = join(home, ".cc-chrome-bridge");
+    mkdirSync(installDir, { recursive: true });
+    // Something to back up, and proof the assertions below are about THIS run:
+    // server/ does not exist until install.sh creates it.
+    writeFileSync(join(installDir, "marker"), "pre-existing install\n");
+    // Never the checkout itself: the runner deletes --work when the installer
+    // returns.
+    const work = mkdtempSync(join(tmpdir(), "cc-runner-work-realinstall-"));
+
+    const version = { value: "9.9.9" };
+    const server = await healthServer(version);
+    const status = join(home, "status.json");
+    const { code } = await runRunner([
+      "--source", root, "--work", work, "--install-dir", installDir,
+      "--installer", join(root, "scripts", "install.sh"),
+      "--port", String(server.address().port), "--expect-version", "9.9.9",
+      "--status-file", status,
+      "--claude-bin", "/opt/measured/bin/claude",
+    ], { PATH: SERVICE_PATH, HOME: home, CC_CHROME_SKIP_SERVICE: "1" });
+    server.close();
+
+    // Read the installer's OWN output, not the runner's exit code: the runner
+    // exits 0 whenever /health reports the expected version, which this fake
+    // health server does no matter what the installer did. `code === 0` was
+    // green with the PATH fix removed and the install dead — the exact shape of
+    // "an assertion that cannot fail" this repo has shipped before.
+    const installLog = existsSync(join(home, ".ccchrome-update.log"))
+      ? readFileSync(join(home, ".ccchrome-update.log"), "utf8")
+      : "";
+    check("the real install.sh runs to its end under the service's minimal PATH",
+      /ws:\/\/127\.0\.0\.1:/.test(installLog) && !/chưa có 'node'/.test(installLog),
+      installLog.slice(-500) || "(installer produced no output)");
+    check("the runner then reports success", code === 0, String(code));
+    check("it actually installed the server tree",
+      existsSync(join(installDir, "server", "index.js")), join(installDir, "server", "index.js"));
+
+    const unit = process.platform === "darwin"
+      ? join(home, "Library", "LaunchAgents", "com.ccchrome.bridge.plist")
+      : join(home, ".config", "systemd", "user", "ccchrome-bridge.service");
+    const unitBody = existsSync(unit) ? readFileSync(unit, "utf8") : "";
+    check("the update rewrote the service unit", unitBody.includes("index.js"), unit);
+    // The silent half of the bug: `command -v claude` finds nothing on this
+    // PATH, so a unit built from that lookup drops CC_CHROME_CLAUDE_BIN, the
+    // update is still declared a success, the backup is deleted, and every
+    // panel turn from the next start on fails with "spawn claude ENOENT".
+    check("the regenerated unit keeps the claude path the bridge was running with",
+      unitBody.includes("/opt/measured/bin/claude"), unitBody || "(no unit written)");
+
+    rmSync(home, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
+
+  // --- 14. a rollback re-arms and starts the service ------------------------
+  //
+  // Restoring the files is not restoring the bridge. If the installer aborts
+  // between its stop step and its start step, nothing else on the machine ever
+  // starts the service again — `launchctl bootout` unloaded the job,
+  // `systemctl --user disable --now` removed the wants link, `Stop-CcTask`
+  // disabled the task — and the user is left with a dead bridge, a promise in
+  // the README that it recovers by itself, and a status record only a live
+  // bridge can show them.
+  //
+  // The fake service-unit.sh here really does bring /health up, so this
+  // measures the whole loop: restore -> probe -> start the RESTORED copy ->
+  // wait for /health -> record.
+
+  {
+    const home = mkdtempSync(join(tmpdir(), "cc-runner-rearm-"));
+    const installDir = join(home, ".cc-chrome-bridge");
+    mkdirSync(join(installDir, "server"), { recursive: true });
+    writeFileSync(join(installDir, "server", "index.js"), "// OLD");
+
+    // A port nothing is listening on yet — taken from a real listener so it is
+    // known-free, then released for the fake service to bind.
+    const probe = await healthServer({ value: "x" });
+    const port = probe.address().port;
+    await new Promise((r) => probe.close(r));
+
+    const startLog = join(home, "service-start.log");
+    writeFileSync(join(installDir, "service-unit.sh"), `#!/usr/bin/env bash
+cc_service_start() {
+  echo "started" >> "${startLog}"
+  node -e 'require("http").createServer((q,s)=>{s.setHeader("content-type","application/json");s.end(JSON.stringify({ok:true,version:"1.1.0"}))}).listen(${port},"127.0.0.1");setTimeout(()=>process.exit(0),6000)' >/dev/null 2>&1 &
+}
+`);
+
+    const work = mkdtempSync(join(tmpdir(), "cc-runner-work-rearm-"));
+    const source = join(work, "source");
+    mkdirSync(source, { recursive: true });
+    const installer = join(home, "fake-install.sh");
+    writeFileSync(installer, "#!/bin/sh\ntrue\n");
+    chmodSync(installer, 0o755);
+
+    const status = join(home, "status.json");
+    const { code } = await runRunner([
+      "--source", source, "--work", work, "--install-dir", installDir, "--installer", installer,
+      "--port", String(port), "--expect-version", "1.2.0",
+      "--status-file", status, "--health-timeout-ms", "1000",
+    ]);
+
+    check("a rollback with a dead bridge still exits non-zero", code !== 0, String(code));
+    const startCalls = existsSync(startLog) ? readFileSync(startLog, "utf8").split("\n").filter(Boolean) : [];
+    check("the rollback started the service exactly once, from the RESTORED copy",
+      startCalls.length === 1, JSON.stringify(startCalls));
+    const record = JSON.parse(readFileSync(status, "utf8"));
+    check("the record still says rolled-back", record.step === "rolled-back", JSON.stringify(record));
+    check("it records that it restarted the service and that /health answered",
+      record.service && record.service.restarted === true && record.service.ok === true,
+      JSON.stringify(record.service));
+    check("a successful restart adds no scary sentence to the reason",
+      !/Chưa khởi động lại được/.test(record.reason || ""), record.reason);
+
+    rmSync(home, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
+
+  // --- 15. a restart that fails is recorded, and changes nothing else -------
+  //
+  // Best effort means best effort in both directions: the user must be told the
+  // bridge is not coming back on its own, and the rollback outcome already
+  // determined must not change because of it.
+
+  {
+    const home = mkdtempSync(join(tmpdir(), "cc-runner-rearm-fail-"));
+    const installDir = join(home, ".cc-chrome-bridge");
+    mkdirSync(join(installDir, "server"), { recursive: true });
+    writeFileSync(join(installDir, "server", "index.js"), "// OLD");
+    writeFileSync(join(installDir, "service-unit.sh"), "#!/usr/bin/env bash\ncc_service_start() { exit 3; }\n");
+
+    const probe = await healthServer({ value: "x" });
+    const port = probe.address().port;
+    await new Promise((r) => probe.close(r));
+
+    const work = mkdtempSync(join(tmpdir(), "cc-runner-work-rearm-fail-"));
+    const source = join(work, "source");
+    mkdirSync(join(source, "server"), { recursive: true });
+    writeFileSync(join(source, "server", "index.js"), "// NEW-BROKEN");
+    const installer = join(home, "fake-install.sh");
+    writeFileSync(installer, `#!/bin/sh\nrm -rf "${installDir}/server"\ncp -R "$CC_CHROME_SOURCE/server" "${installDir}/server"\n`);
+    chmodSync(installer, 0o755);
+
+    const status = join(home, "status.json");
+    await runRunner([
+      "--source", source, "--work", work, "--install-dir", installDir, "--installer", installer,
+      "--port", String(port), "--expect-version", "1.2.0",
+      "--status-file", status, "--health-timeout-ms", "1000",
+    ]);
+
+    const record = JSON.parse(readFileSync(status, "utf8"));
+    check("the files are still restored when the restart fails",
+      readFileSync(join(installDir, "server", "index.js"), "utf8") === "// OLD");
+    check("the rollback outcome is unchanged by the failed restart",
+      record.step === "rolled-back" && record.ok === false, JSON.stringify(record));
+    check("the failure is recorded rather than swallowed",
+      record.service && record.service.ok === false && /mã thoát 3/.test(record.service.detail || ""),
+      JSON.stringify(record.service));
+    check("and it reaches the sentence the panel actually shows",
+      /Chưa khởi động lại được dịch vụ nền/.test(record.reason || ""), record.reason);
+
+    rmSync(home, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
 }
 
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);

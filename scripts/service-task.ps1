@@ -37,8 +37,22 @@ function Write-CcLauncher {
     # claude ENOENT". Left unset when claude is not installed yet —
     # server/agent.js falls back to the bare name and its error message tells
     # the user to install the CLI and re-run this installer.
-    $claude = (Get-Command claude -ErrorAction SilentlyContinue)
-    $claudeLine = if ($claude) { "set CC_CHROME_CLAUDE_BIN=$($claude.Source)" } else { '' }
+    #
+    # An inherited $env:CC_CHROME_CLAUDE_BIN wins over the Get-Command lookup,
+    # the same way cc_write_unit prefers it on the unix side and for the same
+    # reason: the in-panel update re-runs this installer from a process the
+    # bridge handed to Task Scheduler, whose PATH is not an interactive shell's,
+    # so a lookup that comes back empty there would silently drop a value the
+    # original install got right — with the update still reported as a success.
+    # scripts/update-runner.mjs passes the running bridge's own value down as
+    # CC_CHROME_CLAUDE_BIN. Unmeasured on Windows: the failure was measured on
+    # macOS, and this is the mirror of the fix, not a second observation.
+    $claudeBin = if ($env:CC_CHROME_CLAUDE_BIN) {
+        $env:CC_CHROME_CLAUDE_BIN
+    } else {
+        (Get-Command claude -ErrorAction SilentlyContinue).Source
+    }
+    $claudeLine = if ($claudeBin) { "set CC_CHROME_CLAUDE_BIN=$claudeBin" } else { '' }
     $logs = Join-Path $InstallDir 'logs'
     New-Item -ItemType Directory -Force -Path $logs | Out-Null
 

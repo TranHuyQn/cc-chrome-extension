@@ -1301,6 +1301,17 @@ async function mainHttp() {
       "--status-file", UPDATE_STATUS_FILE,
       "--task-name", taskName,
     ];
+    // The absolute `claude` path this bridge is running with, forwarded so the
+    // reinstall cannot lose it. The installer regenerates the service unit, and
+    // its `command -v claude` runs under the service's own minimal PATH
+    // (measured: /usr/bin:/bin:/usr/sbin:/sbin, where claude is not found) —
+    // without this the regenerated unit silently drops the variable and every
+    // later panel turn fails with "spawn claude ENOENT", after the update has
+    // already been declared a success. Only the darwin branch spawns the runner
+    // as our own child, so inheritance alone would not carry it on linux/win32.
+    if (process.env.CC_CHROME_CLAUDE_BIN) {
+      runnerArgs.push("--claude-bin", process.env.CC_CHROME_CLAUDE_BIN);
+    }
     const { command, args, sync } = buildRunnerSpawn(process.platform, {
       node: process.execPath,
       runner: join(INSTALL_DIR, "update-runner.mjs"),

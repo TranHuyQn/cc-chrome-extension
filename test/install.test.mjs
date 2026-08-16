@@ -529,6 +529,21 @@ rmSync(fakeHome, { recursive: true, force: true });
   );
   check("linux: systemd 245's log hint is the log file", (modern.logHint || "").endsWith("logs/bridge.err.log"), modern.logHint);
 
+  // An inherited CC_CHROME_CLAUDE_BIN must WIN over `command -v claude`, and
+  // the in-panel update is what makes that load-bearing: it re-runs the
+  // installer under the service's own PATH (/usr/bin:/bin:/usr/sbin:/sbin on
+  // this machine), where the lookup finds nothing — so a regenerated unit built
+  // from the lookup silently drops the value the first install got right, the
+  // update is still declared a success, and every panel turn afterwards fails
+  // with "spawn claude ENOENT". The stub claude IS on PATH here, so this only
+  // passes if the variable is preferred over a lookup that would have succeeded.
+  const inherited = writeUnitAs(245, { CC_CHROME_CLAUDE_BIN: "/opt/inherited/bin/claude" });
+  check(
+    "linux: an inherited CC_CHROME_CLAUDE_BIN wins over `command -v claude`",
+    inherited.body.includes('Environment="CC_CHROME_CLAUDE_BIN=/opt/inherited/bin/claude"'),
+    inherited.body,
+  );
+
   // The regression this pair exists for: `append:` is 240+, and an older
   // systemd rejects the WHOLE unit rather than ignoring the directive, so the
   // bridge would never start and the log file the installer points at would
@@ -583,6 +598,31 @@ rmSync(fakeHome, { recursive: true, force: true });
   check("uninstall sweeps stale .mcp-config-*.json out of panel/", !existsSync(staleConfig), staleConfig);
   check("uninstall keeps everything else in panel/", existsSync(userFile), userFile);
   check("uninstall keeps the install dir when panel/ still has content", existsSync(panel));
+}
+
+// --- nothing left behind: the install directory itself is gone --------------
+//
+// The assertion that would have caught it, and whose absence is why the update
+// artifacts could be added to the installer and left out of the uninstaller
+// while every per-file check above stayed green. `rmdir` at the end of
+// uninstall.sh is `|| true`, so ANY file the deletion loop does not know about
+// makes the whole install directory survive silently — that is what happened
+// when update-runner.mjs / install.sh / install.ps1 arrived (commit 85116f2
+// made "one run, nothing left behind" a property of this project).
+//
+// panel/ is deleted first on purpose: it is the one directory uninstall.sh
+// preserves by design, and the check above already covers that case. This one
+// asks the different question — with nothing to preserve, is anything left?
+{
+  rmSync(join(installDir, "panel"), { recursive: true, force: true });
+  run("install.sh");
+  check("a fresh install exists before the final uninstall", existsSync(join(installDir, "server", "index.js")));
+  const finalOut = run("uninstall.sh");
+  check(
+    "the install directory itself is gone after uninstall, not just its known files",
+    !existsSync(installDir),
+    existsSync(installDir) ? `left behind: ${readdirSync(installDir).join(", ")}\n${finalOut}` : installDir,
+  );
 }
 
 
