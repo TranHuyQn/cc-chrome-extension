@@ -2,26 +2,62 @@
 
 # Claude Code Chrome Bridge
 
-Extension thay thế cho **Claude in Chrome** chính thức, dành cho team dùng chung tài khoản Claude **chỉ với Claude Code** (không đăng nhập được claude.ai). Extension gốc bắt buộc đăng nhập claude.ai trong browser; bản bridge này thì **không cần bất kỳ đăng nhập nào** — Claude Code điều khiển Chrome thông qua một MCP server chạy local trên máy bạn.
+**Claude in Chrome, chạy bằng `claude` CLI đã có sẵn trên máy bạn.**
 
-> **1.0.0 là bản phát hành đầu tiên.** Mọi số hiệu 2.x/3.x xuất hiện trong
-> lịch sử git chỉ tồn tại nội bộ, chưa từng phát hành ra ngoài — đừng tìm
-> chúng trên GitHub Releases.
->
-> Cách cài: **mỗi người tự chạy bridge trên máy mình**, cài bằng một lệnh
-> (`curl … | bash` trên macOS/Linux, `irm … -OutFile` + `-File` trên Windows — xem
-> [Cài đặt](#cài-đặt)), chạy như một dịch vụ nền tự khởi động lại cùng máy,
-> không phụ thuộc việc `claude` có đang chạy hay không. **Không còn mô hình
-> server dùng chung**: không VPS, không tên miền, không pairing secret — mọi
-> thứ chạy trên `127.0.0.1` của chính máy bạn. Hai điều cần biết:
-> - `navigate` giờ **từ chối** đưa tab tới `chrome:`, `chrome-extension:`,
->   `devtools:`, `edge:` hay `about:` khác `about:blank` — trước đây có thể
->   đỗ một tab ở `chrome://...`, giờ thì không.
-> - Dịch vụ nền ghi **đường dẫn tuyệt đối** tới `node` vào lúc cài, không phải
->   `node` trần. Đổi phiên bản Node bằng nvm/volta/fnm sau khi cài xong nghĩa
->   là đường dẫn cũ biến mất — dịch vụ crash-loop âm thầm, không có gì báo lý
->   do. Chạy lại lệnh cài ở mục [Cài đặt](#cài-đặt) (`/ccchrome install` in ra
->   đúng lệnh đó) để ghi lại đường dẫn `node` mới.
+Hai cách dùng:
+
+- **Khung chat bên hông trình duyệt, dùng ngay lúc đang lướt web** — gõ thẳng trong Chrome,
+  không cần mở terminal nào.
+- **Một MCP server để Claude Code điều khiển trình duyệt** — 22 tool, từ `navigate` và
+  `read_page` tới `javascript_eval` và `read_network_requests`.
+
+Cả hai đi qua cùng một bridge chạy local trên `127.0.0.1`. Không có server trung gian, và
+không có bước đăng nhập claude.ai nào trong toàn bộ câu chuyện.
+
+## Vì sao dự án này tồn tại
+
+Chính tài liệu của Claude Code nói rằng tích hợp Chrome chính thức bị đóng với cả một nhóm
+người dùng — [code.claude.com/docs/en/chrome](https://code.claude.com/docs/en/chrome):
+
+> If you authenticate with an API key or a long-lived token from `claude setup-token`, Claude Code
+> keeps Chrome integration off, even when you pass `--chrome`, because the browser extension can't
+> authenticate with those credentials.
+
+*(Tạm dịch: nếu bạn xác thực bằng API key hoặc token dài hạn từ `claude setup-token`, Claude Code
+sẽ tắt tích hợp Chrome kể cả khi bạn truyền `--chrome`, vì extension không xác thực được bằng
+những credential đó.)*
+
+Dự án này lấp đúng khoảng trống ấy, từ phía bên kia. Khung chat **không** tự gọi API của
+Anthropic — nó spawn **`claude` CLI ngay trên máy bạn**, nên thứ gì xác thực được cho CLI đó thì
+dùng được: API key, hoặc gói Pro/Max. Hook và cấu hình project của riêng bạn đi theo luôn.
+**Không có API key nào được lưu trong trình duyệt.**
+
+### Nó khác ở chỗ nào
+
+- **Nó không bao giờ cướp focus.** Extension Claude in Chrome bản gốc kích hoạt tab và nhấc cửa
+  sổ lên gần như ở mỗi lần gọi tool ([#39696](https://github.com/anthropics/claude-code/issues/39696),
+  [#39707](https://github.com/anthropics/claude-code/issues/39707),
+  [#31119](https://github.com/anthropics/claude-code/issues/31119)). Bản này cố ý không làm vậy,
+  và `test/focus.test.mjs` quét **mọi** handler để giữ đúng tính chất đó — thêm một handler mới mà
+  không nằm trong vòng quét là suite đỏ.
+- **Cô lập theo nhóm tab.** Mỗi phiên có nhóm tab Chrome riêng. Tool chỉ tác động lên tab trong
+  nhóm đó — không bao giờ đụng tab bạn đang đọc. Muốn cho nó quyền với một tab của bạn thì kéo
+  tab ấy vào nhóm.
+- **Mọi thứ chạy local.** Bridge lắng nghe trên `127.0.0.1`, cài vào thư mục nhà của bạn, và
+  không cần quyền root/administrator trên cả ba nền tảng.
+
+> Các số hiệu `2.x` / `3.x` có xuất hiện trong lịch sử git nhưng chỉ tồn tại nội bộ, chưa từng
+> phát hành ra ngoài — đừng tìm chúng trên GitHub Releases. Bản phát hành hiện tại là **1.1.0**.
+
+Hai điều nên biết trước:
+
+- `navigate` **từ chối** đưa tab tới `chrome:`, `chrome-extension:`, `devtools:`, `edge:` hay
+  `about:` khác `about:blank`. Các bản nội bộ trước đây có thể đỗ một tab ở `chrome://…`; bản này
+  thì không.
+- Dịch vụ nền ghi **đường dẫn tuyệt đối** tới `node` vào lúc cài, không phải `node` trần. Đổi
+  phiên bản Node bằng nvm/volta/fnm sau đó làm đường dẫn ấy biến mất — dịch vụ crash-loop âm thầm,
+  không có gì báo lý do. Chạy lại lệnh cài ở mục [Cài đặt](#cài-đặt) (`/ccchrome install` in ra
+  đúng lệnh đó) để ghi lại đường dẫn `node` mới.
 
 ## Kiến trúc
 
@@ -602,3 +638,7 @@ chưa đóng gói trên macOS ≥ 137.
 | "Cannot run scripts on chrome://..." | Trang nội bộ của Chrome không cho inject script — chuyển sang tab web thường. |
 | Console/network trả rỗng | Việc thu thập chỉ bắt đầu từ lần gọi tool đầu tiên trên tab đó — reload trang rồi đọc lại. |
 | Click/fill báo "Ref N is stale" | Trang đã thay đổi — gọi `read_page` lại để lấy ref mới. |
+
+## Giấy phép
+
+MIT — xem [LICENSE](LICENSE).
