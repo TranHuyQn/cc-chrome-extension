@@ -111,6 +111,13 @@ if ($Source) {
     Copy-Item (Join-Path $Source '.claude\commands\ccchrome.md') (Join-Path $stage 'ccchrome.md')
     Copy-Item (Join-Path $Source 'scripts\uninstall.ps1') $stage
     Copy-Item (Join-Path $Source 'scripts\service-task.ps1') $stage
+    # The three files the bridge spawns for an in-panel update. Copied at
+    # staging time so a missing one stops the script while the service is still
+    # running and nothing has been replaced.
+    $scriptsDir = Join-Path $Source 'scripts'
+    foreach ($f in 'update-runner.mjs', 'install.sh', 'install.ps1') {
+        Copy-Item (Join-Path $scriptsDir $f) (Join-Path $stage $f)
+    }
 } else {
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('cc-' + [guid]::NewGuid())
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
@@ -133,6 +140,11 @@ if ($Source) {
     foreach ($f in 'uninstall.ps1', 'service-task.ps1') {
         if (-not (Test-Path (Join-Path $tmp $f))) { Die "gói phát hành thiếu $f." }
         Copy-Item (Join-Path $tmp $f) $stage
+    }
+    foreach ($f in 'update-runner.mjs', 'install.sh', 'install.ps1') {
+        $src = Join-Path $tmp $f
+        if (-not (Test-Path $src)) { throw "gói phát hành thiếu $f — không cập nhật được từ trong khung chat." }
+        Copy-Item $src (Join-Path $stage $f)
     }
     Remove-Item -Recurse -Force $tmp
 }
@@ -164,7 +176,7 @@ foreach ($d in 'server', 'extension') {
     if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
     Move-Item (Join-Path $stage $d) $dest
 }
-foreach ($f in 'ccchrome.md', 'uninstall.ps1', 'service-task.ps1') {
+foreach ($f in 'ccchrome.md', 'uninstall.ps1', 'service-task.ps1', 'update-runner.mjs', 'install.sh', 'install.ps1') {
     Move-Item -Force (Join-Path $stage $f) (Join-Path $InstallDir $f)
 }
 Remove-Item -Recurse -Force $stage

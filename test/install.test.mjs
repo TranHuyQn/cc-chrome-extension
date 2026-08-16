@@ -178,6 +178,15 @@ check(
 
 check("installs the slash command", existsSync(join(fakeHome, ".claude", "commands", "ccchrome.md")));
 
+// The three files the update button spawns. They were in the release tarball
+// but no installer moved them into place, so every install produced a bridge
+// whose update button silently did nothing — the failure the manual install
+// path can never reveal, because the manual path never uses them.
+for (const f of ["update-runner.mjs", "install.sh", "install.ps1"]) {
+  check(`install.sh puts ${f} in the install dir (spawnUpdateRunner reads it there)`,
+    existsSync(join(installDir, f)), join(installDir, f));
+}
+
 const unit = process.platform === "darwin"
   ? join(fakeHome, "Library", "LaunchAgents", "com.ccchrome.bridge.plist")
   : join(fakeHome, ".config", "systemd", "user", "ccchrome-bridge.service");

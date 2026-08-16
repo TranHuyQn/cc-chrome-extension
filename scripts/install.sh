@@ -111,6 +111,12 @@ if [ -n "$SOURCE" ]; then
   # expected rather than a broken release.
   [ -f "$SOURCE/scripts/uninstall.sh" ] && cp "$SOURCE/scripts/uninstall.sh" "$stage/"
   cp "$SOURCE/scripts/service-unit.sh" "$stage/"
+  # The three files the bridge spawns when the user presses "Cập nhật". Copied
+  # at STAGING time on purpose: if one is missing the script aborts here under
+  # `set -euo pipefail`, with the service still running and nothing replaced.
+  for f in update-runner.mjs install.sh install.ps1; do
+    cp "$SOURCE/scripts/$f" "$stage/$f"
+  done
 else
   tmp="$(mktemp -d)"
   curl -fsSL "$RELEASE_URL" -o "$tmp/release.tar.gz" \
@@ -125,6 +131,9 @@ else
   # shipping a bridge the user can never uninstall.
   cp "$tmp/uninstall.sh" "$stage/" || die "gói phát hành thiếu uninstall.sh."
   cp "$tmp/service-unit.sh" "$stage/" || die "gói phát hành thiếu service-unit.sh."
+  for f in update-runner.mjs install.sh install.ps1; do
+    cp "$tmp/$f" "$stage/$f" || die "gói phát hành thiếu $f — không cập nhật được từ trong khung chat."
+  done
 fi
 [ -d "$stage/server/node_modules" ] \
   || die "gói phát hành thiếu node_modules. Bản cài hiện tại không bị thay đổi."
@@ -180,6 +189,9 @@ if [ -f "$stage/uninstall.sh" ]; then
   chmod +x "$INSTALL_DIR/uninstall.sh"
 fi
 mv "$stage/service-unit.sh" "$INSTALL_DIR/service-unit.sh"
+for f in update-runner.mjs install.sh install.ps1; do
+  mv "$stage/$f" "$INSTALL_DIR/$f"
+done
 rm -rf "$stage"
 
 # 4. Token — giữ nguyên khi nâng cấp, để khỏi phải dán lại URL vào popup.
