@@ -39,6 +39,35 @@ jobs:
           }
           if ($bad -gt 0) { exit 1 }
 
+  # Measures the one unmeasured claim behind the update-handover design:
+  # server/updater.js's linux branch of buildRunnerSpawn spawns the update
+  # runner via `systemd-run --user --collect --unit=<name>` instead of a
+  # plain detached child, reasoned — never measured, there is no Linux dev
+  # machine for this project — to be the only shape that survives
+  # `systemctl --user disable --now`, the exact command
+  # scripts/service-unit.sh runs to stop the real bridge. ubuntu-latest is a
+  # real systemd box, so this settles it here and keeps settling it on every
+  # push. Two of the three arms probed are controls that must DIE; if they
+  # do not, the harness itself is broken and the third arm surviving proves
+  # nothing. Exit 2 (environment cannot run the experiment, e.g. no --user
+  # bus) is treated as a failure too — a gate that silently skips is a gate
+  # that lies. See scripts/probe-linux-handover.sh for the full design.
+  linux-update-handover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # A GitHub runner has no login session, so `systemctl --user` normally
+      # fails with "Failed to connect to bus". Lingering starts a persistent
+      # user@UID.service that owns a real --user bus. This is host setup,
+      # not part of what is being measured, so it lives here and not inside
+      # the probe script.
+      - name: Enable lingering so a --user systemd bus exists
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+      - name: Probe the linux update-handover cgroup survival pattern
+        run: bash scripts/probe-linux-handover.sh
+
   test:
     strategy:
       fail-fast: false
