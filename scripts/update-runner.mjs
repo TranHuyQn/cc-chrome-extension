@@ -34,7 +34,10 @@ const healthTimeoutMs = Number(arg("health-timeout-ms", "30000"));
 const taskName = arg("task-name");
 const backupDir = `${installDir}.bak`;
 // Beside the status record, not inside the install directory being replaced.
-const logPath = statusFile ? join(dirname(statusFile), "ccchrome-update.log") : null;
+// A dotfile, like every other artifact this project creates, and truncated per
+// run: the log only ever needs to explain the most recent attempt, which is
+// exactly what the status record points at.
+const logPath = statusFile ? join(dirname(statusFile), ".ccchrome-update.log") : null;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -77,7 +80,7 @@ function runInstaller() {
     // own output away: a failure otherwise has an exit code and nothing else.
     let logFd = null;
     try {
-      if (logPath) logFd = openSync(logPath, "a");
+      if (logPath) logFd = openSync(logPath, "w");
     } catch { /* logging is best-effort; it must never block the update itself */ }
     // CC_CHROME_PORT: a systemd-run --user transient unit runs with the USER
     // MANAGER's environment, not the bridge's, so on a non-default port an

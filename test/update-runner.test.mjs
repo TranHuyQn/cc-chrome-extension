@@ -480,5 +480,62 @@ async function waitUntil(cond, timeoutMs = 5000) {
   rmSync(work, { recursive: true, force: true });
 }
 
+// --- 11. the log is a dotfile beside the status record, truncated per run ---
+//
+// dirname(statusFile) is $HOME, so a non-dotfile log would be the only thing
+// this project ever leaves visible in a directory listing there. It is also
+// opened "w", not "a": the log only ever needs to explain the most recent
+// attempt, so a run must not carry forward what an earlier run wrote.
+
+{
+  const home = mkdtempSync(join(tmpdir(), "cc-runner-log-"));
+  const installDir = join(home, ".cc-chrome-bridge");
+  mkdirSync(join(installDir, "server"), { recursive: true });
+  writeFileSync(join(installDir, "server", "index.js"), "// OLD");
+
+  const installer = join(home, "fake-install.sh");
+  writeFileSync(
+    installer,
+    `#!/bin/sh\necho "installer ran"\nrm -rf "${installDir}/server"\ncp -R "$CC_CHROME_SOURCE/server" "${installDir}/server"\n`,
+  );
+  chmodSync(installer, 0o755);
+
+  const status = join(home, "status.json");
+  const dotLogPath = join(home, ".ccchrome-update.log");
+  const oldNonDotLogPath = join(home, "ccchrome-update.log");
+  const version = { value: "1.2.0" };
+
+  async function runOnce() {
+    const work = mkdtempSync(join(tmpdir(), "cc-runner-work-log-"));
+    const source = join(work, "source");
+    mkdirSync(join(source, "server"), { recursive: true });
+    writeFileSync(join(source, "server", "index.js"), "// NEW");
+    const server = await healthServer(version);
+    const { code } = await runRunner([
+      "--source", source, "--work", work, "--install-dir", installDir, "--installer", installer,
+      "--port", String(server.address().port), "--expect-version", "1.2.0", "--status-file", status,
+    ]);
+    server.close();
+    rmSync(work, { recursive: true, force: true });
+    return code;
+  }
+
+  const code1 = await runOnce();
+  check("first run succeeds", code1 === 0, String(code1));
+  check("the log is written as a dotfile", existsSync(dotLogPath), dotLogPath);
+  check("the pre-fix non-dotfile name is never created", !existsSync(oldNonDotLogPath), oldNonDotLogPath);
+  const firstLog = existsSync(dotLogPath) ? readFileSync(dotLogPath, "utf8") : "";
+  check("the first run's log records the installer output",
+    (firstLog.match(/installer ran/g) || []).length === 1, JSON.stringify(firstLog));
+
+  const code2 = await runOnce();
+  check("second run succeeds", code2 === 0, String(code2));
+  const secondLog = existsSync(dotLogPath) ? readFileSync(dotLogPath, "utf8") : "";
+  check("a second run truncates the log rather than appending to it",
+    (secondLog.match(/installer ran/g) || []).length === 1, JSON.stringify(secondLog));
+
+  rmSync(home, { recursive: true, force: true });
+}
+
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

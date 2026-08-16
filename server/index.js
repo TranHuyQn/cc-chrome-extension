@@ -1247,7 +1247,7 @@ async function mainHttp() {
         throw new Error("Checksum không khớp — gói tải về không đúng bản đã phát hành. Không cài gì cả.");
       }
 
-      send({ type: "update_progress", step: "backing-up" });
+      send({ type: "update_progress", step: "extracting" });
       const extracted = join(work, "extracted");
       mkdirSync(extracted, { recursive: true });
       await new Promise((resolve, reject) => {

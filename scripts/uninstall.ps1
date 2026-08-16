@@ -14,6 +14,10 @@ $InstallDir = Join-Path $env:USERPROFILE '.cc-chrome-bridge'
 $StateFile = Join-Path $env:USERPROFILE '.ccchrome.json'
 $CommandDest = Join-Path $env:USERPROFILE '.claude\commands\ccchrome.md'
 $PanelDir = Join-Path $InstallDir 'panel'
+$UpdateStateFile = Join-Path $env:USERPROFILE '.ccchrome-update.json'
+$UpdateLogFile = Join-Path $env:USERPROFILE '.ccchrome-update.log'
+$BackupDir = "$InstallDir.bak"
+$FailedDir = "$InstallDir.failed"
 
 function Say($m) { Write-Host $m }
 
@@ -89,6 +93,26 @@ if (Test-Path $CommandDest) {
 if (Test-Path $StateFile) {
     Remove-Item -Force $StateFile
     Say "→ Đã xoá $StateFile"
+}
+
+# 4b. Tàn dư của tính năng cập nhật trong panel. $BackupDir là bản sao đầy đủ
+#     của thư mục cài đặt — hàng chục MB — và không có gì khác từng dọn bốn
+#     thứ này.
+if (Test-Path $UpdateStateFile) {
+    Remove-Item -Force $UpdateStateFile
+    Say "→ Đã xoá $UpdateStateFile"
+}
+if (Test-Path $UpdateLogFile) {
+    Remove-Item -Force $UpdateLogFile
+    Say "→ Đã xoá $UpdateLogFile"
+}
+if (Test-Path $BackupDir) {
+    Remove-Item -Recurse -Force $BackupDir
+    Say "→ Đã xoá $BackupDir"
+}
+if (Test-Path $FailedDir) {
+    Remove-Item -Recurse -Force $FailedDir
+    Say "→ Đã xoá $FailedDir"
 }
 
 # 5. Thư mục cài. panel\ được giữ lại: đó là lịch sử hội thoại của side panel,

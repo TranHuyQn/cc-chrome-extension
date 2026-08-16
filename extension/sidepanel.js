@@ -238,7 +238,7 @@ function hideUpdate() {
 const UPDATE_STEP_TEXT = {
   downloading: "Đang tải bản mới…",
   verifying: "Đang kiểm tra gói tải về…",
-  "backing-up": "Đang sao lưu bản hiện tại…",
+  extracting: "Đang giải nén và kiểm tra gói…",
   installing: "Đang cài… bridge sẽ khởi động lại",
 };
 
@@ -545,6 +545,11 @@ function handle(msg) {
       send({ type: "update_check" });
       break;
     case "update_status": {
+      // The reload prompt outranks any status. After a successful install the
+      // reconnecting socket asks again, the new bridge answers "no update
+      // available", and the old code hid the one button the user still has to
+      // press — usually within seconds of it appearing.
+      if (updateState === "reload") break;
       // A panel that just connected asks once; nothing here is journalled,
       // because it describes the machine right now, not the conversation.
       // `lastResult.step` may be "rolled-back", "already-running", "crashed" or

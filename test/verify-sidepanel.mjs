@@ -777,6 +777,18 @@ async function run() {
   check("U1: a crashed runner renders the full reason (error + backup/failed/log paths)",
     u4 === u4Reason, u4);
 
+  // --- U5: a reconnect after a successful install must not erase the reload prompt
+  /* eslint-disable no-undef */
+  await f6Page.evaluate(() => {
+    showUpdate("reload", "Đã cài 1.2.1. Nạp lại extension để dùng giao diện mới.", "Nạp lại extension");
+    handle({ type: "update_status", current: "1.2.1", latest: "1.2.1", available: false, notes: "",
+      lastResult: { ok: true, version: "1.2.1" } });
+  });
+  /* eslint-enable no-undef */
+  const u5 = await f6Page.$eval("#update", (el) => ({ hidden: el.hidden, text: el.querySelector("#updateText").textContent }));
+  check("U5: a reconnect after a successful install does not erase the reload prompt",
+    u5.hidden === false && u5.text.includes("Nạp lại"), JSON.stringify(u5));
+
   // --- small fixes: never render the literal string "undefined" ---------------
   /* eslint-disable no-undef */
   await f6Page.evaluate(() => { handle({ type: "error" }); }); // no `message` field

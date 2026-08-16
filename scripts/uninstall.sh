@@ -172,6 +172,24 @@ if [ -f "$STATE_FILE" ]; then
   gone
 fi
 
+# 4b. Tàn dư của tính năng cập nhật trong panel. Một bản .bak là bản sao đầy
+#     đủ của thư mục cài đặt — hàng chục MB — và không có gì khác từng dọn
+#     bốn thứ này.
+for artifact in "$HOME/.ccchrome-update.json" "$HOME/.ccchrome-update.log"; do
+  if [ -e "$artifact" ]; then
+    note "$artifact"
+    [ "$DRY" = no ] && step_rm "$artifact" f
+    gone
+  fi
+done
+for artifact in "$INSTALL_DIR.bak" "$INSTALL_DIR.failed"; do
+  if [ -e "$artifact" ]; then
+    note "$artifact"
+    [ "$DRY" = no ] && step_rm "$artifact" rf
+    gone
+  fi
+done
+
 # 5. Mã nguồn — nhưng KHÔNG đụng panel/, đó là lịch sử hội thoại do server tạo
 #    lúc chạy, không phải thứ install.sh tạo ra. .new là chỗ install.sh dàn
 #    dựng bản cài mới (kể cả node_modules) trước khi hoán đổi — bị bỏ lại
