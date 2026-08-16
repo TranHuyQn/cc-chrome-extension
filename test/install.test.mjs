@@ -416,6 +416,16 @@ rmSync(fakeHome, { recursive: true, force: true });
     check(`${label}: writes a token file`, existsSync(join(home, ".ccchrome.json")));
     check(`${label}: prints the ws URL for the popup`, /ws:\/\/127\.0\.0\.1:8787\/ws\?token=/.test(r.stdout), r.stdout.slice(-400));
 
+    // The download branch is the one every real user takes, and the source
+    // branch's assertions cannot see it — they check a different install dir.
+    // Without these, removing the copy from only the download branch leaves the
+    // suite green and breaks the update button for everyone who installs the
+    // documented way.
+    for (const f of ["update-runner.mjs", "install.sh", "install.ps1"]) {
+      check(`${label}: ${f} lands in the install dir on the download path`,
+        existsSync(join(relInstallDir, f)), join(relInstallDir, f));
+    }
+
     rmSync(base, { recursive: true, force: true });
   }
 }

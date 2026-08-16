@@ -143,7 +143,7 @@ if ($Source) {
     }
     foreach ($f in 'update-runner.mjs', 'install.sh', 'install.ps1') {
         $src = Join-Path $tmp $f
-        if (-not (Test-Path $src)) { throw "gói phát hành thiếu $f — không cập nhật được từ trong khung chat." }
+        if (-not (Test-Path $src)) { Die "gói phát hành thiếu $f — không cập nhật được từ trong khung chat." }
         Copy-Item $src (Join-Path $stage $f)
     }
     Remove-Item -Recurse -Force $tmp
