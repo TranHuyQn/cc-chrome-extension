@@ -1323,6 +1323,16 @@ async function mainHttp() {
         // exists to avoid. startUpdate()'s try has already returned by the
         // time this fires, so the only way to tell the panel is the status
         // file its next update_check reads.
+        //
+        // updateInFlight and `work` are cleared here too, not just the status
+        // file: startUpdate()'s catch — the only other place either is
+        // touched — never runs on this path, because spawn() itself did not
+        // throw. Left alone, updateInFlight would refuse every retry with
+        // "Đang có một bản cập nhật chạy dở." for the full ten minutes, and
+        // `work` (a node_modules-bearing temp tree) would never be removed.
+        updateInFlight = false;
+        if (updateInFlightTimer) { clearTimeout(updateInFlightTimer); updateInFlightTimer = null; }
+        try { rmSync(work, { recursive: true, force: true }); } catch { /* best-effort cleanup only */ }
         try {
           writeFileSync(UPDATE_STATUS_FILE, JSON.stringify({
             ok: false, step: "handover-failed", version,
@@ -1341,7 +1351,21 @@ async function mainHttp() {
     // scripts/install.sh:265-276) must surface as a thrown Error so
     // startUpdate()'s catch cleans up `work` and reports the failure to the
     // panel, instead of leaving the bridge silently stuck mid-update.
-    const result = spawnSync(command, args, { stdio: "ignore", windowsHide: true, timeout: 30000 });
+    //
+    // cwd is tmpdir(), not the install directory the bridge inherited: on
+    // Windows that install directory is exactly the tree about to be
+    // replaced (see scripts/update-runner.mjs's own comment on why it never
+    // runs from inside it). spawnSync blocks the whole event loop, so the
+    // timeout is kept short — 15s, not 30s — to stay clear of the
+    // extension-bridge liveness sweep's own 30s interval: Node runs the
+    // timers phase before the poll phase, so a near-full-30s block could fire
+    // that sweep before a buffered pong is read and terminate() a perfectly
+    // healthy extension connection. 15s is still generous; the realistic path
+    // (Register + Start) is 2-5s, the cost being PowerShell loading the
+    // ScheduledTasks module. Do not raise it: on a timeout, startUpdate's
+    // catch deletes `work`, which is only correct if the launcher hung
+    // BEFORE the task started.
+    const result = spawnSync(command, args, { stdio: "ignore", cwd: tmpdir(), windowsHide: true, timeout: 15000 });
     if (result.error || result.status !== 0) {
       const detail = result.error ? result.error.message : `mã thoát ${result.status}`;
       throw new Error(`Không bàn giao được tiến trình cập nhật cho ${command}: ${detail}.`);

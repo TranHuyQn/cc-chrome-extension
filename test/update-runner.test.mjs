@@ -446,5 +446,39 @@ async function waitUntil(cond, timeoutMs = 5000) {
   rmSync(work, { recursive: true, force: true });
 }
 
+// --- 10. a malformed --port is never forwarded as CC_CHROME_PORT="NaN" ------
+//
+// A malformed --port used to be absorbed by the installer's own
+// ${CC_CHROME_PORT:-8787} fallback (never reaching the installer's env at
+// all); forwarding "NaN" verbatim would instead propagate a bad port straight
+// into the reinstalled service's own configuration.
+
+{
+  const home = mkdtempSync(join(tmpdir(), "cc-runner-badport-"));
+  const installDir = join(home, ".cc-chrome-bridge");
+  mkdirSync(installDir, { recursive: true });
+  const source = join(home, "source");
+  mkdirSync(source, { recursive: true });
+  const work = mkdtempSync(join(tmpdir(), "cc-runner-work-badport-"));
+  const portLog = join(home, "port.txt");
+
+  // Brackets make an unset var distinguishable from a set-but-empty one.
+  const installer = join(home, "fake-install.sh");
+  writeFileSync(installer, `#!/bin/sh\necho "[$CC_CHROME_PORT]" > "${portLog}"\n`);
+  chmodSync(installer, 0o755);
+
+  await runRunner([
+    "--source", source, "--work", work, "--install-dir", installDir, "--installer", installer,
+    "--port", "not-a-number", "--expect-version", "5.5.6",
+    "--status-file", join(home, "status.json"), "--health-timeout-ms", "300",
+  ]);
+
+  const recorded = existsSync(portLog) ? readFileSync(portLog, "utf8").trim() : "";
+  check("a malformed --port is never forwarded to the installer as CC_CHROME_PORT",
+    recorded === "[]", `expected "[]" (unset), got "${recorded}"`);
+  rmSync(home, { recursive: true, force: true });
+  rmSync(work, { recursive: true, force: true });
+}
+
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

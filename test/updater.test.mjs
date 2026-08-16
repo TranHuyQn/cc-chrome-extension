@@ -241,6 +241,50 @@ check("updateTaskName still carries the version and pid, dash-joined",
   check("win32 doubles a single quote in an interpolated value instead of ending the string early",
     quotedScript.includes("cc-up''date") && !quotedScript.includes("cc-up'date"), quotedScript);
 
+  // Register-ScheduledTask is a CDXML/CIM cmdlet: its failures are
+  // non-terminating under PowerShell's default $ErrorActionPreference, so
+  // without forcing 'Stop' the script could fall through to
+  // Start-ScheduledTask against a task that was never created and exit 0
+  // anyway — worse than the /tr length bug this round replaced, because
+  // nothing downstream would ever learn the handover failed.
+  check("win32's script sets ErrorActionPreference to Stop, so a non-terminating cmdlet failure still aborts",
+    winScript.includes("$ErrorActionPreference = 'Stop'"), winScript);
+  check("win32's script wraps registration in try/catch and exits non-zero on failure",
+    winScript.includes("try {") && winScript.includes("catch { exit 1 }"), winScript);
+
+  // A missing workingDir used to emit -WorkingDirectory 'undefined' verbatim
+  // — that registers and starts fine (exit 0) and only fails at RUN time,
+  // long after this process has moved on. Refusing here makes the failure
+  // impossible instead of merely unlikely.
+  check("win32's script carries -WorkingDirectory with the exact value it was given",
+    winScript.includes("-WorkingDirectory '/tmp/cc-update-work'"), winScript);
+  let missingWorkingDir = null;
+  try {
+    buildRunnerSpawn("win32", { ...base, workingDir: undefined });
+  } catch (err) {
+    missingWorkingDir = err.message;
+  }
+  check("win32 refuses when workingDir is missing instead of emitting -WorkingDirectory 'undefined'",
+    missingWorkingDir && missingWorkingDir.includes("workingDir"), String(missingWorkingDir));
+
+  // Presence alone doesn't prove POSITION: a bug that swapped which value
+  // goes in -Execute vs -Argument would still satisfy a check that only
+  // looks for the runner path and args somewhere in the script.
+  check("win32's script puts node in -Execute, exactly — not merely present somewhere",
+    winScript.includes("-Execute '/usr/bin/node'"), winScript);
+  check("win32's script puts the runner and its own arguments in -Argument, not -Execute",
+    winScript.includes("-Argument '/inst/update-runner.mjs --port 8787'"), winScript);
+
+  // No -Trigger is the load-bearing design decision of the whole win32
+  // branch: it is what removes the "one-shot trigger already in the past
+  // never fires" failure mode a separate /create + /run used to have.
+  check("win32's script never sets a -Trigger",
+    !winScript.includes("-Trigger"), winScript);
+  check("win32's script passes -Principal and -Force to Register-ScheduledTask",
+    winScript.includes("-Principal $p -Force"), winScript);
+  check("win32's script statements are semicolon-joined, not concatenated",
+    (winScript.match(/; /g) || []).length >= 5, winScript);
+
   let badPlatform = null;
   try {
     buildRunnerSpawn("sunos", base);

@@ -79,14 +79,21 @@ function runInstaller() {
     try {
       if (logPath) logFd = openSync(logPath, "a");
     } catch { /* logging is best-effort; it must never block the update itself */ }
+    // CC_CHROME_PORT: a systemd-run --user transient unit runs with the USER
+    // MANAGER's environment, not the bridge's, so on a non-default port an
+    // installer that fell back to CC_CHROME_PORT's default (8787) would
+    // silently move the service to the wrong port and the extension would
+    // lose the bridge. Reasoned, not measured — no Linux machine available to
+    // confirm systemd-run drops the caller's environment.
+    //
+    // Only forwarded when it parses to a finite number: a malformed --port
+    // used to be absorbed by the installer's own `${CC_CHROME_PORT:-8787}`
+    // fallback, and forwarding "NaN" verbatim would instead propagate into
+    // the reinstalled service's configuration.
+    const env = { ...process.env, CC_CHROME_SOURCE: source };
+    if (Number.isFinite(port)) env.CC_CHROME_PORT = String(port);
     const child = spawn(command, args, {
-      // CC_CHROME_PORT: a systemd-run --user transient unit runs with the
-      // USER MANAGER's environment, not the bridge's, so on a non-default
-      // port an installer that fell back to CC_CHROME_PORT's default (8787)
-      // would silently move the service to the wrong port and the extension
-      // would lose the bridge. Reasoned, not measured — no Linux machine
-      // available to confirm systemd-run drops the caller's environment.
-      env: { ...process.env, CC_CHROME_SOURCE: source, CC_CHROME_PORT: String(port) },
+      env,
       cwd: process.env.TMPDIR || process.env.TEMP || "/tmp",
       stdio: ["ignore", logFd ?? "ignore", logFd ?? "ignore"],
       windowsHide: true,

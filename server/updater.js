@@ -169,6 +169,14 @@ export function buildRunnerSpawn(platform, { node, runner, args, taskName, worki
     };
   }
   if (platform === "win32") {
+    // Required, not optional: an omitted workingDir would silently emit
+    // `-WorkingDirectory 'undefined'`, which registers and starts fine (exit
+    // 0) and only fails at RUN time with 0x2 — the update never happens and
+    // the bridge reports success. Refusing here, by name, is what makes that
+    // impossible instead of merely unlikely.
+    if (!workingDir) {
+      throw new Error("buildRunnerSpawn: thiếu workingDir cho nền tảng 'win32'.");
+    }
     // Register-ScheduledTask + Start-ScheduledTask in one PowerShell process,
     // not `schtasks /create ... /tr ...`: the /tr command-line string hits
     // schtasks' documented 262-character maximum well before a realistic
@@ -184,13 +192,24 @@ export function buildRunnerSpawn(platform, { node, runner, args, taskName, worki
     // the "one-shot trigger already in the past never fires" race between a
     // separate /create and /run.
     const argString = [runner, ...args].map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(" ");
-    const script = [
+    const body = [
       `$a = New-ScheduledTaskAction -Execute '${psQuote(node)}' -Argument '${psQuote(argString)}' -WorkingDirectory '${psQuote(workingDir)}'`,
       "$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew",
       '$p = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\\$env:USERNAME" -LogonType Interactive -RunLevel Limited',
       `Register-ScheduledTask -TaskName '${psQuote(taskName)}' -Action $a -Settings $s -Principal $p -Force | Out-Null`,
       `Start-ScheduledTask -TaskName '${psQuote(taskName)}'`,
     ].join("; ");
+    // Register-ScheduledTask is a CDXML/CIM cmdlet: its failures (access
+    // denied, bad principal, invalid name) are NON-terminating. Under the
+    // default $ErrorActionPreference = 'Continue' the script would fall
+    // through to Start-ScheduledTask against a task that was never created,
+    // and whether powershell.exe then exits non-zero is host semantics this
+    // repo cannot measure — stdio is "ignore", so the exit code is the only
+    // signal that exists. 'Stop' plus an explicit try/catch/exit 1 is what
+    // every other PowerShell entry point in this repo already does for the
+    // same reason: scripts/install.ps1:24, scripts/uninstall.ps1:7,
+    // scripts/probe-windows-update.ps1:8.
+    const script = `$ErrorActionPreference = 'Stop'; try { ${body} } catch { exit 1 }`;
     return {
       command: "powershell",
       args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
