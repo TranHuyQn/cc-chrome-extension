@@ -1,30 +1,64 @@
+*[Tiếng Việt](README.vi.md)*
+
 # Claude Code Chrome Bridge
 
-Extension thay thế cho **Claude in Chrome** chính thức, dành cho team dùng chung tài khoản Claude **chỉ với Claude Code** (không đăng nhập được claude.ai). Extension gốc bắt buộc đăng nhập claude.ai trong browser; bản bridge này thì **không cần bất kỳ đăng nhập nào** — Claude Code điều khiển Chrome thông qua một MCP server chạy local trên máy bạn.
+**Claude in Chrome, powered by the `claude` CLI already on your machine.**
 
-> **1.0.0 là bản phát hành đầu tiên.** Mọi số hiệu 2.x/3.x xuất hiện trong
-> lịch sử git chỉ tồn tại nội bộ, chưa từng phát hành ra ngoài — đừng tìm
-> chúng trên GitHub Releases.
->
-> Cách cài: **mỗi người tự chạy bridge trên máy mình**, cài bằng một lệnh
-> (`curl … | bash` trên macOS/Linux, `irm … -OutFile` + `-File` trên Windows — xem
-> [Cài đặt](#cài-đặt)), chạy như một dịch vụ nền tự khởi động lại cùng máy,
-> không phụ thuộc việc `claude` có đang chạy hay không. **Không còn mô hình
-> server dùng chung**: không VPS, không tên miền, không pairing secret — mọi
-> thứ chạy trên `127.0.0.1` của chính máy bạn. Hai điều cần biết:
-> - `navigate` giờ **từ chối** đưa tab tới `chrome:`, `chrome-extension:`,
->   `devtools:`, `edge:` hay `about:` khác `about:blank` — trước đây có thể
->   đỗ một tab ở `chrome://...`, giờ thì không.
-> - Dịch vụ nền ghi **đường dẫn tuyệt đối** tới `node` vào lúc cài, không phải
->   `node` trần. Đổi phiên bản Node bằng nvm/volta/fnm sau khi cài xong nghĩa
->   là đường dẫn cũ biến mất — dịch vụ crash-loop âm thầm, không có gì báo lý
->   do. Chạy lại lệnh cài ở mục [Cài đặt](#cài-đặt) (`/ccchrome install` in ra
->   đúng lệnh đó) để ghi lại đường dẫn `node` mới.
+Two ways to use it:
 
-## Kiến trúc
+- **A side panel you chat with while you browse** — type into Chrome, no terminal open.
+- **An MCP server that lets Claude Code drive the browser** — 22 tools, from `navigate` and
+  `read_page` to `javascript_eval` and `read_network_requests`.
+
+Both run through one local bridge on `127.0.0.1`. There is no intermediary server, and no claude.ai
+login anywhere in the picture.
+
+## Why this exists
+
+Claude Code's own documentation says the official Chrome integration is closed to a whole class of
+users — [code.claude.com/docs/en/chrome](https://code.claude.com/docs/en/chrome):
+
+> If you authenticate with an API key or a long-lived token from `claude setup-token`, Claude Code
+> keeps Chrome integration off, even when you pass `--chrome`, because the browser extension can't
+> authenticate with those credentials.
+
+This project fills that gap from the other side. The side panel does not call the Anthropic API
+itself — it spawns the **local `claude` CLI**, so whatever authenticates that CLI works: an API key,
+or a Pro/Max subscription. Your own hooks and project settings come along with it. **No API key is
+ever stored in the browser.**
+
+### What is different about it
+
+- **It never takes focus.** The original Claude in Chrome extension activates the tab and raises the
+  window on essentially every tool call ([#39696](https://github.com/anthropics/claude-code/issues/39696),
+  [#39707](https://github.com/anthropics/claude-code/issues/39707),
+  [#31119](https://github.com/anthropics/claude-code/issues/31119)). This one deliberately does not,
+  and `test/focus.test.mjs` sweeps **every** handler to keep it that way — a new handler that is not
+  covered by the sweep fails the suite.
+- **Tab-group isolation.** Each session gets its own Chrome tab group. Tools only act on tabs inside
+  that group — never the tab you are reading. Dragging one of your tabs into the group is how you
+  grant access to it.
+- **Everything is local.** The bridge listens on `127.0.0.1`, installs into your home directory, and
+  needs no root/administrator rights on any of the three platforms.
+
+> Versions `2.x` / `3.x` appear in the git history but were internal only and were never published —
+> do not go looking for them on GitHub Releases. The current release is **1.1.0**.
+
+Two things worth knowing up front:
+
+- `navigate` **refuses** to send a tab to `chrome:`, `chrome-extension:`, `devtools:`, `edge:` or any
+  `about:` other than `about:blank`. Earlier internal builds could park a tab on `chrome://…`; this
+  one cannot.
+- The background service records the **absolute path** to `node` at install time, not a bare `node`.
+  Switching Node versions with nvm/volta/fnm afterwards makes that path disappear — the service then
+  crash-loops silently, with nothing announcing why. Re-run the install command in
+  [Installation](#installation) (`/ccchrome install` prints exactly that command) to record the new
+  `node` path.
+
+## Architecture
 
 ```
-Claude Code ──(MCP / Streamable HTTP + Bearer token, 127.0.0.1)──► MCP server (Node.js, dịch vụ nền)
+Claude Code ──(MCP / Streamable HTTP + Bearer token, 127.0.0.1)──► MCP server (Node.js, background service)
                                                                               │
                                                         (WebSocket ws://127.0.0.1:<port>/ws?token=...)
                                                                               ▼
@@ -34,17 +68,25 @@ Claude Code ──(MCP / Streamable HTTP + Bearer token, 127.0.0.1)──► MCP
                                                               chrome.debugger (CDP)
 ```
 
-- **`extension/`** — Chrome extension (Manifest V3). Service worker kết nối tới MCP server qua WebSocket `ws://127.0.0.1:8787/ws`, tự động reconnect, và thực thi các lệnh điều khiển browser.
-- **`server/`** — MCP server (Node.js ≥ 18), chạy như một **dịch vụ nền** (LaunchAgent trên macOS, `systemd --user` trên Linux) chứ không phải tiến trình con của `claude` — cài bởi `scripts/install.sh`, tự khởi động lại cùng máy. Claude Code nói chuyện với nó qua MCP Streamable HTTP kèm Bearer token, cùng cổng mà extension nối WebSocket vào; mỗi tool call được chuyển tiếp tới extension và trả kết quả về.
+- **`extension/`** — the Chrome extension (Manifest V3). Its service worker connects to the MCP
+  server over WebSocket at `ws://127.0.0.1:8787/ws`, reconnects on its own, and executes the browser
+  commands.
+- **`server/`** — the MCP server (Node.js ≥ 18). It runs as a **background service** (LaunchAgent on
+  macOS, `systemd --user` on Linux, a scheduled task on Windows) rather than as a child process of
+  `claude` — installed by `scripts/install.sh`, and it comes back up with the machine. Claude Code
+  talks to it over MCP Streamable HTTP with a Bearer token, on the same port the extension uses for
+  its WebSocket; each tool call is forwarded to the extension and the result comes back.
 
-Bridge chỉ nghe trên `127.0.0.1` — không có dữ liệu nào gửi ra ngoài, không cần tài khoản Anthropic trong browser, và không có gì để lộ ra mạng. Mỗi người chạy bridge của riêng mình; không có máy chủ trung gian nào cho cả team.
+The bridge listens only on `127.0.0.1` — nothing is sent anywhere else, no Anthropic account is
+needed inside the browser, and there is nothing exposed to the network. Everyone runs their own
+bridge; there is no shared machine, no VPS, no domain and no pairing secret.
 
-## Cài đặt
+## Installation
 
-Yêu cầu: Node.js ≥ 18 và Google Chrome (hoặc Chromium) đã cài sẵn. Không cần quyền root — script chỉ
-ghi vào thư mục home của bạn.
+Requirements: Node.js ≥ 18 and Google Chrome (or Chromium) already installed. No root needed — the
+script only writes inside your home directory.
 
-### 1. Một lệnh
+### 1. One command
 
 **macOS / Linux:**
 
@@ -52,112 +94,123 @@ ghi vào thư mục home của bạn.
 curl -fsSL https://github.com/TranHuyQn/cc-chrome-extension/releases/latest/download/install.sh | bash
 ```
 
-**Windows** (PowerShell thường, **không** cần "Run as administrator"):
+**Windows** (an ordinary PowerShell window — **no** "Run as administrator"):
 
 ```powershell
 irm https://github.com/TranHuyQn/cc-chrome-extension/releases/latest/download/install.ps1 -OutFile "$env:TEMP\install.ps1"
 powershell -ExecutionPolicy Bypass -File "$env:TEMP\install.ps1"
 ```
 
-> **Hai dòng chứ không phải `irm … | iex`, và đây là bắt buộc.** `install.ps1`
-> bắt đầu bằng BOM UTF-8 vì Windows PowerShell 5.1 không có BOM thì đọc file
-> theo bảng mã ANSI, làm hỏng mọi chuỗi tiếng Việt tới mức file không parse
-> nổi. Nhưng `| iex` lại đưa chính BOM đó vào parser như một ký tự thường —
-> `The term 'ï»¿#' is not recognized`. Thêm nữa, `irm` giải mã asset của GitHub
-> (`application/octet-stream`) theo ISO-8859-1 nên chữ có dấu vỡ hết kể cả khi
-> không có BOM. `-OutFile` ghi nguyên byte, `-File` đọc đúng — đó cũng là
-> đường CI kiểm mỗi lần push.
+> **Two lines, not `irm … | iex`, and this is not optional.** `install.ps1` starts with a UTF-8 BOM,
+> because without one Windows PowerShell 5.1 reads the file as ANSI, which mangles every Vietnamese
+> string badly enough that the file no longer parses. But `| iex` feeds that same BOM into the parser
+> as an ordinary character — `The term 'ï»¿#' is not recognized`. On top of that, `irm` decodes
+> GitHub's asset (`application/octet-stream`) as ISO-8859-1, so accented characters break even
+> without a BOM. `-OutFile` writes the raw bytes and `-File` reads them correctly — and that is also
+> the path CI exercises on every push.
 
-> **Windows đã được nghiệm thu trọn vẹn trên máy thật** (Windows 11, PowerShell 5.1):
-> cài **không cần quyền admin**, bridge tự lên và `/health` trả lời, extension nối được,
-> tool trình duyệt chạy, khung chat side panel trả lời được, **khởi động lại máy thì dịch
-> vụ tự lên và extension nối lại**, và **gỡ cài đặt sạch trong một lần chạy** — task
-> biến mất, tiến trình về 0, cổng được trả lại. Cả ba nền tảng giờ đều đã chạy thật.
+> **Windows has been verified end to end on real hardware** (Windows 11, PowerShell 5.1): install
+> **without admin rights**, the bridge comes up and `/health` answers, the extension connects,
+> browser tools work, the side panel chat replies, **after a reboot the service starts by itself and
+> the extension reconnects**, and **uninstall is clean in a single run** — the task is gone, the
+> process count is zero, the port is released. All three platforms have now been run for real.
 
-Lệnh này tải và chạy thẳng một script từ GitHub Releases — biết vậy trước khi chạy. Muốn xem
-trước thì tách làm hai bước:
+That command downloads and runs a script straight from GitHub Releases — know that before you run it.
+To read it first, split it into two steps:
 
 ```bash
 curl -fsSL https://github.com/TranHuyQn/cc-chrome-extension/releases/latest/download/install.sh -o install.sh
-less install.sh        # đọc trước khi chạy
+less install.sh        # read before running
 bash install.sh
 ```
 
 ```powershell
 irm https://github.com/TranHuyQn/cc-chrome-extension/releases/latest/download/install.ps1 -OutFile install.ps1
-notepad install.ps1    # đọc trước khi chạy
+notepad install.ps1    # read before running
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-Script tự làm hết: tải gói phát hành (mã nguồn `server/` + `extension/` kèm sẵn `node_modules`, không
-cần bạn tự `npm install`), sinh token, cài **dịch vụ nền** tự khởi động cùng máy chạy bridge tại
-`http://127.0.0.1:8787`, và đăng ký MCP server `chrome` với Claude Code
+The script does the rest: downloads the release payload (`server/` + `extension/` source with
+`node_modules` already bundled, so you never run `npm install` yourself), generates a token, installs
+a **background service** that starts with your machine and runs the bridge at
+`http://127.0.0.1:8787`, and registers the MCP server named `chrome` with Claude Code
 (`claude mcp add --scope user --transport http chrome ...`).
 
-Dịch vụ nền đó là **của riêng tài khoản bạn** và lên **khi bạn đăng nhập**, trên cả ba hệ điều hành —
-LaunchAgent (macOS), `systemd --user` (Linux), scheduled task trigger "At log on" (Windows). Không
-có cái nào chạy trước khi đăng nhập, và cũng không cần: Chrome chỉ tồn tại sau khi bạn đăng nhập.
+That background service belongs to **your account** and starts **when you log in**, on all three
+operating systems — LaunchAgent (macOS), `systemd --user` (Linux), a scheduled task with an "At log
+on" trigger (Windows). None of them runs before login, and none needs to: Chrome only exists after
+you have logged in.
 
-> **WSL không được hỗ trợ.** Chrome chạy ở Windows host còn bridge sẽ nằm trong WSL — hai bên hàng
-> rào mạng khác nhau — và `systemctl --user` thường không có sẵn trong WSL. Cài bằng `install.ps1`
-> trên chính Windows.
+> **WSL is not supported.** Chrome runs on the Windows host while the bridge would live inside WSL —
+> two different sides of a network boundary — and `systemctl --user` is often unavailable in WSL.
+> Install with `install.ps1` on Windows itself.
 
-Máy đã cài rồi mà chạy lại đúng lệnh trên: script tự nhận ra là **nâng cấp**, giữ nguyên token cũ
-(khỏi phải dán lại URL vào extension), chỉ thay mã nguồn dưới `~/.cc-chrome-bridge/` và khởi động lại
-dịch vụ nền (phần server).
+Running the same command again on a machine that already has it installed: the script recognises this
+as an **upgrade**, keeps the existing token (so you do not have to paste the URL into the extension
+again), replaces only the source under `~/.cc-chrome-bridge/` and restarts the background service
+(the server half).
 
-> ⚠️ **Script KHÔNG tự cập nhật extension đang chạy trong Chrome.** Nó ghi đè
-> `~/.cc-chrome-bridge/extension` trên đĩa, nhưng Chrome vẫn chạy đúng bản code cũ đã Load unpacked
-> cho tới khi bạn tự bấm **Reload** trên thẻ extension ở `chrome://extensions` — Chrome không tự đọc
-> lại thư mục. Bỏ qua bước này nghĩa là bạn **âm thầm vẫn chạy extension của bản cũ**, kể cả khi
-> server đã lên bản mới: nếu bản cũ thiếu một bản vá bảo mật (như hai chốt `navigate`/`javascript_eval`
-> thêm ở bản mới, xem [Lưu ý bảo mật](#lưu-ý-bảo-mật)), bạn vẫn thiếu nó cho tới khi Reload. Luôn vào
-> `chrome://extensions` bấm **Reload** trên "Claude Code Chrome Bridge" sau mỗi lần chạy lại lệnh cài.
+> ⚠️ **The script does NOT update the extension already running in Chrome.** It overwrites
+> `~/.cc-chrome-bridge/extension` on disk, but Chrome keeps running the old Load-unpacked code until
+> you click **Reload** on the extension card at `chrome://extensions` — Chrome does not re-read the
+> directory on its own. Skipping this means you are **silently still running the old extension**,
+> even with a new server: if the old build is missing a security fix (such as the two `navigate` /
+> `javascript_eval` guards added in a newer build, see [Security notes](#security-notes)), you are
+> still missing it until you reload. Always go to `chrome://extensions` and click **Reload** on
+> "Claude Code Chrome Bridge" after re-running the install command.
 
-### 1b. Script động vào đúng những chỗ nào
+### 1b. Exactly what the script touches
 
-Không cần quyền root, không đụng gì ngoài thư mục home của bạn. Đầy đủ danh sách:
+No root, nothing outside your home directory. The complete list:
 
 **macOS / Linux** (`install.sh`):
 
-| Đường dẫn | Nội dung | Quyền |
+| Path | Contents | Mode |
 |---|---|---|
-| `~/.cc-chrome-bridge/` | `server/` (kèm `node_modules`), `extension/`, `logs/`, `tokens.json`, `uninstall.sh`, `service-unit.sh`, `ccchrome.md`, `update-runner.mjs`, `install.sh`, `install.ps1` | `700` |
+| `~/.cc-chrome-bridge/` | `server/` (with `node_modules`), `extension/`, `logs/`, `tokens.json`, `uninstall.sh`, `service-unit.sh`, `ccchrome.md`, `update-runner.mjs`, `install.sh`, `install.ps1` | `700` |
 | `~/.ccchrome.json` | `{ "token": "…", "port": 8787 }` | `600` |
-| `~/Library/LaunchAgents/com.ccchrome.bridge.plist` (macOS)<br>`$XDG_CONFIG_HOME/systemd/user/ccchrome-bridge.service` (Linux) | file dịch vụ nền | |
-| `~/.claude/commands/ccchrome.md` | slash command `/ccchrome` | |
-| `~/.claude.json` | thêm MCP server tên `chrome` (qua `claude mcp add`) | |
+| `~/Library/LaunchAgents/com.ccchrome.bridge.plist` (macOS)<br>`$XDG_CONFIG_HOME/systemd/user/ccchrome-bridge.service` (Linux) | the background service file | |
+| `~/.claude/commands/ccchrome.md` | the `/ccchrome` slash command | |
+| `~/.claude.json` | adds an MCP server named `chrome` (via `claude mcp add`) | |
 
-**Windows** (`install.ps1`) — cùng bố cục, khác chỗ để file dịch vụ và cách đặt quyền:
+**Windows** (`install.ps1`) — same layout, different home for the service file and a different way of
+setting permissions:
 
-| Đường dẫn | Nội dung |
+| Path | Contents |
 |---|---|
-| `%USERPROFILE%\.cc-chrome-bridge\` | `server\`, `extension\`, `logs\`, `tokens.json`, `uninstall.ps1`, `service-task.ps1`, `ccchrome.md`, `update-runner.mjs`, `install.sh`, `install.ps1`, cộng `bridge.cmd` và `bridge-launcher.vbs` |
+| `%USERPROFILE%\.cc-chrome-bridge\` | `server\`, `extension\`, `logs\`, `tokens.json`, `uninstall.ps1`, `service-task.ps1`, `ccchrome.md`, `update-runner.mjs`, `install.sh`, `install.ps1`, plus `bridge.cmd` and `bridge-launcher.vbs` |
 | `%USERPROFILE%\.ccchrome.json` | `{ "token": "…", "port": 8787 }` |
-| Scheduled task tên `ccchrome-bridge` | trigger **At log on**, chạy dưới chính tài khoản bạn, `RunLevel Limited` — **không cần quyền admin** |
-| `%USERPROFILE%\.claude\commands\ccchrome.md` | slash command `/ccchrome` |
-| `%USERPROFILE%\.claude.json` | thêm MCP server tên `chrome` |
+| A scheduled task named `ccchrome-bridge` | trigger **At log on**, runs as your own account, `RunLevel Limited` — **no admin rights required** |
+| `%USERPROFILE%\.claude\commands\ccchrome.md` | the `/ccchrome` slash command |
+| `%USERPROFILE%\.claude.json` | adds an MCP server named `chrome` |
 
-Windows không có `chmod`, nên hai file chứa token được siết bằng
-`icacls <file> /inheritance:r /grant:r "<bạn>:F"` — bỏ mọi ACE thừa kế rồi cấp lại
-đúng cho tài khoản bạn. Đó là thứ tương đương `chmod 600` ở đây.
+Windows has no `chmod`, so the two files holding the token are tightened with
+`icacls <file> /inheritance:r /grant:r "<you>:F"` — drop every inherited ACE, then grant your own
+account back. That is the local equivalent of `chmod 600`.
 
-Hai file phụ chỉ Windows mới có: `bridge.cmd` giữ biến môi trường và chuyển hướng log
-(Task Scheduler không làm được hai việc đó), còn `bridge-launcher.vbs` là một dòng gọi
-`bridge.cmd` với cờ ẩn cửa sổ — nếu không thì `node.exe` để lại một cửa sổ console đen
-suốt phiên làm việc.
+Two helper files exist only on Windows: `bridge.cmd` holds the environment variables and redirects the
+logs (Task Scheduler can do neither), and `bridge-launcher.vbs` is a one-liner that calls `bridge.cmd`
+with the window hidden — without it, `node.exe` leaves a black console window open for the whole
+session.
 
-Bảy bước, đúng thứ tự script chạy:
+Seven steps, in the order the script runs them:
 
-1. **Kiểm tra Node ≥ 18**, chưa có thì dừng, chưa tải gì cả.
-2. **Tải gói phát hành** về thư mục tạm, giải nén vào `~/.cc-chrome-bridge/.new` và kiểm tra đủ file (đặc biệt là `node_modules`) — **trước khi** đụng vào bản đang cài. Tải hỏng thì bản cũ nguyên vẹn.
-3. **Dừng dịch vụ đang chạy** (nếu có) — chỉ làm sau khi bước 2 đã có bản thay thế sẵn sàng.
-4. **Đổi tên `.new` vào vị trí thật.** Cùng ổ đĩa nên là đổi tên tức thời, không phải copy.
-5. **Token.** Nâng cấp thì giữ token cũ (khỏi dán lại URL); cài mới thì sinh 16 byte ngẫu nhiên bằng `crypto.randomBytes`. Ghi `~/.ccchrome.json` và `tokens.json`, cả hai `chmod 600`. **`tokens.json` bị ghi đè chứ không gộp** — đó chính là cách token cũ bị thu hồi.
-6. **Dựng file dịch vụ** với **đường dẫn tuyệt đối** tới `node` và `claude` (dịch vụ nền không có `PATH` của terminal), `CC_CHROME_HOST=127.0.0.1` ghi cứng, rồi nạp và chờ `/health` tối đa 20 giây.
-7. **Đăng ký MCP** với Claude Code và copy slash command.
+1. **Check Node ≥ 18**; stop if it is missing, before downloading anything.
+2. **Download the release payload** to a temp directory, extract it into `~/.cc-chrome-bridge/.new`
+   and verify the files are all there (`node_modules` in particular) — **before** touching the
+   installed copy. A broken download leaves the old install intact.
+3. **Stop the running service** (if any) — only after step 2 has a replacement ready.
+4. **Rename `.new` into place.** Same volume, so it is an instant rename, not a copy.
+5. **Token.** On an upgrade, keep the existing token (no re-pasting the URL); on a fresh install,
+   generate 16 random bytes with `crypto.randomBytes`. Write `~/.ccchrome.json` and `tokens.json`,
+   both `chmod 600`. **`tokens.json` is overwritten, not merged** — that is exactly how old tokens
+   get revoked.
+6. **Write the service file** with **absolute paths** to `node` and `claude` (a background service
+   does not have your terminal's `PATH`) and `CC_CHROME_HOST=127.0.0.1` hard-coded, then load it and
+   wait up to 20 seconds for `/health`.
+7. **Register the MCP server** with Claude Code and copy the slash command.
 
-Gỡ sạch mọi thứ trên:
+To remove all of the above:
 
 ```bash
 bash ~/.cc-chrome-bridge/uninstall.sh                                              # macOS / Linux
@@ -166,54 +219,55 @@ bash ~/.cc-chrome-bridge/uninstall.sh                                           
 powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.cc-chrome-bridge\uninstall.ps1"
 ```
 
-Cả hai đều **giữ lại `panel/`** — đó là lịch sử hội thoại của khung chat, dữ liệu của bạn,
-không phải thứ script tạo ra.
+Both deliberately **keep `panel/`** — that is the side panel's conversation history, your data, not
+something the script created.
 
-### 1c. Cài thủ công, không chạy script
+### 1c. Manual install, without running the script
 
-Nếu bạn không muốn chạy script của người khác, đây là toàn bộ những gì nó làm, dạng lệnh tự gõ:
+If you would rather not run someone else's script, here is everything it does, as commands you type
+yourself:
 
 ```bash
-# 1. Lấy payload (hoặc git clone repo rồi cd server && npm install)
+# 1. Get the payload (or git clone the repo, then cd server && npm install)
 mkdir -p ~/.cc-chrome-bridge/logs && chmod 700 ~/.cc-chrome-bridge
 curl -fsSL https://github.com/TranHuyQn/cc-chrome-extension/releases/latest/download/cc-chrome-bridge.tar.gz \
   | tar -xz -C ~/.cc-chrome-bridge
 
-# 2. Sinh token và ghi hai file cấu hình
+# 2. Generate a token and write the two config files
 TOKEN=$(node -e 'process.stdout.write(require("crypto").randomBytes(16).toString("hex"))')
 printf '{"token":"%s","port":8787}\n' "$TOKEN" > ~/.ccchrome.json
 printf '{"%s":"local"}\n' "$TOKEN" > ~/.cc-chrome-bridge/tokens.json
 chmod 600 ~/.ccchrome.json ~/.cc-chrome-bridge/tokens.json
 
-# 3. Chạy thử ngay trong terminal — chưa cần dịch vụ nền
+# 3. Try it right here in the terminal — no service needed yet
 CC_CHROME_HOST=127.0.0.1 CC_CHROME_PORT=8787 \
 CC_CHROME_TOKENS_FILE="$HOME/.cc-chrome-bridge/tokens.json" \
 CC_CHROME_CLAUDE_BIN="$(command -v claude)" \
 node ~/.cc-chrome-bridge/server/index.js --http
 
-# 4. Đăng ký với Claude Code (terminal khác)
+# 4. Register with Claude Code (another terminal)
 claude mcp add --scope user --transport http chrome \
   http://127.0.0.1:8787/mcp --header "Authorization: Bearer $TOKEN"
 
-# 5. Muốn nó tự chạy nền khi đăng nhập thì dùng chính helper trong gói
+# 5. To have it start in the background at login, use the helper shipped in the payload
 bash -c 'source ~/.cc-chrome-bridge/service-unit.sh \
   && cc_write_unit "$HOME/.cc-chrome-bridge" 8787 && cc_service_start'
 
-# 6. Slash command /ccchrome (tuỳ chọn)
+# 6. The /ccchrome slash command (optional)
 mkdir -p ~/.claude/commands && cp ~/.cc-chrome-bridge/ccchrome.md ~/.claude/commands/
 ```
 
-Bản Windows, cùng bảy bước đó trong PowerShell:
+The Windows version, the same steps in PowerShell:
 
 ```powershell
-# 1. Lấy payload
+# 1. Get the payload
 $Dir = "$env:USERPROFILE\.cc-chrome-bridge"
 New-Item -ItemType Directory -Force -Path "$Dir\logs" | Out-Null
 irm https://github.com/TranHuyQn/cc-chrome-extension/releases/latest/download/cc-chrome-bridge.tar.gz -OutFile "$env:TEMP\cc.tgz"
 tar -xzf "$env:TEMP\cc.tgz" -C $Dir
 
-# 2. Sinh token (RNG của .NET — đừng dùng `node -e` với dấu nháy kép ở đây,
-#    PowerShell 5.1 nuốt mất dấu nháy khi truyền cho lệnh native)
+# 2. Generate a token (.NET RNG — do not use `node -e` with double quotes here,
+#    PowerShell 5.1 eats the quotes when passing them to a native command)
 $bytes = New-Object byte[] 16
 $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
 try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
@@ -223,372 +277,435 @@ $Token = -join ($bytes | ForEach-Object { $_.ToString('x2') })
 icacls "$env:USERPROFILE\.ccchrome.json" /inheritance:r /grant:r "${env:USERNAME}:F" | Out-Null
 icacls "$Dir\tokens.json"              /inheritance:r /grant:r "${env:USERNAME}:F" | Out-Null
 
-# 3. Chạy thử ngay trong cửa sổ này
+# 3. Try it right here in this window
 $env:CC_CHROME_HOST = "127.0.0.1"; $env:CC_CHROME_PORT = "8787"
 $env:CC_CHROME_TOKENS_FILE = "$Dir\tokens.json"
 $env:CC_CHROME_CLAUDE_BIN = (Get-Command claude).Source
 node "$Dir\server\index.js" --http
 
-# 4. Đăng ký với Claude Code (cửa sổ khác)
+# 4. Register with Claude Code (another window)
 claude mcp add --scope user --transport http chrome http://127.0.0.1:8787/mcp --header "Authorization: Bearer $Token"
 
-# 5. Muốn tự chạy nền khi đăng nhập
+# 5. To have it start in the background at login
 . "$Dir\service-task.ps1"
 Write-CcLauncher -InstallDir $Dir -Port 8787
 Register-CcTask -InstallDir $Dir
 Start-CcTask
 
-# 6. Slash command /ccchrome (tuỳ chọn)
+# 6. The /ccchrome slash command (optional)
 New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.claude\commands" | Out-Null
 Copy-Item "$Dir\ccchrome.md" "$env:USERPROFILE\.claude\commands\"
 ```
 
-Sau đó vẫn còn hai việc trong Chrome ở mục ngay dưới đây. URL cần dán là
-`ws://127.0.0.1:8787/ws?token=<TOKEN vừa sinh>` — đọc lại bằng
-`cat ~/.ccchrome.json` (macOS/Linux) hoặc
-`Get-Content "$env:USERPROFILE\.ccchrome.json"` (Windows) nếu bạn quên.
+After that there are still two things to do inside Chrome, in the section right below. The URL you
+need to paste is `ws://127.0.0.1:8787/ws?token=<the token you just generated>` — read it back with
+`cat ~/.ccchrome.json` (macOS/Linux) or `Get-Content "$env:USERPROFILE\.ccchrome.json"` (Windows) if
+you forget it.
 
-### 2. Hai việc phải tự làm trong Chrome
+### 2. Two things you have to do yourself in Chrome
 
-Script không tự làm được — Chrome không cho một script cài extension thay bạn:
+The script cannot do these — Chrome does not let a script install an extension on your behalf:
 
-1. Mở `chrome://extensions` → bật **Developer mode** → **Load unpacked** → chọn thư mục
-   `~/.cc-chrome-bridge/extension` (script đã in đúng đường dẫn này ở bước trước)
-2. Bấm icon extension "Claude Code Chrome Bridge" → dán URL script đã in (dạng
-   `ws://127.0.0.1:8787/ws?token=...`) vào ô "Địa chỉ MCP server" → **Lưu & kết nối lại**
+1. Open `chrome://extensions` → turn on **Developer mode** → **Load unpacked** → pick the
+   `~/.cc-chrome-bridge/extension` directory (the script printed the exact path in the previous
+   step).
+2. Click the "Claude Code Chrome Bridge" extension icon → paste the URL the script printed (of the
+   form `ws://127.0.0.1:8787/ws?token=...`) into the "Địa chỉ MCP server" (MCP server address) field →
+   **Lưu & kết nối lại** (Save & reconnect).
 
-Badge chuyển `on` màu xanh là xong. Mở khung chat (side panel) bằng nút "Mở khung chat" ngay trong
-popup nếu muốn gõ thẳng không qua terminal — xem [Khung chat](#khung-chat-side-panel).
+The badge turning green with `on` means you are done. Open the side panel with the "Mở khung chat"
+(Open chat panel) button in the popup if you want to type directly without a terminal — see
+[Side panel chat](#side-panel-chat).
 
-### 3. Dùng
+> The extension UI (popup, side panel buttons) is currently in Vietnamese. English translations are
+> given in parentheses throughout this README.
 
-Mở một phiên `claude` mới (MCP server đã đăng ký sẵn, không cần khởi động gì thêm — dịch vụ nền đã
-chạy từ bước cài). Ra lệnh bình thường, ví dụ: *"mở github.com và chụp màn hình"*, *"đọc trang hiện
-tại rồi điền form đăng ký"*.
+### 3. Using it
 
-Kiểm tra kết nối trong Claude Code: gõ `/mcp` → chọn `chrome` → xem tools, hoặc bảo Claude gọi tool
-`chrome_status`. Ngoài Claude Code, gõ `/ccchrome status` (slash command script vừa cài) để xem bridge
-có sống không và extension đã nối chưa.
+Start a new `claude` session (the MCP server is already registered, and there is nothing extra to
+start — the background service has been running since install). Ask for what you want in plain
+language, e.g. *"open github.com and take a screenshot"*, *"read the current page and fill in the
+signup form"*.
 
-### Gỡ cài đặt
+To check the connection from inside Claude Code: type `/mcp` → pick `chrome` → look at the tools, or
+ask Claude to call the `chrome_status` tool. Outside Claude Code, run `/ccchrome status` (the slash
+command the script just installed) to see whether the bridge is alive and whether the extension is
+connected.
+
+### Uninstall
 
 ```bash
 bash ~/.cc-chrome-bridge/uninstall.sh
 ```
 
-Trên Windows:
+On Windows:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.cc-chrome-bridge\uninstall.ps1"
 ```
 
-Xem trước sẽ xoá gì mà không đụng file nào: `bash ~/.cc-chrome-bridge/uninstall.sh --dry-run`
-(bản `.ps1` chưa có `--dry-run`).
+To preview what would be deleted without touching a file: `bash ~/.cc-chrome-bridge/uninstall.sh --dry-run`
+(the `.ps1` version has no `--dry-run` yet).
 
-Script dừng dịch vụ nền, gỡ đăng ký MCP server `chrome`, xoá token và mã nguồn dưới
-`~/.cc-chrome-bridge/`. Hai thứ nó **không** đụng tới, và tự in ra khi chạy xong:
+The script stops the background service, unregisters the `chrome` MCP server, and deletes the token
+and the source under `~/.cc-chrome-bridge/`. Two things it does **not** touch, and says so when it
+finishes:
 
-- **Extension trong Chrome** — Chrome không cho một script gỡ extension. Tự vào `chrome://extensions`
-  → tìm "Claude Code Chrome Bridge" → **Remove**.
-- **`~/.cc-chrome-bridge/panel`** — lịch sử hội thoại của khung chat (side panel), không phải thứ
-  `install.sh` tạo ra nên `uninstall.sh` cố tình giữ lại. Muốn xoá luôn: `rm -rf ~/.cc-chrome-bridge/panel`.
+- **The extension inside Chrome** — Chrome does not let a script remove an extension. Go to
+  `chrome://extensions` yourself → find "Claude Code Chrome Bridge" → **Remove**.
+- **`~/.cc-chrome-bridge/panel`** — the side panel's conversation history. It is not something
+  `install.sh` created, so `uninstall.sh` keeps it on purpose. To delete it too:
+  `rm -rf ~/.cc-chrome-bridge/panel`.
 
-### Xử lý sự cố
+### When something goes wrong
 
-- **Xem log**: `~/.cc-chrome-bridge/logs/bridge.err.log` (lỗi) và `bridge.log` (output thường). Hoặc
-  gõ `/ccchrome logs` trong Claude Code.
-- **Khởi động lại dịch vụ**: `/ccchrome restart`, hoặc tự chạy tay (cài qua `curl` thì bạn không có
-  thư mục `scripts/` của repo trên máy — file đã cài nằm ở `~/.cc-chrome-bridge/service-unit.sh`):
+- **Logs**: `~/.cc-chrome-bridge/logs/bridge.err.log` (errors) and `bridge.log` (normal output). Or
+  type `/ccchrome logs` in Claude Code.
+- **Restart the service**: `/ccchrome restart`, or by hand (if you installed via `curl` you do not
+  have the repo's `scripts/` directory on your machine — the installed file lives at
+  `~/.cc-chrome-bridge/service-unit.sh`):
   ```bash
   bash -c 'source "$HOME/.cc-chrome-bridge/service-unit.sh" && cc_service_stop && cc_service_start'
   ```
-- **Đổi phiên bản Node (nvm/volta/fnm)**: dịch vụ nền ghi đường dẫn tuyệt đối tới `node` lúc cài, nên
-  đổi phiên bản Node sau đó làm dịch vụ crash-loop âm thầm. Chạy lại lệnh cài ở mục 1 để ghi lại đường
-  dẫn `node` hiện tại.
-- **Trên Windows**: xem dịch vụ còn sống không bằng
+- **Switching Node versions (nvm/volta/fnm)**: the service records the absolute path to `node` at
+  install time, so changing Node version afterwards makes the service crash-loop silently. Re-run the
+  install command from section 1 to record the current `node` path.
+- **On Windows**: check whether the service is alive with
   ```powershell
   Get-ScheduledTask ccchrome-bridge | Select-Object State
   ```
-  `State` phải là **Running**. Nếu là `Ready` thì bridge đang không chạy — khởi động lại bằng
-  `Start-ScheduledTask ccchrome-bridge`, và xem log ở
+  `State` must be **Running**. If it says `Ready`, the bridge is not running — start it again with
+  `Start-ScheduledTask ccchrome-bridge`, and read the log at
   `%USERPROFILE%\.cc-chrome-bridge\logs\bridge.err.log`.
-- **Trên Linux, dịch vụ không tự lên sau khi khởi động lại máy**: `systemd --user` cần một phiên đăng
-  nhập thật. Nếu bạn cài qua ssh hoặc không đăng nhập vào giao diện đồ hoạ, chạy
-  `sudo loginctl enable-linger $USER` rồi cài lại. Máy dùng systemd cũ hơn 240 (ví dụ Ubuntu 18.04)
-  thì log không ghi ra file mà vào journal — đọc bằng `journalctl --user -u ccchrome-bridge -e`;
-  script cài in đúng chỗ xem log cho máy của bạn.
+- **On Linux, the service does not come back after a reboot**: `systemd --user` needs a real login
+  session. If you installed over ssh, or you do not log into a graphical session, run
+  `sudo loginctl enable-linger $USER` and reinstall. On machines with systemd older than 240 (Ubuntu
+  18.04, for example) the logs do not go to a file but to the journal — read them with
+  `journalctl --user -u ccchrome-bridge -e`; the install script prints the right place to look for
+  your machine.
 
-## Tools cung cấp cho Claude Code
+## Tools available to Claude Code
 
-| Nhóm | Tool | Chức năng |
+| Group | Tool | What it does |
 |---|---|---|
-| Điều hướng | `navigate` | Mở URL / back / forward / reload, chờ trang load xong |
-| Đọc trang | `read_page` | Cấu trúc trang + các element tương tác (kèm số `ref` để click/fill) |
-| | `get_page_text` | Toàn bộ text hiển thị của trang |
-| | `find` | Tìm text trên trang, trả về ngữ cảnh + ref của element click được |
-| Tương tác | `click`, `fill`, `fill_form` | Click / điền form theo `ref` hoặc CSS selector (bắn event chuẩn, tương thích React/Vue) |
-| | `press_key`, `type_text` | Phím thật qua debugger API (Enter, Tab, phím tắt, gõ text) |
-| | `scroll`, `wait_for` | Cuộn trang, chờ element xuất hiện |
-| | `upload_file` | Gắn file vào `<input type=file>` |
-| Quan sát | `take_screenshot` | Chụp PNG viewport hoặc cả trang |
-| | `javascript_eval` | Chạy JavaScript trong trang, trả kết quả |
-| | `read_console_messages` | Đọc console log/warn/error + exception |
-| | `read_network_requests` | Đọc request mạng (URL, status, size, lỗi) |
-| Tab/cửa sổ | `list_tabs`, `new_tab`, `close_tab`, `switch_tab`, `resize_window` | Quản lý tab và cửa sổ |
-| Khác | `chrome_status` | Kiểm tra extension đã kết nối chưa |
+| Navigation | `navigate` | Open a URL / back / forward / reload, waiting for the page to finish loading |
+| Reading | `read_page` | Page structure + interactive elements (with a numeric `ref` for click/fill) |
+| | `get_page_text` | All visible text on the page |
+| | `find` | Search for text on the page; returns context plus refs of clickable elements |
+| Interaction | `click`, `fill`, `fill_form` | Click / fill a form by `ref` or CSS selector (fires proper events, works with React/Vue) |
+| | `press_key`, `type_text` | Real keystrokes via the debugger API (Enter, Tab, shortcuts, typing text) |
+| | `scroll`, `wait_for` | Scroll the page, wait for an element to appear |
+| | `upload_file` | Attach a file to an `<input type=file>` |
+| Observation | `take_screenshot` | Capture a PNG of the viewport or the full page |
+| | `javascript_eval` | Run JavaScript in the page and return the result |
+| | `read_console_messages` | Read console log/warn/error plus exceptions |
+| | `read_network_requests` | Read network requests (URL, status, size, errors) |
+| Tabs/windows | `list_tabs`, `new_tab`, `close_tab`, `switch_tab`, `resize_window` | Manage tabs and windows |
+| Other | `chrome_status` | Check whether the extension is connected |
 
-## Nhóm tab theo phiên
+## Per-session tab groups
 
-**Nâng cấp:** cài lại extension cho cả team — xem ghi chú ở
-đầu file, extension cũ ghép server mới vẫn chạy được nhưng không có cách ly.
+**Upgrading:** reinstall the extension — see the note in [Installation](#installation); an older
+extension paired with a newer server still runs, but without isolation.
 
-Mỗi phiên Claude Code (mỗi lần chạy `claude`, hoặc mỗi kết nối
-MCP ở chế độ `--http`) có **một tab group riêng** trong Chrome, đặt tên
-`Claude · xxxx` (4 ký tự đầu của session id) và tô màu cam để phân biệt với
-tab cá nhân.
+Every Claude Code session (every `claude` run, or every MCP connection in `--http` mode) gets **its
+own tab group** in Chrome, named `Claude · xxxx` (the first 4 characters of the session id) and
+coloured orange so it stands out from your personal tabs.
 
-Trong lúc Claude thao tác, mép khung nhìn của tab đó ửng lên một vệt cam mờ,
-đậm nhất sát mép rồi loang vào trong và tan hẳn — không có đường viền cứng.
-Vệt này tự biến mất khoảng 30 giây sau khi Claude ngừng đụng vào tab, nên khi
-không thấy khung nghĩa là không có lệnh nào đang chạy trên tab đó. Khung do
-extension vẽ đè lên trang, không phải lỗi hiển thị của website, không nhận chuột
-và không lọt vào ảnh `take_screenshot`. Một số trang extension không chèn được
-(`chrome://`, trình xem PDF, tab trắng `about:blank`) sẽ không có khung.
+While Claude is working, the edge of that tab's viewport glows a soft orange — strongest at the edge,
+fading inwards, with no hard border. It disappears roughly 30 seconds after Claude stops touching the
+tab, so no glow means nothing is running on that tab. The glow is drawn by the extension on top of
+the page; it is not a rendering bug of the website, it does not take mouse input, and it does not
+appear in `take_screenshot` images. A few pages the extension cannot inject into (`chrome://`, the
+PDF viewer, a blank `about:blank` tab) will not show it.
 
-- Tab do `navigate` (không kèm `tabId`) hoặc `new_tab` mở ra sẽ **tự động vào
-  nhóm của phiên đó** — không còn chiếm tab đang mở trước mặt bạn như trước
-  trước đây nữa.
-- Tab đó mở **trong nền, không giành focus của bạn** — Chrome không tự nhảy
-  sang tab hay cửa sổ đó, bạn cứ tiếp tục làm việc trên tab đang xem trong khi
-  Claude thao tác ở tab riêng của nó. Cần xem nó thì gọi `switch_tab`.
-- **Không một tool nào kéo cửa sổ Chrome lên trước ứng dụng bạn đang dùng.**
-  Kể cả `switch_tab`: nó chỉ đổi tab đang hiện *bên trong* cửa sổ chứa tab đó,
-  nên lúc bạn quay lại Chrome sẽ thấy đúng tab Claude muốn cho xem, còn đang
-  gõ ở terminal hay editor thì không bị giật ra. `test/focus.test.mjs` chạy
-  **toàn bộ** handler và bắt lỗi ngay nếu có tool nào activate tab của bạn
-  hoặc gọi `chrome.windows.update({focused:true})`.
-- **Mọi tool chỉ thao tác được trên tab đang nằm trong nhóm của phiên mình.**
-  Gọi tool với `tabId` của một tab ngoài nhóm sẽ bị từ chối kèm tên nhóm và
-  cách xử lý (kéo tab vào nhóm, hoặc mở tab mới bằng `new_tab`).
-- **Kéo tab của bạn vào nhóm chính là cách cấp quyền cho Claude đọc/thao tác
-  trên tab đó** — giống hệt cách extension Claude for Chrome chính thức hoạt
-  động, nhóm là ranh giới những gì Claude nhìn thấy được.
-- `list_tabs` chỉ liệt kê tab trong nhóm của phiên mình, không phải toàn bộ
-  tab đang mở trong Chrome.
-- Chrome không cho tồn tại một tab group rỗng, nên **nhóm chỉ xuất hiện sau
-  khi Claude mở tab đầu tiên** trong phiên đó (qua `navigate` hoặc `new_tab`).
-  Trước đó bạn chưa có nhóm nào để kéo tab vào.
-- Extension cần thêm quyền `tabGroups` (đã có trong `extension/manifest.json`
-  ) để tạo và quản lý các nhóm này.
+- A tab opened by `navigate` (without a `tabId`) or by `new_tab` **automatically joins that session's
+  group** — it no longer commandeers the tab in front of you the way it used to.
+- That tab opens **in the background and does not steal your focus** — Chrome does not jump to that
+  tab or that window; you keep working on the tab you are looking at while Claude works in its own.
+  Call `switch_tab` when you want to look at it.
+- **No tool raises the Chrome window in front of the application you are using.** Not even
+  `switch_tab`: it only changes the visible tab *inside* the window that already holds it, so when
+  you come back to Chrome you see the tab Claude wanted to show you, while typing in a terminal or
+  editor is never interrupted. `test/focus.test.mjs` runs **every** handler and fails immediately if
+  any tool activates your tab or calls `chrome.windows.update({focused:true})`.
+- **Every tool can only act on tabs inside its own session's group.** Calling a tool with the `tabId`
+  of a tab outside the group is refused, with the group name and what to do about it (drag the tab
+  into the group, or open a new one with `new_tab`).
+- **Dragging one of your tabs into the group is how you grant Claude read/write access to it** —
+  exactly the way the official Claude for Chrome extension works: the group is the boundary of what
+  Claude can see.
+- `list_tabs` only lists tabs in its own session's group, not every tab open in Chrome.
+- Chrome does not allow an empty tab group to exist, so **the group only appears after Claude opens
+  its first tab** in that session (via `navigate` or `new_tab`). Before that there is no group to
+  drag a tab into.
+- The extension needs the `tabGroups` permission (already in `extension/manifest.json`) to create and
+  manage these groups.
 
-### Hai điều cần biết trước khi dùng
+### Two things to know before you use it
 
-**Nhóm cũ không tự dọn.** Session id đổi mỗi lần bạn chạy lại `claude`, và ở
-chế độ `--http` cũng đổi sau khi phiên MCP hết hạn nhàn rỗi. Nhóm của phiên cũ
-vẫn nằm nguyên trong Chrome nhưng đã **mồ côi**: không phiên nào đang sống sở
-hữu nó nữa, nên Claude không thao tác được lên tab trong đó (bị từ chối như mọi
-tab ngoài nhóm) và `list_tabs` cũng không thấy. Extension không tự đóng chúng —
-bạn tự đóng bằng tay khi thấy nhiều nhóm cam xếp đống. Đây là hành vi đúng như
-thiết kế, không phải lỗi.
+**Old groups are not cleaned up.** The session id changes every time you run `claude` again, and in
+`--http` mode it also changes after an MCP session idles out. The old session's group stays in Chrome
+but is now **orphaned**: no live session owns it, so Claude cannot act on the tabs inside it (they
+are refused like any out-of-group tab) and `list_tabs` does not see them. The extension does not close
+them — close them by hand when the orange groups pile up. This is by design, not a bug.
 
-**`resize_window` tác động lên cả cửa sổ, không chỉ tab trong nhóm.** Nó tìm
-tab trong nhóm của phiên rồi đổi kích thước **cửa sổ chứa tab đó** — mà cửa sổ
-đó có thể đang chứa cả tab cá nhân của bạn. Ranh giới nhóm là **theo tab**, chứ
-không phải theo cửa sổ: Claude không đọc/không bấm được tab ngoài nhóm, nhưng
-vẫn có thể làm cửa sổ chứa chúng đổi kích thước. Muốn tách hẳn thì để nhóm của
-Claude ở một cửa sổ riêng.
+**`resize_window` affects the whole window, not just the tabs in the group.** It finds a tab in the
+session's group and resizes **the window containing that tab** — and that window may also contain your
+own personal tabs. The group boundary is **per tab**, not per window: Claude cannot read or click a
+tab outside the group, but it can still resize the window those tabs are in. If you want real
+separation, keep Claude's group in a window of its own.
 
-## Khung chat (side panel)
+## Side panel chat
 
-Extension có một khung chat nhúng ngay trong Chrome (side panel) —
-gõ thẳng vào đó thay vì phải mở terminal chạy `claude`. Mỗi lượt chat, server
-chạy một tiến trình `claude` mới (headless, `--tools ""`, chỉ có tool
-`mcp__chrome`) rồi stream kết quả về khung chat qua một WebSocket riêng
-(`/panel`, tách khỏi `/ws` mà extension dùng).
+The extension has a chat panel embedded directly in Chrome (the side panel) — type into it instead of
+opening a terminal and running `claude`. For each chat turn the server spawns a fresh `claude`
+process (headless, `--tools ""`, with only the `mcp__chrome` tools) and streams the result back to
+the panel over a separate WebSocket (`/panel`, distinct from the `/ws` the extension uses).
 
-Khung chat hiện tiến trình theo thời gian thực: mỗi lần Claude gọi một công cụ trình duyệt
-sẽ có một dòng riêng, mở ra ngay lúc nó quyết định gọi, và đóng lại bằng ✓ hoặc ✗ kèm thời
-gian chạy. Bấm vào dòng đó để xem tham số và kết quả (kết quả đã được cắt bớt ở server).
-Dải chữ ngay trên ô nhập luôn cho biết đang ở giai đoạn nào — đang gửi yêu cầu, đang suy
-nghĩ, đang chạy công cụ nào, đang trả lời — kèm số giây trôi.
+The panel shows progress in real time: each browser tool Claude calls gets its own row, opened the
+moment it decides to call it, and closed with a ✓ or ✗ plus how long it took. Click a row to see the
+arguments and the result (the result is truncated on the server). The status line just above the
+input box always says which phase you are in — sending the request, thinking, running which tool,
+replying — along with a running second count.
 
-Ngôn ngữ của phần chữ mô tả hoạt động bám theo ngôn ngữ bạn gõ: nhắn tiếng Việt thì hiện
-"Đang suy nghĩ", nhắn tiếng Anh thì hiện "Thinking". Nút bấm vẫn giữ tiếng Việt.
+The language of those activity descriptions follows the language you type in: message in Vietnamese
+and it says "Đang suy nghĩ", message in English and it says "Thinking". The buttons stay in
+Vietnamese.
 
-Đóng panel rồi mở lại sẽ thấy lại toàn bộ nội dung đã trao đổi. Bấm "Phiên mới" mới xoá.
+Close the panel and reopen it and everything you exchanged is still there. Only "Phiên mới" (New
+session) clears it.
 
-### Bật khung chat
+### Turning the panel on
 
-Cài bằng `install.sh` (hoặc `install.ps1`) là **có sẵn luôn** — bridge do dịch vụ nền
-chạy đã bind đúng `127.0.0.1` theo mặc định (xem [Cài đặt](#cài-đặt)), và đó
-là điều kiện duy nhất khung chat cần ngoài bridge đang sống. Không có bước
-bật riêng: cài xong, dán URL vào popup extension như bình thường (bước 2 ở
-mục Cài đặt), rồi bấm icon extension → **Mở khung chat**.
+Installing with `install.sh` (or `install.ps1`) means it is **already on** — the bridge run by the
+background service binds `127.0.0.1` by default (see [Installation](#installation)), and that is the
+only condition the panel needs beyond a live bridge. There is no separate enable step: install, paste
+the URL into the extension popup as usual (step 2 in Installation), then click the extension icon →
+**Mở khung chat** (Open chat panel).
 
-Khung chat **chỉ bật khi bridge bind đúng `127.0.0.1`** — đây là chủ đích chứ
-không phải giới hạn tạm thời, xem [Lưu ý bảo mật](#lưu-ý-bảo-mật). Nếu bạn tự
-đặt `CC_CHROME_HOST` khác `127.0.0.1`/`::1` khi chạy tay, khung chat tắt hẳn — không có cờ nào bật lại được, xem mục "Khung chat
-không làm được gì".
+The panel **only turns on when the bridge binds `127.0.0.1`** — that is intentional, not a temporary
+limitation; see [Security notes](#security-notes). If you run the bridge by hand with
+`CC_CHROME_HOST` set to something other than `127.0.0.1`/`::1`, the panel is off entirely — there is
+no flag that turns it back on, see "What the panel cannot do".
 
-### Khung chat không làm được gì
+### What the panel cannot do
 
-Nói thẳng để khỏi hiểu nhầm:
+Stated plainly, so there is no misunderstanding:
 
-- **Claude không tự thấy tab bạn đang xem.** Nó chỉ thao tác được trên tab
-  nằm trong tab group riêng của phiên panel (như mọi phiên khác — xem [Nhóm
-  tab theo phiên](#nhóm-tab-theo-phiên)). Muốn nó làm việc trên trang đang mở,
-  bấm **Đưa tab này vào phiên** ngay trong khung chat.
-- **Agent trong panel không đọc/ghi được file nào trên máy** — chạy với
-  `--tools ""`, chỉ có đúng các tool điều khiển trình duyệt (`mcp__chrome`).
-- **Agent trong panel không thấy plugin, hook hay ký ức chéo project nào của
-  bạn** — tiến trình `claude` mà server spawn cho mỗi lượt chat chạy với cờ
-  `--setting-sources project`, loại hẳn cấu hình cấp người dùng
-  (`~/.claude/settings.json`) ra khỏi phiên. Đây là chủ đích: nếu không có cờ
-  này, một plugin bật toàn cục (ví dụ plugin ghi nhớ chạy qua hook
-  `SessionStart`) sẽ nạp ký ức từ **mọi project khác** vào phiên panel, kể cả
-  khi bạn vừa bấm "Phiên mới" — log trên UI trống nhưng model vẫn nhớ việc ở
-  project khác, vì ký ức đó chưa bao giờ đến từ hội thoại. Panel bị cô lập
-  khỏi cấu hình người dùng để khớp với extension Claude for Chrome gốc (không
-  giữ gì qua lại giữa các phiên) và với tính năng ghi nhớ của Claude (vốn
-  tách riêng theo từng project).
-- **Server không lưu nội dung hội thoại nào cả** — nhưng lịch sử vẫn tồn tại
-  trên chính máy này, trong file phiên của CLI `claude` dưới
-  `~/.cc-chrome-bridge/panel` (xem mục Vận hành bên dưới), và **sống sót qua
-  việc đóng/mở lại khung chat** — mở lại panel là tiếp tục đúng hội thoại cũ,
-  không phải bắt đầu mới. Bấm **Phiên mới** mới thực sự bắt đầu một hội thoại
-  trắng; hội thoại cũ vẫn nằm nguyên trên đĩa, không có gì tự dọn. **Nhưng
-  "Phiên mới" không đổi tab group**: nhóm tab gắn với khung chat (theo cửa sổ),
-  không gắn với hội thoại — nên mọi tab bạn đã "đưa vào phiên" trước đó vẫn
-  nằm trong nhóm và hội thoại mới vẫn thao tác được trên chúng. Muốn cắt hẳn
-  thì tự kéo tab ra khỏi nhóm hoặc đóng chúng. Cũng vì thế, mất kết nối rồi
-  nối lại (hay restart bridge) không làm mất nhóm tab: khung chat nhớ và khai
-  báo lại đúng nhóm cũ.
-- **Chỉ chạy được với bridge chạy trên chính máy bạn** — đúng như bridge cài
-  bằng `install.sh` mặc định. Server từ chối `/panel` (đóng socket với mã 4004) trừ
-  khi **cả ba** điều kiện cùng đúng: (1) bridge bind loopback
-  (`127.0.0.1`/`::1`), (2) kết nối đến từ chính máy đó — địa chỉ peer của
-  socket là loopback, (3) request **không** mang header `X-Forwarded-For`,
-  `X-Forwarded-Proto` hay `X-Forwarded-Host` nào. Có header đó nghĩa là có
-  reverse proxy đứng trước, mà proxy thì đứng ra kết nối hộ người khác — địa
-  chỉ peer lúc đó là của proxy (loopback) chứ không phải của người gọi thật.
-  Nói cách khác: đặt bridge sau một reverse proxy terminate TLS thì nó bind
-  loopback nhưng vẫn **không** bật khung chat — và đó là chủ đích, vì sau
-  `/panel` là một tiến trình `claude` chạy trên máy đó bằng tài khoản đang
-  đăng nhập. Không có biến môi trường nào bật lại được: cái công tắc nào bật
-  được thì sẽ có người bật.
+- **Claude does not see the tab you are looking at.** It can only act on tabs inside the panel
+  session's own tab group (like every other session — see
+  [Per-session tab groups](#per-session-tab-groups)). To have it work on the page you have open,
+  click **Đưa tab này vào phiên** (Add this tab to the session) inside the panel.
+- **The panel agent cannot read or write any file on your machine** — it runs with `--tools ""`, so
+  it has only the browser-control tools (`mcp__chrome`).
+- **The panel agent does not see any of your plugins or cross-project memory** — the `claude`
+  process the server spawns for each chat turn runs with `--setting-sources project`, which removes
+  user-level configuration (`~/.claude/settings.json`) from the session entirely. This is deliberate:
+  without that flag, a globally enabled plugin (say a memory plugin running through a `SessionStart`
+  hook) would load memories from **every other project** into the panel session, even right after you
+  pressed "Phiên mới" — the log on screen is empty but the model still remembers work from another
+  project, because that memory never came from the conversation. The panel is isolated from user
+  configuration to match the original Claude for Chrome extension (which keeps nothing between
+  sessions) and Claude's own memory feature (which is siloed per project).
+- **The server does not store any conversation content** — but the history does exist on this
+  machine, in the `claude` CLI's own session files under `~/.cc-chrome-bridge/panel` (see Operations
+  below), and it **survives closing and reopening the panel** — reopening continues the same
+  conversation rather than starting a new one. Only **Phiên mới** (New session) really starts a blank
+  conversation; the old one stays on disk, and nothing cleans it up. **But "Phiên mới" does not change
+  the tab group**: the group is tied to the panel (per window), not to the conversation — so every
+  tab you previously "added to the session" is still in the group and the new conversation can still
+  act on them. To cut that off, drag the tabs out of the group or close them. For the same reason,
+  losing the connection and reconnecting (or restarting the bridge) does not lose the tab group: the
+  panel remembers and re-declares the same group.
+- **It only works against a bridge running on your own machine** — which is exactly what
+  `install.sh` gives you by default. The server refuses `/panel` (closing the socket with code 4004)
+  unless **all three** conditions hold: (1) the bridge binds loopback (`127.0.0.1`/`::1`), (2) the
+  connection comes from that same machine — the socket's peer address is loopback, (3) the request
+  carries **no** `X-Forwarded-For`, `X-Forwarded-Proto` or `X-Forwarded-Host` header. Those headers
+  mean a reverse proxy is in front, and a proxy connects on someone else's behalf — the peer address
+  is then the proxy's (loopback), not the real caller's. In other words: put the bridge behind a
+  TLS-terminating reverse proxy and it binds loopback but still does **not** enable the panel — and
+  that is the intent, because behind `/panel` is a `claude` process running on that machine under the
+  logged-in account. No environment variable turns it back on: a switch that can be flipped is a
+  switch someone will flip.
 
-### Nếu khung chat mở chậm
+### If the panel feels slow
 
-Mỗi lượt chat spawn một tiến trình `claude` mới — đó là chi phí cố hữu của
-kiến trúc spawn-mỗi-lượt (khởi động CLI, nạp MCP server...), không phải lỗi
-mạng hay lỗi model.
+Each chat turn spawns a fresh `claude` process — that is the inherent cost of the spawn-per-turn
+architecture (CLI startup, loading MCP servers, and so on), not a network problem or a model problem.
 
-**Không còn do `SessionStart` hook nữa.** Bản thân tiến trình được spawn với
-`--setting-sources project` (xem mục ngay trên), nên hook cấp người dùng —
-kể cả hook chạy qua plugin bật toàn cục — không nạp vào phiên panel nữa. Đã
-đo lại bằng thực nghiệm: trước khi thêm cờ, `system:init` của mỗi lượt chat
-báo `plugins` khác rỗng và một hook `SessionStart` thật (ghi file side-effect
-ra đĩa) chạy đúng mỗi lượt; sau khi thêm cờ, `plugins: []` và hook đó không
-chạy nữa, dù vẫn cùng máy, cùng file cấu hình `~/.claude/settings.json`.
+**It is no longer caused by a `SessionStart` hook.** The process is spawned with
+`--setting-sources project` (see the section just above), so user-level **plugins** — and any hook
+that runs through one — are no longer loaded into the panel session. This was re-measured
+empirically: before the flag, each turn's `system:init` reported a non-empty `plugins` field and a
+real `SessionStart` hook (one that writes a side-effect file to disk) ran on every turn; after the
+flag, `plugins: []` and that hook no longer ran — same machine, same `~/.claude/settings.json`.
 
-### Vận hành
+**Your own hooks do still run** (since 1.0.9). The panel forwards the `hooks` block of your
+`~/.claude/settings.json` into each spawned process through a generated `--settings` file that
+contains only `hooks` and never `enabledPlugins`, so a usage tracker or a notifier of yours keeps
+working. `SessionStart` and `SessionEnd` are dropped on purpose: the panel spawns **one process per
+turn**, so forwarding those two would record an entire session for every message you type.
 
-`~/.cc-chrome-bridge/panel` là thư mục làm việc của mọi tiến trình `claude`
-được spawn cho khung chat, nên nó tích lũy lịch sử phiên của CLI theo thời
-gian — hiện chưa có gì tự dọn, tự xóa bằng tay nếu thấy phình to.
+### Operations
 
-Biến môi trường riêng cho khung chat: `CC_CHROME_PANEL_TOOLS` — xem bảng
-[Cấu hình](#cấu-hình).
+`~/.cc-chrome-bridge/panel` is the working directory of every `claude` process spawned for the panel,
+so it accumulates that CLI's session history over time — nothing prunes it today; delete it by hand
+if it grows.
 
-### Cập nhật bridge
+The panel has one environment variable of its own: `CC_CHROME_PANEL_TOOLS` — see the
+[Configuration](#configuration) table.
 
-Mỗi lần mở khung chat, bridge tự hỏi GitHub xem có bản phát hành mới hơn bản
-đang chạy không. Kết quả được **nhớ 30 phút** (không hỏi lại GitHub liên tục mỗi
-lần bạn mở/đóng panel hay mất kết nối rồi nối lại) — nên một bản phát hành mới
-có thể mất tới nửa tiếng mới hiện ra trên khung chat. Có bản mới thì một dòng
-thông báo hiện ngay trên khung chat ("Có bản x.y.z (đang chạy a.b.c)."), kèm nút
-**Cập nhật** — bridge **không tự cài** gì cả nếu bạn không bấm nút đó.
+### Updating the bridge
 
-Bấm **Cập nhật**: bridge tải file `.tar.gz` của bản mới về, **đối chiếu SHA256**
-với file checksum GitHub phát hành kèm bản đó trước khi đụng đến bất cứ thứ gì
-trên máy — tải hỏng, tải thiếu hay bị sửa dọc đường đều bị chặn ở bước này.
-Qua được thì bridge tự sao lưu bản đang chạy, cài bản mới đè lên, khởi động
-lại dịch vụ nền, rồi tự kiểm tra bản mới có sống dậy được không. **Nếu bridge
-mới không lên được, nó tự khôi phục lại bản cũ** — chép nguyên bản sao lưu về
-chỗ cũ, và nếu lúc đó dịch vụ nền đang không chạy thì tự bật lại dịch vụ luôn,
-rồi chờ `/health` trả lời để chắc chắn bridge đã sống lại.
+Every time you open the panel, the bridge asks GitHub whether there is a release newer than the one
+running. The answer is **cached for 30 minutes** (so it does not re-ask GitHub every time you open or
+close the panel, or lose and regain the connection) — which means a new release can take up to half an
+hour to show up in the panel. When there is one, a line appears at the top of the panel ("Có bản x.y.z
+(đang chạy a.b.c)." — version x.y.z is available, you are running a.b.c) with an **Cập nhật** (Update)
+button. The bridge **installs nothing on its own** unless you press that button.
 
-Vẫn còn vài trường hợp phải tự tay xử lý: bước bật lại dịch vụ ở trên cũng thất
-bại, hoặc không có bản sao lưu để khôi phục (`failed-no-backup`), hoặc trình cập
-nhật gặp lỗi giữa chừng (`crashed`), hoặc một lần cập nhật trước đã dừng dở và
-còn để lại `~/.cc-chrome-bridge.bak` (`already-running`). Cả bốn đều ghi lý do
-vào `~/.ccchrome-update.json`. Với trường hợp đầu, khung chat sẽ báo thẳng
-"Chưa khởi động lại được dịch vụ nền (…)",
-nhưng nếu bridge không lên thì khung chat cũng không mở được để đọc dòng đó —
-nên cứ thấy khung chat tắt ngóm và không tự quay lại sau vài phút thì chạy lại
-lệnh cài ở mục [Cài đặt](#cài-đặt) (nó cài đè, giữ nguyên token, và dựng lại
-dịch vụ nền). Muốn xem chuyện gì đã xảy ra: `~/.ccchrome-update.json` là kết
-quả lần cập nhật gần nhất, `~/.ccchrome-update.log` là toàn bộ output của trình
-cài đặt, và bản cũ (nếu chưa khôi phục xong) nằm ở `~/.cc-chrome-bridge.bak`.
+Press **Cập nhật** and the bridge downloads the new release's `.tar.gz` and **checks its SHA256**
+against the checksum file GitHub publishes with that release, before touching anything on your
+machine — a corrupt, truncated or tampered download is stopped right there. If it passes, the bridge
+backs up the running version, installs the new one over it, restarts the background service, and then
+checks whether the new version came back up. **If the new bridge cannot start, it restores the old
+one** — copying the backup back wholesale, and if the background service happens not to be running at
+that point it starts the service too, then waits for `/health` to answer to be sure the bridge is
+alive again.
 
-Cài xong (thành công), khung chat báo "Đã cài x.y.z. Nạp lại extension để dùng
-giao diện mới." kèm nút **Nạp lại extension** — **phải bấm nút này** thì Chrome
-mới nạp lại phần giao diện (popup, khung chat...) của bản mới; bản thân bridge
-đã chạy phiên bản mới ngay sau bước cài, nhưng extension trong Chrome vẫn giữ
-mã cũ trong bộ nhớ cho tới khi được nạp lại.
+A few cases still need hands: the restart step above also failing, no backup to restore from
+(`failed-no-backup`), the updater hitting an error mid-way (`crashed`), or an earlier update having
+stopped halfway and left `~/.cc-chrome-bridge.bak` behind (`already-running`). All four write their
+reason into `~/.ccchrome-update.json`. For the first case the panel says so directly ("Chưa khởi động
+lại được dịch vụ nền (…)" — could not restart the background service), but if the bridge is not up the
+panel cannot open to show you that line — so if the panel goes dark and does not come back after a few
+minutes, re-run the install command in [Installation](#installation) (it installs over the top, keeps
+the token, and rebuilds the background service). To see what happened:
+`~/.ccchrome-update.json` is the result of the last update, `~/.ccchrome-update.log` is the installer's
+full output, and the old version (if the restore did not finish) is at `~/.cc-chrome-bridge.bak`.
 
-Toàn bộ quá trình chỉ chạy khi bạn chủ động bấm nút trong khung chat trên
-chính máy này — Claude (agent) không có cách nào tự kích hoạt việc cập nhật.
+After a successful install, the panel says "Đã cài x.y.z. Nạp lại extension để dùng giao diện mới."
+(x.y.z installed. Reload the extension to use the new UI.) with a **Nạp lại extension** (Reload
+extension) button — **you have to press it** for Chrome to reload the new UI (popup, panel, …); the
+bridge itself is on the new version immediately after the install step, but the extension in Chrome
+keeps the old code in memory until it is reloaded.
 
-## Cấu hình
+The whole process only runs when you press the button in the panel, on this machine — Claude (the
+agent) has no way to trigger an update itself.
 
-| Biến | Mặc định | Ý nghĩa |
+## Configuration
+
+| Variable | Default | Meaning |
 |---|---|---|
-| `CC_CHROME_PORT` | `8787` | Port HTTP server (Streamable HTTP cho Claude Code + WebSocket cho extension đều đi qua cổng này). **Với dịch vụ nền cài bằng `install.sh`, đây KHÔNG phải biến đọc lúc chạy** — `install.sh` đọc `CC_CHROME_PORT` từ shell của bạn một lần, lúc cài, rồi ghi thẳng con số đó (literal, không phải tên biến) vào file dịch vụ (`scripts/service-unit.sh`). `export CC_CHROME_PORT=...` **sau khi** đã cài không đổi được cổng dịch vụ đang chạy — phải `export` giá trị mới rồi chạy lại lệnh cài ở mục [Cài đặt](#cài-đặt) (hoặc tự sửa file dịch vụ) để đổi cổng. |
-| `CC_CHROME_HOST` | `127.0.0.1` | Địa chỉ bind. **Với dịch vụ nền cài bằng `install.sh`, biến này không có tác dụng gì cả** — không như `CC_CHROME_PORT`, `install.sh` không đọc `CC_CHROME_HOST` từ môi trường: `scripts/service-unit.sh` ghi cứng `127.0.0.1` vào file dịch vụ, không tham số hoá. Đổi được host chỉ khi chạy `node server/index.js --http` bằng tay hoặc tự sửa file dịch vụ. Quan trọng dù vậy vì `AGENT_ENABLED` (bật khung chat side panel) được tính thẳng từ giá trị host lúc chạy: bind khác `127.0.0.1`/`::1` sẽ **âm thầm tắt khung chat**, không có log cảnh báo riêng nào khác ngoài mục này. |
-| `CC_CHROME_TOKENS` | — | Token tĩnh: `token1=tên1,token2=tên2`. `install.sh` dùng `CC_CHROME_TOKENS_FILE` (dưới đây) thay vì biến này. |
-| `CC_CHROME_TOKENS_FILE` | — | Thay thế: file JSON `{"token": "tên"}`. `install.sh` ghi token do nó sinh vào `~/.cc-chrome-bridge/tokens.json` và trỏ dịch vụ nền vào đó. |
-| `CC_CHROME_TIMEOUT_MS` | `45000` | Timeout mỗi lệnh gửi tới extension. |
-| `CC_CHROME_SESSION_TTL_MS` | `28800000` (8 tiếng) | Session MCP không hoạt động quá lâu sẽ bị đóng và dọn. |
-| `CC_CHROME_RECONNECT_GRACE_MS` | `25000` | Khi extension chưa kết nối, mỗi lệnh sẽ **chờ** ngần này rồi mới báo lỗi. Chrome huỷ service worker của extension khi cửa sổ Chrome nằm ở nền (đóng socket với mã 1001), alarm bật lại trong khoảng 30 giây — nhờ khoảng chờ này lệnh chỉ bị chậm thay vì hỏng. Phải nhỏ hơn `CC_CHROME_TIMEOUT_MS`. |
-| `CC_CHROME_PANEL_TOOLS` | `mcp__chrome` | Danh sách MCP tool (truyền thẳng vào cờ `--allowedTools` của Claude Code) mà agent trong khung chat side panel được phép gọi. Không liên quan đến cờ `--tools` — cờ đó bị khóa cứng về `""` để tắt hết tool dựng sẵn (đọc/ghi file...), biến này chỉ chọn trong số các MCP tool còn lại (mặc định chỉ nhóm `mcp__chrome`), không mở lại quyền file. Chỉ có tác dụng khi khung chat bật (xem [Khung chat](#khung-chat-side-panel)). |
-| `CC_CHROME_EXTENSION_ID` | — | Chỉ chấp nhận đúng một extension ID. **Chỉ dùng được khi mọi người cài bản `.crx` đã ký** (ID in ra khi `npm run build`, do `key.pem` quyết định): cài kiểu zip + **Load unpacked** sinh ID theo đường dẫn, khác nhau trên từng máy — đặt biến này khi đó sẽ khoá cả team ra ngoài. Không đặt thì chấp nhận mọi `chrome-extension://`. Xem thêm [Lưu ý bảo mật](#lưu-ý-bảo-mật): pin này thu hẹp chứ không đóng được lỗ origin giả. |
+| `CC_CHROME_PORT` | `8787` | HTTP server port (both Streamable HTTP for Claude Code and the extension's WebSocket go through it). **For a background service installed by `install.sh` this is NOT read at runtime** — `install.sh` reads `CC_CHROME_PORT` from your shell once, at install time, and writes that number (as a literal, not a variable name) into the service file (`scripts/service-unit.sh`). `export CC_CHROME_PORT=...` **after** installing does not change the port of the running service — you must `export` the new value and re-run the install command in [Installation](#installation) (or edit the service file yourself) to change the port. |
+| `CC_CHROME_HOST` | `127.0.0.1` | Bind address. **For a background service installed by `install.sh` this variable does nothing at all** — unlike `CC_CHROME_PORT`, `install.sh` does not read `CC_CHROME_HOST` from the environment: `scripts/service-unit.sh` hard-codes `127.0.0.1` into the service file and does not parameterise it. You can only change the host by running `node server/index.js --http` by hand or by editing the service file yourself. It still matters, because `AGENT_ENABLED` (which turns the side panel chat on) is computed directly from the host value at runtime: binding to something other than `127.0.0.1`/`::1` **silently turns the panel off**, with no warning log other than this table entry. |
+| `CC_CHROME_TOKENS` | — | Static tokens: `token1=name1,token2=name2`. `install.sh` uses `CC_CHROME_TOKENS_FILE` (below) instead of this. |
+| `CC_CHROME_TOKENS_FILE` | — | Alternative: a JSON file `{"token": "name"}`. `install.sh` writes the token it generates to `~/.cc-chrome-bridge/tokens.json` and points the background service at it. |
+| `CC_CHROME_TIMEOUT_MS` | `45000` | Timeout for each command sent to the extension. |
+| `CC_CHROME_SESSION_TTL_MS` | `28800000` (8 hours) | An MCP session idle for longer than this is closed and cleaned up. |
+| `CC_CHROME_RECONNECT_GRACE_MS` | `25000` | While the extension is not connected, each command **waits** this long before reporting an error. Chrome kills the extension's service worker when the Chrome window is in the background (closing the socket with code 1001) and an alarm brings it back within about 30 seconds — this grace window makes commands slow rather than broken. Must be smaller than `CC_CHROME_TIMEOUT_MS`. |
+| `CC_CHROME_PANEL_TOOLS` | `mcp__chrome` | The list of MCP tools (passed straight into Claude Code's `--allowedTools` flag) the side panel agent may call. Unrelated to the `--tools` flag — that one is hard-locked to `""` to disable every built-in tool (file read/write, …); this variable only picks among the remaining MCP tools (by default just the `mcp__chrome` group), and does not re-open file access. Only has an effect when the panel is on (see [Side panel chat](#side-panel-chat)). |
+| `CC_CHROME_EXTENSION_ID` | — | Accept exactly one extension ID. **Only usable when everyone installs the signed `.crx` build** (the ID is printed by `npm run build` and is determined by `key.pem`): a zip + **Load unpacked** install derives the ID from the directory path, which differs per machine — setting this variable in that case locks everyone out. Unset means every `chrome-extension://` origin is accepted. See also [Security notes](#security-notes): this pin narrows the forged-origin hole, it does not close it. |
 
-Đổi port ở phía extension: bấm icon extension → sửa "Địa chỉ MCP server" → **Lưu & kết nối lại**.
+To change the port on the extension side: click the extension icon → edit "Địa chỉ MCP server" (MCP
+server address) → **Lưu & kết nối lại** (Save & reconnect).
 
-## Lưu ý bảo mật
+## Security notes
 
-- **Check origin làm được gì và không làm được gì.** Bridge **bắt buộc** handshake WebSocket phải có header `Origin: chrome-extension://…` (thiếu origin cũng bị từ chối). Việc này chặn được kết nối cross-origin phát sinh từ trong browser — một trang web bất kỳ mở `new WebSocket("ws://127.0.0.1:8787")` sẽ gửi origin `https://…` và bị từ chối — và nâng rào với client local nghiệp dư. Nhưng `Origin` là header do **client tự đặt**, không có gì bảo chứng: một process viết riêng cho việc này (script Node dùng `ws`, hay `curl`) chỉ cần gửi thêm một dòng header là qua được. Test `test/e2e-http.mjs` của chính repo này chứng minh điều đó — nó nối vào server bằng client `ws` thuần Node với origin giả và được chấp nhận như extension thật. **Đừng coi check origin là hàng rào chống được process local có chủ đích.**
-- **Bridge cài bằng `install.sh` chỉ nghe trên loopback (`127.0.0.1`) theo mặc định.** Máy khác trong LAN không tới được `/ws`/`/mcp`. Hàng rào thật với ai đang đứng trên chính máy bạn là **token** (`~/.ccchrome.json`), không phải bind address hay check origin ở trên — nói thẳng, mô hình đe dọa thực tế ở mức này là *"phần mềm khác đang chạy sẵn trên máy bạn"*, và biện pháp giảm thiểu thật sự là **dùng một Chrome profile riêng cho automation**, để dù có bị lợi dụng thì cũng không có tab nào đăng nhập tài khoản cá nhân trong đó.
-- **`navigate` và `javascript_eval` (cùng `press_key`, `type_text`, `upload_file`) đều từ chối trang của chính extension.** `navigate` không đưa được tab tới `chrome-extension://<id>/...` (hay `chrome:`, `devtools:`, `edge:`, `about:` khác `about:blank`); bốn tool còn lại từ chối chạy nếu tab lỡ đã nằm trên một trang như vậy. Trong các bản nội bộ trước 1.0.0, hai chốt này không tồn tại — một model có thể `navigate` một tab vào `chrome-extension://<id>/popup.html` rồi `javascript_eval` ngay trên đó, chạy trong realm đặc quyền của extension với `chrome.tabs.*` không giới hạn, phá vỡ hoàn toàn cách ly theo tab group. `take_screenshot` là ngoại lệ **có chủ đích**, không phải sót: chụp ảnh không sửa gì trên trang, còn bốn tool kia đều mutate.
-- `CC_CHROME_EXTENSION_ID=<id>` thu hẹp thêm (chỉ chấp nhận đúng một extension ID) nhưng **không đóng được lỗ trên** — origin vẫn là chuỗi do client tự khai, chỉ là phải đoán đúng thêm một ID. Và pin này **chỉ dùng được khi cả team cài bản `.crx` đã ký** (kéo thả trên Linux, hoặc enterprise policy trên Windows/macOS): cài kiểu **zip + Load unpacked** như hướng dẫn ở trên sinh ID **theo đường dẫn thư mục**, khác nhau trên máy từng người — đặt pin trong trường hợp đó sẽ khoá cả team ra ngoài.
-- Extension có quyền `<all_urls>` + `debugger` (giống extension gốc của Anthropic) — nhưng khác với bản gốc, mọi tool bị giới hạn trong tab group của phiên (xem [Nhóm tab theo phiên](#nhóm-tab-theo-phiên)): Claude chỉ thao tác được trên tab **đang nằm trong nhóm đó**, kể cả tab đã đăng nhập, chứ không phải mọi trang đang mở trong Chrome. Kéo một tab vào nhóm là tự tay cấp quyền đó cho nó. Khuyến nghị dùng một Chrome profile riêng cho automation nếu không muốn Claude đụng vào tài khoản cá nhân. Quyền `tabGroups` chỉ dùng để tạo/quản lý nhóm này, không mở rộng thêm gì Claude thấy được.
-- Khi tool dùng debugger API (`take_screenshot` — **mọi lần chụp, không chỉ `fullPage`** —, eval, phím, console, network), Chrome hiện thanh thông báo *"... started debugging this browser"* — bình thường, đừng bấm Cancel khi đang chạy.
-- **Đánh đổi thật, không phải giả thuyết:** trong các bản nội bộ trước đây `take_screenshot` (chế độ mặc định, không `fullPage`) chụp được cả khi tab đó đang mở sẵn DevTools. Giờ thì không — DevTools (hay bất kỳ debugger nào khác) đã giữ tab đó thì `chrome.debugger.attach` thất bại và `take_screenshot` báo lỗi thay vì chụp, vì cách cũ để chụp được trong trường hợp đó (`chrome.tabs.update(...,{active:true})` rồi `captureVisibleTab`) chính là thứ đã cướp tab đang active của người dùng mà bản vá này xoá đi — không có đường quay lại nó. Đóng DevTools trên tab đó rồi thử lại.
-- **Token MCP của khung chat đi qua một file, không qua argv.** `AgentSession.mcpConfigPath()` ghi `--mcp-config` (kèm `Authorization: Bearer <token>`) vào `.mcp-config-<sessionId>.json` trong `~/.cc-chrome-bridge/panel`, `chmod 600`, rồi chỉ truyền đúng **đường dẫn** đó vào dòng lệnh `claude` con — bản thân token không nằm trong argv nữa. Trước 1.0.0 nó từng là JSON ghi thẳng vào tham số, đọc được bằng `ps`/`/proc/<pid>/cmdline` trong suốt vòng đời tiến trình con; đổi sang file còn giải quyết luôn việc spawn trên Windows, nơi `cmd.exe` diễn giải lại dấu `"` bên trong JSON đó. Rủi ro còn lại: quyền `600` được set lại ở **mọi lần ghi** vì `mode` của `writeFileSync` chỉ áp dụng lúc tạo file; `dispose()` xoá file khi phiên kết thúc bình thường, nhưng bridge bị kill thẳng tay thì `dispose()` không chạy — file có thể tồn lại trên đĩa, và đó là lý do `uninstall.sh` quét dọn `.mcp-config-*.json` còn sót trong `panel/`.
-- **`install.sh` cũng đưa token vào argv, đúng một lần, khi đăng ký MCP server.** Bước `claude mcp add ... --header "Authorization: Bearer <token>"` truyền token thẳng vào dòng lệnh của tiến trình `claude` con, nên user local khác đọc được bằng `ps`/`/proc/<pid>/cmdline` trong suốt vòng đời lệnh đó. Cùng loại đánh đổi có chủ ý như trên, chỉ khác là vòng đời ngắn (một lệnh, không phải mỗi lượt chat) — và cũng chỉ trên chính máy vốn đã giữ token trong `~/.ccchrome.json`.
+- **What the origin check does and does not do.** The bridge **requires** the WebSocket handshake to
+  carry an `Origin: chrome-extension://…` header (a missing origin is refused too). That blocks
+  cross-origin connections originating inside the browser — an arbitrary web page opening
+  `new WebSocket("ws://127.0.0.1:8787")` sends an `https://…` origin and is refused — and it raises
+  the bar against casual local clients. But `Origin` is a header the **client sets itself**, with
+  nothing vouching for it: a process purpose-built for this (a Node script using `ws`, or `curl`)
+  gets through by sending one extra header line. This repo's own `test/e2e-http.mjs` demonstrates
+  exactly that — it connects to the server with a plain Node `ws` client and a forged origin, and is
+  accepted just like the real extension. **Do not treat the origin check as a barrier against a
+  deliberate local process.**
+- **A bridge installed by `install.sh` listens on loopback (`127.0.0.1`) only, by default.** Other
+  machines on the LAN cannot reach `/ws` or `/mcp`. The real barrier against someone standing on your
+  own machine is the **token** (`~/.ccchrome.json`), not the bind address and not the origin check
+  above — put bluntly, the realistic threat model at this level is *"other software already running
+  on your machine"*, and the genuine mitigation is to **use a separate Chrome profile for
+  automation**, so that even if it is abused there is no tab logged into your personal accounts.
+- **`navigate` and `javascript_eval` (along with `press_key`, `type_text`, `upload_file`) all refuse
+  the extension's own pages.** `navigate` cannot send a tab to `chrome-extension://<id>/...` (nor to
+  `chrome:`, `devtools:`, `edge:`, or any `about:` other than `about:blank`); the other four refuse
+  to run if a tab somehow already sits on such a page. In the internal builds before 1.0.0 neither
+  guard existed — a model could `navigate` a tab to `chrome-extension://<id>/popup.html` and then
+  `javascript_eval` on it, running in the extension's privileged realm with unrestricted
+  `chrome.tabs.*`, breaking tab-group isolation completely. `take_screenshot` is a **deliberate**
+  exception, not an oversight: capturing pixels mutates nothing, while the other four all mutate.
+- `CC_CHROME_EXTENSION_ID=<id>` narrows this further (only one extension ID is accepted) but **does
+  not close the hole above** — the origin is still a string the client declares for itself; there is
+  just one more ID to guess right. And this pin **only works if everyone installs the signed `.crx`
+  build** (drag-and-drop on Linux, or enterprise policy on Windows/macOS): a **zip + Load unpacked**
+  install as described above derives the ID **from the directory path**, which differs from machine
+  to machine — setting the pin in that case locks everyone out.
+- The extension holds `<all_urls>` + `debugger` permissions (like Anthropic's own extension) — but
+  unlike the original, every tool is confined to the session's tab group (see
+  [Per-session tab groups](#per-session-tab-groups)): Claude can only act on tabs **inside that
+  group**, logged-in tabs included, not on every page open in Chrome. Dragging a tab into the group is
+  you granting that access by hand. Using a separate Chrome profile for automation is recommended if
+  you do not want Claude anywhere near your personal accounts. The `tabGroups` permission is used only
+  to create and manage these groups; it does not widen what Claude can see.
+- When a tool uses the debugger API (`take_screenshot` — **on every capture, not only `fullPage`** —,
+  eval, keystrokes, console, network), Chrome shows the *"… started debugging this browser"*
+  notification bar. That is normal; do not click Cancel while it is running.
+- **A real trade-off, not a hypothetical one:** in earlier internal builds `take_screenshot` (default
+  mode, no `fullPage`) could capture a tab that already had DevTools open. It no longer can — once
+  DevTools (or any other debugger) holds that tab, `chrome.debugger.attach` fails and
+  `take_screenshot` returns an error instead of an image, because the old way of capturing in that
+  case (`chrome.tabs.update(...,{active:true})` followed by `captureVisibleTab`) is precisely what
+  stole the user's active tab, and this fix removed it — there is no going back to it. Close DevTools
+  on that tab and try again.
+- **The panel's MCP token travels through a file, not through argv.** `AgentSession.mcpConfigPath()`
+  writes the `--mcp-config` content (including `Authorization: Bearer <token>`) into
+  `.mcp-config-<sessionId>.json` under `~/.cc-chrome-bridge/panel`, `chmod 600`, and passes only that
+  **path** on the child `claude` command line — the token itself is no longer in argv. Before 1.0.0
+  it was JSON written straight into an argument, readable via `ps` / `/proc/<pid>/cmdline` for the
+  whole lifetime of the child process; moving to a file also fixed spawning on Windows, where
+  `cmd.exe` reinterprets the `"` characters inside that JSON. What remains: the `600` mode is
+  re-applied on **every write**, because `writeFileSync`'s `mode` only applies when the file is
+  created; `dispose()` deletes the file when a session ends normally, but if the bridge is killed
+  outright `dispose()` never runs — the file can survive on disk, which is why `uninstall.sh` sweeps
+  up leftover `.mcp-config-*.json` files in `panel/`.
+- **`install.sh` does put the token into argv, exactly once, when it registers the MCP server.** The
+  `claude mcp add ... --header "Authorization: Bearer <token>"` step passes the token straight on the
+  command line of a child `claude` process, so another local user can read it via `ps` /
+  `/proc/<pid>/cmdline` for the lifetime of that command. It is the same kind of deliberate trade-off
+  as above, differing only in lifetime (one command, not every chat turn) — and only on the machine
+  that already holds the token in `~/.ccchrome.json`.
 
-## Chạy test
+## Running the tests
 
-Test E2E khởi động Chromium thật (nạp extension) + MCP server thật và gọi đủ các tool qua giao thức MCP Streamable HTTP (client chính thức của SDK, giống hệt cách Claude Code nói chuyện với bridge):
+The E2E test starts a real Chromium (with the extension loaded) plus a real MCP server and calls the
+tools over the MCP Streamable HTTP protocol (using the SDK's official client, exactly the way Claude
+Code talks to the bridge):
 
 ```bash
 cd test && npm install && cd ..
 node test/e2e.mjs
 ```
 
-Yêu cầu: có Chromium/Chrome trên máy. Test đọc biến môi trường `CHROME_PATH` cho đường dẫn browser
-(`CHROME_PATH=/path/to/chrome npm test`) — không đặt thì Playwright tự tải và dùng browser riêng của
-nó (không cần sửa gì trong `test/`). **Trên macOS, để trống `CHROME_PATH`** — xem lưu ý trong
-`CLAUDE.md` mục "Setup and commands" về vì sao Google Chrome bản thường không load được extension
-chưa đóng gói trên macOS ≥ 137.
+Requirement: Chromium/Chrome on the machine. The tests read `CHROME_PATH` for the browser path
+(`CHROME_PATH=/path/to/chrome npm test`) — leave it unset and Playwright downloads and uses its own
+browser (nothing under `test/` needs changing). **On macOS, leave `CHROME_PATH` empty** — see the note
+in `CLAUDE.md` under "Setup and commands" for why stock Google Chrome on macOS ≥ 137 cannot load an
+unpacked extension.
 
 ## Troubleshooting
 
-| Triệu chứng | Cách xử lý |
+| Symptom | What to do |
 |---|---|
-| Tool báo "Chrome extension is not connected" | Mở Chrome, bấm icon extension xem trạng thái; bấm **Lưu & kết nối lại**. Kiểm tra dịch vụ nền còn sống không: `/ccchrome status` hoặc `curl http://127.0.0.1:8787/health`. |
-| Badge đỏ mãi không xanh | Port lệch nhau — xem popup extension có đúng port dịch vụ nền đang chạy không (`~/.ccchrome.json` → trường `port`; đổi lại bằng cách cài lại với `CC_CHROME_PORT` mới, xem bảng Cấu hình, không phải sửa biến môi trường suông). Hoặc port bị process khác chiếm (server sẽ log `port already in use` vào stderr — xem `/ccchrome logs`). |
-| "Cannot run scripts on chrome://..." | Trang nội bộ của Chrome không cho inject script — chuyển sang tab web thường. |
-| Console/network trả rỗng | Việc thu thập chỉ bắt đầu từ lần gọi tool đầu tiên trên tab đó — reload trang rồi đọc lại. |
-| Click/fill báo "Ref N is stale" | Trang đã thay đổi — gọi `read_page` lại để lấy ref mới. |
+| A tool reports "Chrome extension is not connected" | Open Chrome, click the extension icon and check the status; click **Lưu & kết nối lại** (Save & reconnect). Check the background service is alive: `/ccchrome status` or `curl http://127.0.0.1:8787/health`. |
+| The badge stays red and never turns green | Mismatched ports — check that the extension popup has the port the background service is actually running on (`~/.ccchrome.json` → `port` field; change it by reinstalling with a new `CC_CHROME_PORT`, see the Configuration table, not by exporting the variable alone). Or the port is taken by another process (the server logs `port already in use` to stderr — see `/ccchrome logs`). |
+| "Cannot run scripts on chrome://..." | Chrome's internal pages do not allow script injection — switch to a normal web tab. |
+| Console/network come back empty | Collection only starts from the first tool call on that tab — reload the page and read again. |
+| Click/fill reports "Ref N is stale" | The page changed — call `read_page` again to get fresh refs. |
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).

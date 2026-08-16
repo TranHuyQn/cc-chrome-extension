@@ -73,8 +73,10 @@ the documented `irm ... | iex` could never have worked (CI invokes the script wi
 release tarball carried a symlink Windows' `tar.exe` cannot create (CI installs from a checkout via
 `CC_CHROME_SOURCE`, never through the download path), and a first install died on `claude mcp remove`
 returning non-zero (CI had no `claude` on PATH, so the whole block was skipped). Each gap is now
-covered. The full Windows flow — install without elevation, extension connected, browser tools, side
-panel chat — has since been run on real hardware; reboot survival and uninstall have not.
+covered. The full Windows flow has since been run on real hardware: install without elevation,
+extension connected, browser tools, side panel chat, **reboot survival** (the logon trigger brings the
+service back on its own) and **uninstall** (one run, nothing left behind — commit `85116f2`). The
+in-panel update path was added to that list on 2026-08-16, verified end to end from 1.1.0 to 1.1.1.
 `npm run build:release` (`scripts/build-release.mjs`) is what packages a release for GitHub — see
 "Publishing a GitHub Release" below.
 
@@ -543,8 +545,10 @@ attached them.
 
 ## Conventions
 
-- User-facing docs (`README.md`, popup UI, `/ccchrome` command output) are in Vietnamese. Code,
-  comments, and commit messages are in English.
+- `README.md` is **English** and is the primary doc; `README.vi.md` is the Vietnamese one, and the
+  two must be kept in step — a change to one is not done until the other has it. The rest of the
+  user-facing surface (popup UI, `/ccchrome` command output, the panel's own strings) stays
+  Vietnamese. Code, comments, and commit messages are in English.
 - Config is env-var driven and documented in the README table — add new vars there too.
 - `.claude/commands/ccchrome.md` is shipped to users via `scripts/install.sh` (it copies the file into
   `~/.claude/commands/`); it is a product surface, not local tooling.
