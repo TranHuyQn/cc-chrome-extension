@@ -226,11 +226,31 @@ const countBridgeProcs = () => {
 };
 check("that bridge is visible as a running node process", countBridgeProcs() > 0, String(countBridgeProcs()));
 
+// Update-handover leftovers: mirrors test/install.test.mjs's fixture for the
+// same four artifacts. Nothing else ever cleaned these, and the defect fixed
+// alongside the update feature was exactly the one that left them behind, so
+// each directory gets a file inside it — a shallow delete would leave the
+// directory itself in place and this shape is what would catch that.
+const updateStateFile = join(fakeHome, ".ccchrome-update.json");
+const updateLogFile = join(fakeHome, ".ccchrome-update.log");
+const backupDir = `${installDir}.bak`;
+const failedDir = `${installDir}.failed`;
+writeFileSync(updateStateFile, '{"version":"1.2.0"}');
+writeFileSync(updateLogFile, "update log line\n");
+mkdirSync(join(backupDir, "server"), { recursive: true });
+writeFileSync(join(backupDir, "server", "index.js"), "// backed up\n");
+mkdirSync(join(failedDir, "server"), { recursive: true });
+writeFileSync(join(failedDir, "server", "index.js"), "// failed install\n");
+
 const un = ps(join(installDir, "uninstall.ps1"));
 check("uninstall.ps1 exits 0", un.status === 0, `${un.stdout}\n${un.stderr}`);
 check("uninstall removes the token file", !existsSync(join(fakeHome, ".ccchrome.json")));
 check("uninstall unregisters the MCP server", !existsSync(mcpMarker), mcpMarker);
 check("uninstall removes the installed tree", !existsSync(join(installDir, "server")));
+check("uninstall removes the update state file (.ccchrome-update.json)", !existsSync(updateStateFile), updateStateFile);
+check("uninstall removes the update log file (.ccchrome-update.log)", !existsSync(updateLogFile), updateLogFile);
+check("uninstall removes the .bak backup directory", !existsSync(backupDir), backupDir);
+check("uninstall removes the .failed directory", !existsSync(failedDir), failedDir);
 // The assertion the reported bug would have failed: the task is not the
 // process, and deleting the tree while node still holds the log file is what
 // broke the uninstall in the middle.

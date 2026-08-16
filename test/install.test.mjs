@@ -313,6 +313,24 @@ check(
 // this run's evidence. Asserting "exactly one line, and it says yes" is
 // what actually ties the evidence to *this* invocation.
 writeFileSync(stopLog, "");
+
+// Update-handover leftovers (F4b): nothing else ever cleaned these four, and
+// 85116f2 made "one run, nothing left behind" a property of this project.
+// The defect it fixed is exactly the one that broke this property, so each
+// artifact is a directory with a file inside it, not an empty stand-in — an
+// `rm -f` (as opposed to `rm -rf`) on the two directories would silently
+// leave them behind and this fixture shape is what would catch that.
+const updateStateFile = join(fakeHome, ".ccchrome-update.json");
+const updateLogFile = join(fakeHome, ".ccchrome-update.log");
+const backupDir = `${installDir}.bak`;
+const failedDir = `${installDir}.failed`;
+writeFileSync(updateStateFile, '{"version":"1.2.0"}');
+writeFileSync(updateLogFile, "update log line\n");
+mkdirSync(join(backupDir, "server"), { recursive: true });
+writeFileSync(join(backupDir, "server", "index.js"), "// backed up\n");
+mkdirSync(join(failedDir, "server"), { recursive: true });
+writeFileSync(join(failedDir, "server", "index.js"), "// failed install\n");
+
 const realOut = run("uninstall.sh", [], { CC_CHROME_SKIP_SERVICE: "" });
 check("removes the token file", !existsSync(join(fakeHome, ".ccchrome.json")));
 check("removes the slash command", !existsSync(join(fakeHome, ".claude", "commands", "ccchrome.md")));
@@ -320,6 +338,10 @@ check("removes the service unit", !existsSync(unit));
 check("removes the server directory", !existsSync(join(installDir, "server")));
 check("removes the orphaned .new staging directory", !existsSync(join(installDir, ".new")));
 check("KEEPS the panel conversation data", existsSync(join(installDir, "panel", "session.jsonl")));
+check("removes the update state file (.ccchrome-update.json)", !existsSync(updateStateFile), updateStateFile);
+check("removes the update log file (.ccchrome-update.log)", !existsSync(updateLogFile), updateLogFile);
+check("removes the .bak backup directory", !existsSync(backupDir), backupDir);
+check("removes the .failed directory", !existsSync(failedDir), failedDir);
 
 const stopLogLines = existsSync(stopLog) ? readFileSync(stopLog, "utf8").split("\n").filter(Boolean) : [];
 check(

@@ -122,7 +122,7 @@ Không cần quyền root, không đụng gì ngoài thư mục home của bạn
 
 | Đường dẫn | Nội dung | Quyền |
 |---|---|---|
-| `~/.cc-chrome-bridge/` | `server/` (kèm `node_modules`), `extension/`, `logs/`, `tokens.json`, `uninstall.sh`, `service-unit.sh`, `ccchrome.md` | `700` |
+| `~/.cc-chrome-bridge/` | `server/` (kèm `node_modules`), `extension/`, `logs/`, `tokens.json`, `uninstall.sh`, `service-unit.sh`, `ccchrome.md`, `update-runner.mjs`, `install.sh`, `install.ps1` | `700` |
 | `~/.ccchrome.json` | `{ "token": "…", "port": 8787 }` | `600` |
 | `~/Library/LaunchAgents/com.ccchrome.bridge.plist` (macOS)<br>`$XDG_CONFIG_HOME/systemd/user/ccchrome-bridge.service` (Linux) | file dịch vụ nền | |
 | `~/.claude/commands/ccchrome.md` | slash command `/ccchrome` | |
@@ -132,7 +132,7 @@ Không cần quyền root, không đụng gì ngoài thư mục home của bạn
 
 | Đường dẫn | Nội dung |
 |---|---|
-| `%USERPROFILE%\.cc-chrome-bridge\` | `server\`, `extension\`, `logs\`, `tokens.json`, `uninstall.ps1`, `service-task.ps1`, `ccchrome.md`, cộng `bridge.cmd` và `bridge-launcher.vbs` |
+| `%USERPROFILE%\.cc-chrome-bridge\` | `server\`, `extension\`, `logs\`, `tokens.json`, `uninstall.ps1`, `service-task.ps1`, `ccchrome.md`, `update-runner.mjs`, `install.sh`, `install.ps1`, cộng `bridge.cmd` và `bridge-launcher.vbs` |
 | `%USERPROFILE%\.ccchrome.json` | `{ "token": "…", "port": 8787 }` |
 | Scheduled task tên `ccchrome-bridge` | trigger **At log on**, chạy dưới chính tài khoản bạn, `RunLevel Limited` — **không cần quyền admin** |
 | `%USERPROFILE%\.claude\commands\ccchrome.md` | slash command `/ccchrome` |
@@ -503,9 +503,11 @@ Biến môi trường riêng cho khung chat: `CC_CHROME_PANEL_TOOLS` — xem b�
 ### Cập nhật bridge
 
 Mỗi lần mở khung chat, bridge tự hỏi GitHub xem có bản phát hành mới hơn bản
-đang chạy không. Có bản mới thì một dòng thông báo hiện ngay trên khung chat
-("Có bản x.y.z (đang chạy a.b.c)."), kèm nút **Cập nhật** — bridge **không tự
-cài** gì cả nếu bạn không bấm nút đó.
+đang chạy không. Kết quả được **nhớ 30 phút** (không hỏi lại GitHub liên tục mỗi
+lần bạn mở/đóng panel hay mất kết nối rồi nối lại) — nên một bản phát hành mới
+có thể mất tới nửa tiếng mới hiện ra trên khung chat. Có bản mới thì một dòng
+thông báo hiện ngay trên khung chat ("Có bản x.y.z (đang chạy a.b.c)."), kèm nút
+**Cập nhật** — bridge **không tự cài** gì cả nếu bạn không bấm nút đó.
 
 Bấm **Cập nhật**: bridge tải file `.tar.gz` của bản mới về, **đối chiếu SHA256**
 với file checksum GitHub phát hành kèm bản đó trước khi đụng đến bất cứ thứ gì

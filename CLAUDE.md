@@ -420,9 +420,33 @@ attached them.
   does accept a `CC_CHROME_SOURCE` pointing at a checkout-shaped directory (the
   bridge was installed this way and reported `ok:true, version 1.1.0`).
 - The release tarball must carry `update-runner.mjs`, `install.sh` and
-  `install.ps1` inside it, because the installed copy is what the bridge spawns.
-  A release missing them installs fine and then cannot ever self-update —
-  `test/build.test.mjs` asserts all three are in the tarball for that reason.
+  `install.ps1` inside it, **and** both installers must copy them into
+  `$INSTALL_DIR`, because that is where `spawnUpdateRunner` reads them from —
+  the tarball carrying a file is not the same as the installed copy having it.
+  `test/install.test.mjs` guards this half by running a real install. A
+  release missing them from the tarball installs fine and then cannot ever
+  self-update — `test/build.test.mjs` asserts all three are in the tarball for
+  that reason.
+- The updater must not be a descendant of the service, and each platform kills
+  differently — measured 2026-08-16 against the command the installer actually
+  runs, not an equivalent. macOS's `launchctl bootout` leaves a detached child
+  running (heartbeat 18 → 26), so darwin still spawns directly. Windows'
+  `Stop-CcTask` ends in `taskkill /pid <bridge> /T /F`, which kills descendants
+  by parent PID, so the runner is registered as a one-shot scheduled task and
+  Task Scheduler owns it. Linux's `systemctl --user disable --now` takes the
+  whole cgroup — `detached: true` is `setsid()`, which changes session, not
+  cgroup — so it goes through `systemd-run --user --collect --unit=…`; a
+  `--scope` would stay in the caller's cgroup and die with it. **The Linux
+  branch is reasoned, not measured: there is no Linux machine to run it on.**
+  `buildRunnerSpawn` takes the platform as an argument, like `buildSpawn` in
+  `server/agent.js`, precisely so the branch nobody can run is still tested.
+- The release check is cached for 30 minutes (`RELEASE_CACHE_MS` in
+  `server/index.js`). The panel asks on every `ready` — which includes every
+  reconnect, and the panel reconnects with backoff capped at 30s — against
+  GitHub's 60 unauthenticated requests per hour per IP, shared by every panel
+  and every machine behind one address. Exceeding it fails closed, so an
+  un-cached check goes quiet exactly when a release does exist. A newly
+  published release can therefore take up to 30 minutes to appear.
 - The real update path — download, checksum, extract, install, health-check —
   has **no automated coverage at all**, permanently and by design. Letting a
   test drive it would mean `npm test` installing a release over the developer's
