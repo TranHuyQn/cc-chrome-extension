@@ -535,10 +535,11 @@ attached them.
   has **no automated coverage at all**, permanently and by design. Letting a
   test drive it would mean `npm test` installing a release over the developer's
   own bridge. It is covered by reading and by the first real update after a
-  release. And because the update button ships *in* 1.2.0, it cannot appear on
-  a machine running anything older — 1.2.0 itself has to be installed the old
-  way, so the first genuine end-to-end test of the feature is updating **from
-  1.2.0 to 1.2.1**, not the 1.2.0 release itself.
+  release. And because the update button ships *in* 1.1.0 — the first public
+  release to carry it, going straight from 1.0.9 — it cannot appear on a machine
+  running anything older, so 1.1.0 itself has to be installed the old way. The
+  first genuine end-to-end test of the feature is therefore updating **from
+  1.1.0 to 1.1.1**, not the 1.1.0 release itself.
 
 ## Conventions
 
