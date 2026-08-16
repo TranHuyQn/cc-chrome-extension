@@ -251,6 +251,17 @@ check("updateTaskName still carries the version and pid, dash-joined",
     winScript.includes("$ErrorActionPreference = 'Stop'"), winScript);
   check("win32's script wraps registration in try/catch and exits non-zero on failure",
     winScript.includes("try {") && winScript.includes("catch { exit 1 }"), winScript);
+  // Presence of both braces is not nesting. Moving the registration OUTSIDE
+  // the try block — `try { } catch { exit 1 }; Register-ScheduledTask ...` —
+  // satisfies every other check here while reintroducing the exact defect
+  // above, so assert the two cmdlets fall BETWEEN the try and the catch.
+  {
+    const open = winScript.indexOf("try {");
+    const close = winScript.indexOf("} catch { exit 1 }");
+    const guarded = open >= 0 && close > open ? winScript.slice(open, close) : "";
+    check("win32's script registers and starts INSIDE the try block, not beside it",
+      guarded.includes("Register-ScheduledTask") && guarded.includes("Start-ScheduledTask"), winScript);
+  }
 
   // A missing workingDir used to emit -WorkingDirectory 'undefined' verbatim
   // — that registers and starts fine (exit 0) and only fails at RUN time,
