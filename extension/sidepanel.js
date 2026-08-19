@@ -46,6 +46,17 @@ let mcpSessionId = null;
 let sessionKey = null;
 let busy = false;
 let streaming = null; // the element currently receiving deltas
+// The Markdown SOURCE behind `streaming`. Before the panel rendered Markdown the
+// bubble was the only copy of a reply in flight and flushStreamingEntry() read
+// it back with `streaming.textContent`. Rendered nodes cannot give that back —
+// `## Nguyên nhân` returns as `Nguyên nhân`, a fenced block returns without its
+// fence — so the journal would record a mangled reply and only show it days
+// later, on the next reopen. Keeping the source in a variable is what makes the
+// two readings independent again.
+let streamingText = "";
+// One re-render per animation frame, not one per delta: a delta can arrive many
+// times a second and each one re-parses the whole reply.
+let streamFrame = 0;
 // The journal entry backing `streaming`, if any -- see the `message` case in
 // handle() and the resize() comment in panel-journal.js. Kept separate from
 // `streaming` (the DOM element) because the two are nulled together but read
@@ -96,10 +107,43 @@ function setState(state, detail = "") {
 function addMessage(kind, text) {
   const el = document.createElement("div");
   el.className = kind === "tool" ? "tool" : kind === "stats" ? "stats" : `msg ${kind}`;
-  el.textContent = text;
+  if (kind === "assistant") setMarkdown(el, text);
+  else el.textContent = text;
   logEl.appendChild(el);
   logEl.scrollTop = logEl.scrollHeight;
   return el;
+}
+
+// Only the assistant's bubbles. What the user typed is left exactly as typed:
+// reinterpreting their own words as a document would show them a different
+// message from the one the server received.
+function setMarkdown(el, source) {
+  el.textContent = "";
+  el.appendChild(ccMarkdown.toDom(source, document));
+}
+
+// Every path that abandons a stream comes through here, rather than each one
+// remembering three variables. Before this existed there were nine separate
+// `streaming = null` sites and adding a tenth that forgot the source text would
+// have journalled the wrong thing from that path only — the kind of gap that
+// shows up in one user's log and nobody else's.
+function resetStream() {
+  streaming = null;
+  streamingText = "";
+  if (streamFrame) {
+    cancelAnimationFrame(streamFrame);
+    streamFrame = 0;
+  }
+}
+
+function scheduleStreamRender() {
+  if (streamFrame) return;
+  streamFrame = requestAnimationFrame(() => {
+    streamFrame = 0;
+    if (!streaming) return;
+    setMarkdown(streaming, streamingText);
+    logEl.scrollTop = logEl.scrollHeight;
+  });
 }
 
 function formatMs(ms) {
@@ -175,7 +219,7 @@ function sweepOpenSteps() {
 // was.
 function flushStreamingEntry() {
   if (!streamingEntry) return;
-  const text = streaming ? streaming.textContent : "";
+  const text = streamingText;
   if (text) {
     streamingEntry.text = text;
     ccJournal.resize(streamingEntry);
@@ -324,7 +368,7 @@ async function restore() {
   // dead — the panel was closed. Close it now rather than leaving a row that
   // pulses forever.
   sweepOpenSteps();
-  streaming = null;
+  resetStream();
   streamingEntry = null;
 }
 
@@ -440,7 +484,7 @@ async function connect() {
     // `message` reconciles into a node that is no longer the one being built,
     // and the text disappears with no error.
     flushStreamingEntry();
-    streaming = null;
+    resetStream();
     // A dropped socket is the other path (besides a model change) where a
     // disposed AgentSession never gets to send its own step_end -- see the
     // comment on `turn_start` in handle(). Without this, reconnecting mid-turn
@@ -470,16 +514,19 @@ function render(msg) {
       addMessage("user", msg.text);
       break;
     case "delta":
-      if (!streaming) streaming = addMessage("assistant", "");
-      streaming.textContent += msg.text;
-      logEl.scrollTop = logEl.scrollHeight;
+      if (!streaming) {
+        streaming = addMessage("assistant", "");
+        streamingText = "";
+      }
+      streamingText += msg.text;
+      scheduleStreamRender();
       break;
     case "message":
       // The buffered message is authoritative; the streamed preview may be a
       // prefix of it, so it is replaced rather than appended to.
-      if (streaming) streaming.textContent = msg.text;
+      if (streaming) setMarkdown(streaming, msg.text);
       else addMessage("assistant", msg.text);
-      streaming = null;
+      resetStream();
       break;
     case "step_start":
       // Deliberately does NOT touch `streaming` — see the comment on the old
@@ -541,7 +588,7 @@ function handle(msg) {
       // the journal before dropping the reference, or reopening the panel
       // shows an empty bubble where the partial reply was.
       flushStreamingEntry();
-      streaming = null;
+      resetStream();
       send({ type: "update_check" });
       break;
     case "update_status": {
@@ -605,7 +652,7 @@ function handle(msg) {
       // if a future path clears busy differently. flushStreamingEntry()
       // already nulls streamingEntry itself.
       flushStreamingEntry();
-      streaming = null;
+      resetStream();
       phase = null;
       phaseStartedAt = Date.now();
       startTicking();
@@ -669,7 +716,7 @@ function handle(msg) {
       // second entry for the same bubble.
       flushStreamingEntry();
       setBusy(false);
-      streaming = null;
+      resetStream();
       stopTicking();
       paintStatus();
       if (!msg.ok) {
@@ -746,7 +793,7 @@ newBtn.addEventListener("click", async () => {
   // above) covers the busy/lockup half of disposing a running turn; this
   // covers the stale-DOM-reference half, which `ready` alone does not fix
   // since it can arrive before the very last straggling delta does.
-  streaming = null;
+  resetStream();
   streamingEntry = null;
   // Only the conversation is new. mcpSessionId is kept on purpose: it names the
   // tab group, so dropping it here would strand the tabs the user attached —
@@ -762,7 +809,7 @@ modelEl.addEventListener("change", () => {
   // Same stale-reference risk as "Phiên mới" above: a model change also
   // disposes any running turn server-side.
   flushStreamingEntry();
-  streaming = null;
+  resetStream();
   // Same leak as socket.onclose: a disposed AgentSession never sends step_end
   // for whatever was still running, so this turn's rows would otherwise
   // pulse forever and paintStatus would misreport them during the next turn.

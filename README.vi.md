@@ -463,6 +463,16 @@ nghĩ, đang chạy công cụ nào, đang trả lời — kèm số giây trôi
 Ngôn ngữ của phần chữ mô tả hoạt động bám theo ngôn ngữ bạn gõ: nhắn tiếng Việt thì hiện
 "Đang suy nghĩ", nhắn tiếng Anh thì hiện "Thinking". Nút bấm vẫn giữ tiếng Việt.
 
+Câu trả lời được render theo Markdown: heading, danh sách, bảng, link, và khối code có
+tô màu cú pháp kèm nút chép. Chỉ câu trả lời của Claude mới được render — chữ bạn gõ giữ
+nguyên như bạn gõ. Markdown do [marked](https://github.com/markedjs/marked) phân tích, tô
+màu do [Prism](https://prismjs.com/), cả hai đều nhúng sẵn trong extension và **chỉ** dùng
+phần lexer: panel tự dựng từng node, không bao giờ gán HTML — vì câu trả lời thường trích
+lại đúng thứ một trang web hiển thị, mà panel lại là trang extension có đặc quyền.
+
+Tô màu cú pháp có sẵn cho `markup, css, javascript, typescript, json, bash, python, yaml,
+diff, sql`. Ngôn ngữ khác vẫn hiện thành khối code bình thường, chỉ là không có màu.
+
 Đóng panel rồi mở lại sẽ thấy lại toàn bộ nội dung đã trao đổi. Bấm "Phiên mới" mới xoá.
 
 ### Bật khung chat

@@ -27,6 +27,82 @@
     .msg { white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
     .msg.user { align-self: flex-end; background: #2f2f2f; padding: 6px 10px; border-radius: 10px; max-width: 85%; }
     .msg.error { color: #f28b82; }
+
+    /* Rendered Markdown. `pre-wrap` above is right for the user's own bubbles
+       and for error lines, which are literal text; an assistant bubble is real
+       block elements now, and keeping pre-wrap there would add the source's own
+       newlines on top of the margins below. */
+    .msg.assistant { white-space: normal; }
+    .msg.assistant > :first-child { margin-top: 0; }
+    .msg.assistant > :last-child { margin-bottom: 0; }
+    .msg.assistant p { margin: 0 0 8px; }
+    .msg.assistant h1, .msg.assistant h2, .msg.assistant h3,
+    .msg.assistant h4, .msg.assistant h5, .msg.assistant h6 {
+      margin: 14px 0 6px; line-height: 1.3; font-weight: 600;
+    }
+    .msg.assistant h1 { font-size: 17px; }
+    .msg.assistant h2 { font-size: 15px; }
+    .msg.assistant h3 { font-size: 14px; }
+    .msg.assistant h4, .msg.assistant h5, .msg.assistant h6 { font-size: 13px; color: #ccc; }
+    /* 18px, not the browser default 40px: at 370px wide a default indent eats a
+       tenth of the column per nesting level. */
+    .msg.assistant ul, .msg.assistant ol { margin: 0 0 8px; padding-left: 18px; }
+    .msg.assistant li { margin: 2px 0; }
+    .msg.assistant blockquote {
+      margin: 0 0 8px; padding: 2px 0 2px 8px;
+      border-left: 2px solid #444; color: #bbb;
+    }
+    .msg.assistant hr { border: 0; border-top: 1px solid #333; margin: 12px 0; }
+    .msg.assistant a { color: #e0a17f; }
+    .msg.assistant code.md-inline-code {
+      background: #262626; border-radius: 3px; padding: 1px 4px;
+      font-family: ui-monospace, monospace; font-size: 12px;
+      /* Long identifiers are the norm in this panel and there is no room to
+         scroll a run of inline code. */
+      word-break: break-word;
+    }
+
+    .md-table-wrap { overflow-x: auto; margin: 0 0 8px; }
+    .md-table { border-collapse: collapse; font-size: 12px; }
+    .md-table th, .md-table td {
+      border: 1px solid #3a3a3a; padding: 3px 7px; text-align: left; white-space: nowrap;
+    }
+    .md-table th { background: #242424; font-weight: 600; }
+
+    .md-code-block { margin: 0 0 8px; border: 1px solid #333; border-radius: 5px; overflow: hidden; }
+    .md-code-head {
+      display: flex; align-items: center; gap: 8px;
+      padding: 3px 6px 3px 8px; background: #242424; border-bottom: 1px solid #333;
+      font-size: 11px; color: #888;
+    }
+    .md-code-lang { text-transform: lowercase; }
+    .md-code-copy {
+      margin-left: auto; padding: 1px 6px; font-size: 11px;
+      background: #2f2f2f; border-color: #444; color: #bbb;
+    }
+    .md-code-copy:hover { color: #eee; }
+    .md-pre {
+      margin: 0; padding: 8px; overflow-x: auto; background: #202020;
+      font-family: ui-monospace, monospace; font-size: 12px; line-height: 1.45;
+    }
+    /* No `word-break` here on purpose: code is read by its line structure, and
+       wrapping a long line mid-token is worse than scrolling for it. */
+    .md-pre code { white-space: pre; }
+
+    /* Token colours, written for THIS panel's palette rather than vendored from
+       one of Prism's themes — those are built for other backgrounds and clash
+       with the surrounding UI. Class names are Prism's own. */
+    .token.comment, .token.prolog, .token.doctype, .token.cdata { color: #6f6f6f; }
+    .token.punctuation { color: #999; }
+    .token.property, .token.tag, .token.constant, .token.symbol, .token.deleted { color: #e08f7a; }
+    .token.boolean, .token.number { color: #d3a24c; }
+    .token.selector, .token.attr-name, .token.string, .token.char, .token.builtin, .token.inserted { color: #9bbf7a; }
+    .token.operator, .token.entity, .token.url, .token.variable { color: #cfcfcf; }
+    .token.atrule, .token.attr-value, .token.keyword { color: #7fa8d0; }
+    .token.function, .token.class-name { color: #d9a0c8; }
+    .token.regex, .token.important { color: #d98f4f; }
+    .token.important, .token.bold { font-weight: 600; }
+    .token.italic { font-style: italic; }
     .tool { font-size: 11px; color: #d97757; }
     .step { font-size: 11px; border-left: 2px solid #3a3a3a; padding-left: 8px; }
     .step-head { display: flex; gap: 6px; align-items: baseline; cursor: pointer; }
@@ -94,8 +170,27 @@
     <textarea id="input" placeholder="Nhắn cho Claude… (Enter để gửi)"></textarea>
   </footer>
 
+  <!-- Vendored, unmodified, and loaded for their LEXERS only — see
+       panel-markdown.js. prism-manual.js must come first: it is what stops
+       Prism's core from registering a DOMContentLoaded pass over this page. -->
+  <script src="vendor/prism-manual.js"></script>
+  <script src="vendor/marked.umd.js"></script>
+  <script src="vendor/prism-core.min.js"></script>
+  <script src="vendor/prism-markup.min.js"></script>
+  <script src="vendor/prism-css.min.js"></script>
+  <script src="vendor/prism-clike.min.js"></script>
+  <script src="vendor/prism-javascript.min.js"></script>
+  <script src="vendor/prism-typescript.min.js"></script>
+  <script src="vendor/prism-json.min.js"></script>
+  <script src="vendor/prism-bash.min.js"></script>
+  <script src="vendor/prism-python.min.js"></script>
+  <script src="vendor/prism-yaml.min.js"></script>
+  <script src="vendor/prism-diff.min.js"></script>
+  <script src="vendor/prism-sql.min.js"></script>
+
   <script src="panel-labels.js"></script>
   <script src="panel-journal.js"></script>
+  <script src="panel-markdown.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>

@@ -484,6 +484,16 @@ The language of those activity descriptions follows the language you type in: me
 and it says "Đang suy nghĩ", message in English and it says "Thinking". The buttons stay in
 Vietnamese.
 
+Replies are rendered as Markdown: headings, lists, tables, links, and fenced code blocks with syntax
+highlighting and a copy button. Only Claude's replies are rendered — what you type stays exactly as
+you typed it. Markdown is parsed with [marked](https://github.com/markedjs/marked) and highlighted
+with [Prism](https://prismjs.com/), both vendored into the extension and both used only for their
+lexers: the panel builds every node itself and never assigns HTML, because a reply routinely quotes
+whatever a website put on screen and the panel is a privileged extension page.
+
+Syntax highlighting covers `markup, css, javascript, typescript, json, bash, python, yaml, diff, sql`.
+A fence in any other language still renders as a code block, just without colour.
+
 Close the panel and reopen it and everything you exchanged is still there. Only "Phiên mới" (New
 session) clears it.
 

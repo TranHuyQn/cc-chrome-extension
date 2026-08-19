@@ -391,9 +391,62 @@ attached them.
   a second entry for the same bubble. Every path that can end a stream without
   a `message` ever arriving — `ready` (a disposed session on a model change or
   "Phiên mới"), `turn_end`, `socket.onclose`, and the model `change` handler —
-  calls `flushStreamingEntry()` first to copy whatever reached the screen into
-  that placeholder, or a reopened panel shows an empty bubble where the text
-  was.
+  calls `flushStreamingEntry()` first to copy the reply so far into that
+  placeholder, or a reopened panel shows an empty bubble where the text was.
+  What it copies is `streamingText`, **not** `streaming.textContent` — see the
+  Markdown entry below for why that distinction is now load-bearing.
+- **The panel renders Markdown with two vendored LEXERS and no HTML anywhere.**
+  `extension/panel-markdown.js` calls `marked.lexer()` and `Prism.tokenize()`,
+  both of which return plain token data, and builds the tree with
+  `createElement`/`createTextNode`. `marked.parse()` and `Prism.highlight()`
+  return HTML strings and are never called; `Prism.highlightElement()` assigns
+  `innerHTML` itself, which is why `extension/vendor/prism-manual.js` must load
+  **before** `prism-core.min.js` — without it Prism registers a DOMContentLoaded
+  pass that rewrites every `<pre><code>` on the page behind the renderer's back.
+  This is not style: the panel is an extension page with the extension's
+  privileges, and the text it renders routinely contains whatever a website put
+  on screen, since `get_page_text`, `read_console_messages` and every other
+  browser tool feed their results back through the conversation. Raw markup in
+  the source arrives as an `html` token and is appended as text; a link is
+  refused unless its href matches `/^(https?:|mailto:)/i`, so `javascript:` and
+  `data:` render as plain words. `test/panel-markdown.test.mjs` runs the whole
+  renderer against a document whose elements **throw if anything assigns
+  innerHTML** — that assertion is the rule, because a reviewer cannot prove a
+  call was never made and the document can.
+- Vendored in `extension/vendor/`, byte for byte and never edited: **marked
+  18.0.10** (`marked.umd.js`, MIT) and **Prism 1.30.0** (`prism-core.min.js` plus
+  `markup, css, clike, javascript, typescript, json, bash, python, yaml, diff,
+  sql`, MIT), with both `LICENSE.*` files. `eslint.config.mjs` ignores the
+  directory — linting code that must not diverge from upstream only produces
+  findings nobody may act on. Adding a language means vendoring one more
+  `prism-<lang>.min.js` and adding its `<script>` to `sidepanel.html`; a language
+  with no grammar loaded renders as an uncoloured code block, which is the
+  intended degradation, not a bug. No build step was introduced and none is
+  needed — both libraries ship single-file browser builds.
+- **`streamingText` exists because the bubble is no longer a copy of the
+  source.** Deltas used to accumulate straight into `streaming.textContent`, and
+  `flushStreamingEntry()` read them back from there. Rendered nodes cannot give
+  that back: `## Nguyên nhân` reads back as `Nguyên nhân`, a fenced block loses
+  its fence, a list loses its markers. The journal would then record a mangled
+  reply and only show it on the next reopen, days later. So the raw source lives
+  in `streamingText`, every re-render goes through `setMarkdown()`, and the nine
+  paths that abandon a stream all call `resetStream()` rather than assigning
+  `streaming = null` themselves — a tenth site that forgot the source text would
+  corrupt the journal from that path alone. Re-renders are coalesced through
+  `requestAnimationFrame`, since a delta can arrive many times a second and each
+  one re-parses the whole reply. `test/panel-stream.test.mjs` drives
+  `sidepanel.js` itself against a fake browser and asserts both halves at once:
+  the bubble contains real `h2`/`ul`/`strong` nodes, and the journal still holds
+  the Markdown source character for character.
+- The code block's copy button copies **the marked token's text**, never the DOM.
+  After highlighting the `<code>` element is dozens of spans deep, and
+  reassembling it is how a copy silently loses characters. It uses
+  `navigator.clipboard.writeText()` from inside the click handler with a
+  `execCommand("copy")` fallback, and deliberately does **not** add
+  `clipboardWrite` to the manifest: widening the extension's permissions for a
+  convenience button is the wrong trade. The user's own bubbles are never
+  rendered as Markdown — what they typed is the message the server received, and
+  reinterpreting it would show them something else.
 - The panel declares `protocol: 2` in its `start` frame. A bridge is upgraded by
   the installer while the extension only changes when the user reloads it in
   `chrome://extensions`, so the server still emits the pre-timeline `tool` event

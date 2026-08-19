@@ -3,7 +3,11 @@ import globals from "globals";
 
 export default [
   {
-    ignores: ["dist/**", "node_modules/**", "**/node_modules/**"],
+    // extension/vendor/** is vendored third-party code, copied byte for byte and
+    // never edited here — linting it would only produce noise nobody may act on,
+    // because acting on it means diverging from upstream. The version of each
+    // file is recorded in CLAUDE.md; that is what an update is driven from.
+    ignores: ["dist/**", "node_modules/**", "**/node_modules/**", "extension/vendor/**"],
   },
   js.configs.recommended,
   {
@@ -31,6 +35,11 @@ export default [
         chrome: "readonly",
         ccLabels: "readonly",
         ccJournal: "readonly",
+        ccMarkdown: "readonly",
+        // Vendored into extension/vendor/, loaded by sidepanel.html before the
+        // panel's own scripts. Used for their lexers only — see panel-markdown.js.
+        marked: "readonly",
+        Prism: "readonly",
         // The file declares its own `status`; the deprecated window.status
         // global would otherwise be reported as a redeclaration.
         status: "off",
