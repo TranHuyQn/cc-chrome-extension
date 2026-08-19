@@ -457,6 +457,77 @@ attached them.
   environment along. `test/update-runner.test.mjs` drives the real `install.sh`
   under exactly that PATH, with no `claude` reachable on it, and asserts the
   regenerated unit still carries the path.
+- **On Windows, `Get-Command claude` returns the wrong file.** PowerShell
+  resolves Alias → Function → Cmdlet → ExternalScript → Application, and
+  `npm i -g` drops `claude`, `claude.cmd` **and** `claude.ps1` into one global
+  bin — so the unfiltered lookup returns the `.ps1` from any position on PATH,
+  and `Write-CcLauncher` baked that into `bridge.cmd` as
+  `CC_CHROME_CLAUDE_BIN`. It has exactly one consumer and that consumer cannot
+  use it: `buildSpawn` in `server/agent.js` goes through `cmd.exe`, which does
+  not run a `.ps1` at all — it hands the path to ShellExecute, which opens it
+  with the default verb (Edit). The install looks perfect and every panel turn
+  dies. `Resolve-CcClaudeBin` in `scripts/service-task.ps1` filters on
+  `CommandType -eq 'Application'` **and** on the extension, and applies the same
+  filter to an inherited `CC_CHROME_CLAUDE_BIN` rather than trusting it — an
+  install made before this fix carries the `.ps1` in the running bridge's
+  environment, `server/index.js` forwards it to the update runner as
+  `--claude-bin`, and a trusting installer would re-bake the defect on every
+  update forever. Rejecting it is what repairs those machines.
+
+  **Measured on real Windows hardware** (DESKTOP-GK01CMU, 2026-08-19), with a
+  stub bin holding `claude`, `claude.cmd` and `claude.ps1` on PATH: a bare
+  `Get-Command claude` returns `…\claude.ps1` with `CommandType ExternalScript`;
+  the pre-fix `Write-CcLauncher` baked that `.ps1` into `bridge.cmd`, both from
+  the PATH lookup and from an inherited `CC_CHROME_CLAUDE_BIN`, while the fixed
+  one baked `…\claude.cmd` in both cases. Note the reproduction needed that stub
+  — the machine's own `claude` is the native `C:\Users\…\.local\bin\claude.exe`,
+  so a box that never installed the CLI through npm cannot hit this by itself.
+  Covered by `test/install-windows.test.mjs`, whose stub PATH now carries a
+  `claude.ps1` beside the `claude.cmd` precisely so the whole class stays
+  visible.
+- **`Stop-ScheduledTask` + `Start-ScheduledTask` is not a restart** — it is two
+  separate lies stacked, both **measured on real Windows hardware**
+  (DESKTOP-GK01CMU, 2026-08-19) against a live bridge:
+
+  | step | pids | task state | /health |
+  |---|---|---|---|
+  | before | 9232 | Running | 200 |
+  | after `Stop-ScheduledTask` | 9232 | Ready | 200 |
+  | after `Start-ScheduledTask` | 9232 | Ready | 200 |
+  | after `Stop-CcTask` | — | **Disabled** | 0 |
+  | after bare `Start-ScheduledTask` | — | Disabled | 0 (**threw** "The task is disabled.") |
+  | after `Restart-CcTask` | 8832 | Running | 200 |
+
+  The stop ends the *task* (wscript); `node.exe` is its grandchild and keeps
+  running, keeps port 8787 and keeps serving from the environment it was started
+  with — so the freshly started instance cannot bind, dies, and the task falls
+  straight back to `Ready` while the OLD process answers every request. A restart
+  that changes nothing and reports success. And `Stop-CcTask` disables the task
+  on purpose (its five-minute repetition trigger would otherwise resurrect the
+  bridge mid-uninstall), so a bare `Start-ScheduledTask` afterwards throws rather
+  than starting anything. `Restart-CcTask` in `scripts/service-task.ps1` is the
+  only sanctioned restart: `Stop-CcTask` (which finds the real `node.exe` by
+  command line and `taskkill /T /F`s it) → `Start-CcTask`, which enables before
+  starting. `.claude/commands/ccchrome.md` and both READMEs point at it; do not
+  put the raw cmdlet pair back. The assertion that catches the first half is the
+  **PID**, not `/health` — as the table shows, `/health` answers 200 just as
+  happily from the process that was supposed to die.
+- **The task principal comes from the running identity, not from
+  `$env:USERDOMAIN`.** `Register-CcTask` used to build `-UserId
+  "$env:USERDOMAIN\$env:USERNAME"`, and those two are not reliably the machine's
+  own account: measured over OpenSSH on DESKTOP-GK01CMU (2026-08-19), the session
+  had `USERDOMAIN=WORKGROUP` while the identity was `DESKTOP-GK01CMU\huytv`, so
+  `Register-ScheduledTask` refused the principal with **0x80070534** ("No mapping
+  between account names and security IDs was done"). The consequence is worse
+  than a crash: `install.ps1` deliberately catches a failed registration, warns,
+  and carries on to the MCP registration and the closing instructions — so the
+  install reports success with **no service registered at all**, and nothing
+  starts at the next logon. `[System.Security.Principal.WindowsIdentity]::GetCurrent().Name`
+  is the same string `whoami` prints and always maps; it now feeds both the
+  principal and the at-logon trigger. The assertion that catches this is
+  `test/install-windows.test.mjs`'s "the scheduled task exists after a real
+  install" — an interactive install on a domain-joined or normally-named machine
+  never reproduces it, which is why it survived every earlier run.
 - The release tarball must carry `update-runner.mjs`, `install.sh` and
   `install.ps1` inside it, **and** both installers must copy them into
   `$INSTALL_DIR`, because that is where `spawnUpdateRunner` reads them from —

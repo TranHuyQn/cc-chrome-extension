@@ -64,6 +64,19 @@ writeFileSync(
   join(stubBin, "claude.cmd"),
   `@echo off\r\nnode "%~dp0claude-stub.mjs" %*\r\nexit /b %ERRORLEVEL%\r\n`,
 );
+// The npm layout, reproduced on purpose: `npm i -g @anthropic-ai/claude-code`
+// drops claude, claude.cmd AND claude.ps1 into the same global bin. That third
+// file is not decoration here -- PowerShell resolves ExternalScript before
+// Application, so a bare `Get-Command claude` returns the .ps1 from ANY
+// position on PATH, and its .Source is what the installer used to bake into
+// bridge.cmd. Without this file on PATH the whole class of bug is invisible.
+// It forwards to the same stub so the MCP-registration assertions below keep
+// meaning what they say: install.ps1 calls `& claude` from PowerShell, which
+// legitimately runs this one.
+writeFileSync(
+  join(stubBin, "claude.ps1"),
+  `node "$PSScriptRoot\\claude-stub.mjs" @args\r\nexit $LASTEXITCODE\r\n`,
+);
 
 const env = {
   ...process.env,
@@ -137,8 +150,76 @@ if (spawnSync("where.exe", ["claude"], { encoding: "utf8" }).status === 0) {
     /set CC_CHROME_CLAUDE_BIN=.+claude/i.test(cmdBody),
     cmdBody,
   );
+  // ...and specifically the .cmd, never the .ps1 sitting beside it. This value
+  // has exactly one consumer: server/agent.js spawns it THROUGH cmd.exe, and
+  // cmd cannot run a .ps1 -- it hands the path to ShellExecute, which opens it
+  // with the default verb (Edit). The install looks perfect and every side
+  // panel turn dies. Reported from a real Windows machine.
+  check(
+    "the launcher bakes in claude.cmd, not the claude.ps1 beside it",
+    /set CC_CHROME_CLAUDE_BIN=.+claude\.cmd\s*$/im.test(cmdBody),
+    cmdBody,
+  );
 } else {
   console.log("SKIP  claude CLI is not installed on this machine, so there is no path to bake in");
+}
+
+// ---------------------------------------------------------------------------
+// Write-CcLauncher's `claude` resolution, driven directly. The install above
+// covers the happy path; these are the two cases it cannot reach -- a poisoned
+// value arriving by inheritance, which is how the defect propagates through an
+// in-panel update, and the plain PATH lookup with a .ps1 in the way.
+// ---------------------------------------------------------------------------
+{
+  const bakeWith = (envOverrides = {}) => {
+    const dir = mkdtempSync(join(tmpdir(), "cc-launcher-"));
+    const r = spawnSync(
+      "powershell.exe",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+        `. '${join(root, "scripts", "service-task.ps1")}'; Write-CcLauncher -InstallDir '${dir}' -Port 8787`],
+      {
+        env: { ...process.env, PATH: `${stubBin};${process.env.PATH}`, ...envOverrides },
+        encoding: "utf8",
+      },
+    );
+    const cmd = join(dir, "bridge.cmd");
+    return {
+      status: r.status,
+      stderr: r.stderr,
+      body: existsSync(cmd) ? readFileSync(cmd, "utf8") : "",
+    };
+  };
+  const bakedClaude = (body) => (body.match(/set CC_CHROME_CLAUDE_BIN=(.*)/i) || [])[1] || "";
+
+  const lookedUp = bakeWith({ CC_CHROME_CLAUDE_BIN: "" });
+  check("Write-CcLauncher exits 0 with a stubbed PATH", lookedUp.status === 0, lookedUp.stderr);
+  check(
+    "a PATH lookup picks the Application (.cmd), not the ExternalScript (.ps1)",
+    /claude\.cmd$/i.test(bakedClaude(lookedUp.body).trim()),
+    bakedClaude(lookedUp.body),
+  );
+
+  // An install made before this fix has the .ps1 baked into bridge.cmd, so the
+  // running bridge carries it in its own environment and server/index.js hands
+  // it to scripts/update-runner.mjs as --claude-bin, which puts it back here on
+  // the next update. Trusting the inherited value would preserve the defect on
+  // exactly the machines that are already broken.
+  const poisoned = bakeWith({ CC_CHROME_CLAUDE_BIN: join(stubBin, "claude.ps1") });
+  check(
+    "an inherited .ps1 is rejected and replaced by a usable lookup",
+    /claude\.cmd$/i.test(bakedClaude(poisoned.body).trim()),
+    bakedClaude(poisoned.body),
+  );
+
+  // The other half must still hold: a USABLE inherited value wins over the
+  // lookup. That is what keeps an update from dropping the path on a service
+  // PATH where `claude` resolves to nothing (measured on macOS).
+  const inherited = bakeWith({ CC_CHROME_CLAUDE_BIN: "C:\\opt\\inherited\\claude.cmd" });
+  check(
+    "a usable inherited CC_CHROME_CLAUDE_BIN still wins over the PATH lookup",
+    bakedClaude(inherited.body).trim() === "C:\\opt\\inherited\\claude.cmd",
+    bakedClaude(inherited.body),
+  );
 }
 // Run(..., 0, True): 0 hides the console window, True makes wscript wait. With
 // False the task reads as finished while node still runs, which breaks both
@@ -300,6 +381,55 @@ check("uninstall.ps1 is idempotent", un2.status === 0, `${un2.stdout}\n${un2.std
     if (!served) spawnSync("powershell.exe", ["-NoProfile", "-Command", "Start-Sleep -Milliseconds 500"]);
   }
   check("the real service actually serves /health", served, "no 200 from /health within 20s");
+
+  // -------------------------------------------------------------------------
+  // Restart. Two defects met here on a real Windows machine and each one alone
+  // makes the restart a lie:
+  //   1. Stop-ScheduledTask ends the TASK (wscript). node.exe is its
+  //      grandchild and survives, still holding port 8787 and still serving
+  //      from the environment it was started with -- so a restart meant to pick
+  //      up a corrected bridge.cmd changed nothing at all, invisibly.
+  //   2. Stop-CcTask disables the task on purpose, so a bare
+  //      Start-ScheduledTask afterwards starts nothing and still exits 0.
+  // The assertion that catches (1) is the PID, not /health: /health answers 200
+  // just as happily from the process that was supposed to die.
+  // -------------------------------------------------------------------------
+  const bridgePids = () => {
+    const r = spawnSync("powershell.exe", ["-NoProfile", "-Command",
+      "@(Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | " +
+      "Where-Object { $_.CommandLine -like '*cc-chrome-bridge*server*index.js*' } | " +
+      "ForEach-Object { $_.ProcessId }) -join ','"], { encoding: "utf8" });
+    return (r.stdout || "").trim();
+  };
+  const waitFor = (fn, tries = 40) => {
+    for (let i = 0; i < tries; i++) {
+      if (fn()) return true;
+      spawnSync("powershell.exe", ["-NoProfile", "-Command", "Start-Sleep -Milliseconds 500"]);
+    }
+    return false;
+  };
+
+  const pidsBefore = bridgePids();
+  const restart = spawnSync(
+    "powershell.exe",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+      `. '${join(installDir, "service-task.ps1")}'; Restart-CcTask -InstallDir '${installDir}'`],
+    { env: envReal, encoding: "utf8" },
+  );
+  check("Restart-CcTask exits 0", restart.status === 0, `${restart.stdout}\n${restart.stderr}`);
+  check(
+    "the restart re-enables the task Stop-CcTask disabled",
+    waitFor(() => taskState() === "Running"),
+    `state=${taskState()}`,
+  );
+  const restartServes = waitFor(bridgeUp);
+  check("the bridge serves /health again after a restart", restartServes, "no 200 from /health within 20s");
+  const pidsAfter = bridgePids();
+  check(
+    "the restart replaced the bridge process instead of leaving the old one serving",
+    pidsAfter.length > 0 && pidsAfter !== pidsBefore,
+    `before=${pidsBefore} after=${pidsAfter}`,
+  );
 
   const un3 = psReal(join(installDir, "uninstall.ps1"));
   check("uninstall of a real service exits 0", un3.status === 0, `${un3.stdout}\n${un3.stderr}`);

@@ -194,11 +194,16 @@ function runInstaller() {
 //
 // On win32 the task must be re-REGISTERED, not merely started: Stop-CcTask
 // calls Disable-ScheduledTask before killing (service-task.ps1, verifiable in
-// the source), so a bare Start-CcTask would be starting a disabled task.
+// the source), so a bare Start-ScheduledTask would be starting a disabled task.
 // Register-CcTask (-Force) is expected to clear that by replacing the whole
 // registration — but that is REASONED, not measured: nothing here has run this
 // branch on Windows. Register-CcTask reads bridge-launcher.vbs out of the
 // install directory, which the restore just put back.
+//
+// Start-CcTask now enables the task itself as well, so this path is covered
+// twice — but only when the RESTORED service-task.ps1 is new enough to have
+// that, which on a rollback it may well not be. The Register-CcTask call is
+// what has to carry it, and it stays.
 function startRestoredService() {
   const script = process.platform === "win32"
     ? join(installDir, "service-task.ps1")

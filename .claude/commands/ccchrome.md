@@ -82,13 +82,22 @@ Mục tiêu: dừng rồi khởi động lại dịch vụ nền, dùng đúng c
    nền tảng nào trước.)
 
    **Trên Windows** thì không có `service-unit.sh` và cũng không có bash — bước 1 sẽ tìm
-   `%USERPROFILE%\.cc-chrome-bridge\service-task.ps1` thay thế, và lệnh khởi động lại là:
+   `%USERPROFILE%\.cc-chrome-bridge\service-task.ps1` thay thế. Nạp file đó rồi gọi hàm của nó,
+   ĐÚNG như trên macOS/Linux nạp `service-unit.sh`:
    ```powershell
-   Stop-ScheduledTask ccchrome-bridge; Start-ScheduledTask ccchrome-bridge
+   . "$env:USERPROFILE\.cc-chrome-bridge\service-task.ps1"
+   Restart-CcTask
    Get-ScheduledTask ccchrome-bridge | Select-Object State
    ```
    `State` phải là `Running`. `Ready` nghĩa là bridge không chạy — xem log ở
    `%USERPROFILE%\.cc-chrome-bridge\logs\bridge.err.log`.
+
+   **Tuyệt đối không** thay bằng `Stop-ScheduledTask ccchrome-bridge; Start-ScheduledTask
+   ccchrome-bridge`. Nó hỏng theo kiểu im lặng: `Stop-ScheduledTask` chỉ kết thúc *task*
+   (wscript), còn `node.exe` — cháu của nó — vẫn sống, vẫn giữ cổng 8787 và vẫn phục vụ bằng
+   cấu hình cũ đã nạp trong bộ nhớ, kể cả khi file trên đĩa đã đúng. `Restart-CcTask` gọi
+   `Stop-CcTask` (tự tìm đúng `node.exe` theo command line rồi `taskkill /T /F`) → bật lại task
+   (`Stop-CcTask` cố tình disable nó) → `Start-ScheduledTask`.
 3. Đợi khoảng 1-2 giây rồi gọi `/ccchrome status` để xác nhận bridge sống lại và cổng đúng như cũ.
 4. Không khởi động được (script báo lỗi) → in nguyên lỗi cho người dùng, gợi ý xem log bằng
    `/ccchrome logs`, và câu lệnh chạy tay (đọc `port` từ `~/.ccchrome.json`, mặc định `8787` nếu file

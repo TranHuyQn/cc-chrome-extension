@@ -347,9 +347,19 @@ Script dừng dịch vụ nền, gỡ đăng ký MCP server `chrome`, xoá token
   ```powershell
   Get-ScheduledTask ccchrome-bridge | Select-Object State
   ```
-  `State` phải là **Running**. Nếu là `Ready` thì bridge đang không chạy — khởi động lại bằng
-  `Start-ScheduledTask ccchrome-bridge`, và xem log ở
-  `%USERPROFILE%\.cc-chrome-bridge\logs\bridge.err.log`.
+  `State` phải là **Running**. Nếu là `Ready` thì bridge đang không chạy. Khởi động lại bằng cách nạp
+  file trợ giúp đã cài rồi gọi hàm của nó — bản Windows của dòng `service-unit.sh` ở trên:
+  ```powershell
+  . "$env:USERPROFILE\.cc-chrome-bridge\service-task.ps1"
+  Restart-CcTask
+  ```
+  Log nằm ở `%USERPROFILE%\.cc-chrome-bridge\logs\bridge.err.log`.
+
+  **Đừng** khởi động lại bằng `Stop-ScheduledTask ccchrome-bridge; Start-ScheduledTask
+  ccchrome-bridge`. Nó hỏng im lặng: `Stop-ScheduledTask` chỉ kết thúc *task* (wscript), còn
+  `node.exe` — cháu của nó — vẫn sống, vẫn giữ cổng 8787 và vẫn phục vụ bằng cấu hình đã nạp lúc khởi
+  động, kể cả sau khi file trên đĩa đã được sửa đúng. `Restart-CcTask` giết đúng tiến trình thật rồi
+  bật lại task trước khi start.
 - **Trên Linux, dịch vụ không tự lên sau khi khởi động lại máy**: `systemd --user` cần một phiên đăng
   nhập thật. Nếu bạn cài qua ssh hoặc không đăng nhập vào giao diện đồ hoạ, chạy
   `sudo loginctl enable-linger $USER` rồi cài lại. Máy dùng systemd cũ hơn 240 (ví dụ Ubuntu 18.04)

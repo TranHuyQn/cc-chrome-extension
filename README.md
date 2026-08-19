@@ -374,9 +374,20 @@ finishes:
   ```powershell
   Get-ScheduledTask ccchrome-bridge | Select-Object State
   ```
-  `State` must be **Running**. If it says `Ready`, the bridge is not running — start it again with
-  `Start-ScheduledTask ccchrome-bridge`, and read the log at
-  `%USERPROFILE%\.cc-chrome-bridge\logs\bridge.err.log`.
+  `State` must be **Running**. If it says `Ready`, the bridge is not running. Restart it by loading
+  the installed helper and calling its function — the Windows counterpart of the `service-unit.sh`
+  line above:
+  ```powershell
+  . "$env:USERPROFILE\.cc-chrome-bridge\service-task.ps1"
+  Restart-CcTask
+  ```
+  Read the log at `%USERPROFILE%\.cc-chrome-bridge\logs\bridge.err.log`.
+
+  Do **not** restart with `Stop-ScheduledTask ccchrome-bridge; Start-ScheduledTask ccchrome-bridge`.
+  It fails silently: `Stop-ScheduledTask` only ends the *task* (wscript), while `node.exe` — its
+  grandchild — keeps running, keeps port 8787, and keeps serving from the configuration it loaded at
+  startup even after the files on disk have been fixed. `Restart-CcTask` kills the real process and
+  re-enables the task before starting it.
 - **On Linux, the service does not come back after a reboot**: `systemd --user` needs a real login
   session. If you installed over ssh, or you do not log into a graphical session, run
   `sudo loginctl enable-linger $USER` and reinstall. On machines with systemd older than 240 (Ubuntu
