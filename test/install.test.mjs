@@ -253,10 +253,14 @@ check("a rerun leaves a working server/ in place", existsSync(join(installDir, "
     out2.slice(-500));
   check("the ws URL it prints carries the kept port",
     /ws:\/\/127\.0\.0\.1:8787\/ws\?token=/.test(out2), out2.slice(-400));
-  const unit2 = join(fakeHome, "Library", "LaunchAgents", "com.ccchrome.bridge.plist");
+  // `unit` above, not a hardcoded LaunchAgent path: this file runs on Linux too
+  // (that is the platform CI runs it on), where the unit is a systemd file
+  // somewhere else entirely — and a path that does not exist makes existsSync
+  // false, which reads as "the port was not kept" rather than "the test looked
+  // in the wrong place".
   check("and so does the regenerated service unit",
-    existsSync(unit2) && readFileSync(unit2, "utf8").includes("8787"),
-    existsSync(unit2) ? readFileSync(unit2, "utf8").slice(0, 400) : "(no unit)");
+    existsSync(unit) && readFileSync(unit, "utf8").includes("8787"),
+    existsSync(unit) ? readFileSync(unit, "utf8").slice(0, 400) : `(no unit at ${unit})`);
 
   // The escape hatch has to keep working, or there is no way to move a machine
   // deliberately — including moving it ONTO the new default.
