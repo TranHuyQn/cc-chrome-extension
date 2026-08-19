@@ -17,7 +17,17 @@ set -euo pipefail
 # whatever mode it already had untouched.
 umask 077
 
-PORT="${CC_CHROME_PORT:-8787}"
+# The shipped default is deliberately BELOW 32768. Measured ephemeral ranges:
+# macOS 49152-65535, Windows 49152-65535 (netsh), Linux 32768-60999
+# (/proc/sys/net/ipv4/ip_local_port_range) — so their union is 32768-65535 and
+# any default at or above that can be handed to some other process as a source
+# port before the bridge gets to bind it. The failure that causes is
+# intermittent and silent: the service loses a race at logon and never comes up.
+PORT="${CC_CHROME_PORT:-23949}"
+# Whether the caller NAMED a port, as opposed to taking the default. An upgrade
+# keeps the port it finds (see below) and only an explicit value overrides that,
+# so the two cases cannot be collapsed.
+PORT_EXPLICIT="${CC_CHROME_PORT:-}"
 [[ "$PORT" =~ ^[0-9]+$ ]] || { echo "Lỗi: CC_CHROME_PORT không hợp lệ: '$PORT' (phải là số)." >&2; exit 1; }
 INSTALL_DIR="$HOME/.cc-chrome-bridge"
 STATE_FILE="$HOME/.ccchrome.json"
@@ -38,6 +48,19 @@ new_token() { node -e 'process.stdout.write(require("crypto").randomBytes(16).to
 # C3: read the token out of a possibly-missing/malformed/keyless state file
 # without ever letting a raw Node exception reach the user. Prints nothing
 # (empty string) on any problem; the caller decides what "no token" means.
+read_existing_port() {
+  CC_STATE_FILE="$STATE_FILE" node -e '
+    const fs = require("fs");
+    try {
+      const data = JSON.parse(fs.readFileSync(process.env.CC_STATE_FILE, "utf8"));
+      const port = Number(data.port);
+      if (Number.isInteger(port) && port > 0 && port < 65536) process.stdout.write(String(port));
+    } catch {
+      // malformed JSON, missing file, missing key — all treated as "no usable port"
+    }
+  '
+}
+
 read_existing_token() {
   CC_STATE_FILE="$STATE_FILE" node -e '
     const fs = require("fs");
@@ -83,6 +106,24 @@ esac
 
 upgrade=no
 [ -f "$STATE_FILE" ] && upgrade=yes
+
+# An upgrade keeps the port the machine already uses. It has to: the ws URL the
+# user pasted into the extension popup carries the port, and the extension has
+# no way to learn a new one — it would go on dialing the old socket, silently,
+# with nothing in the UI to explain why the badge never turns green. Anyone
+# updating from inside the panel would not even see an installer message, since
+# the panel is connected over that same old port. So a changed default reaches
+# fresh installs only, and moving an existing machine is an explicit act.
+if [ "$upgrade" = yes ] && [ -z "$PORT_EXPLICIT" ]; then
+  existing_port="$(read_existing_port)"
+  if [ -n "$existing_port" ] && [ "$existing_port" != "$PORT" ]; then
+    say "→ Giữ cổng cũ $existing_port (mặc định của bản này là $PORT)"
+    say "  Muốn chuyển: chạy lại với CC_CHROME_PORT=$PORT rồi dán URL mới vào popup extension."
+    PORT="$existing_port"
+  elif [ -n "$existing_port" ]; then
+    PORT="$existing_port"
+  fi
+fi
 
 say "Claude Code Chrome Bridge — $([ $upgrade = yes ] && echo 'nâng cấp' || echo 'cài đặt')"
 say ""

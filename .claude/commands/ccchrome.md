@@ -8,7 +8,7 @@ Bạn đang quản lý **Claude Code Chrome Bridge** chạy như một dịch v�
 `scripts/install.sh`, xem README mục Cài đặt). Không còn server dùng chung/VPS, không còn pairing
 secret — mỗi máy tự chạy bridge riêng, mỗi bridge một token riêng.
 
-File trạng thái: `~/.ccchrome.json` — nội dung `{"token": "...", "port": 8787}`, do `install.sh` tạo.
+File trạng thái: `~/.ccchrome.json` — nội dung `{"token": "...", "port": 23949}`, do `install.sh` tạo.
 Thư mục cài đặt: `~/.cc-chrome-bridge/` (mã nguồn, `logs/`, `service-unit.sh`, `tokens.json`).
 
 Subcommand người dùng gõ: `$ARGUMENTS` (không có thì coi là `status`).
@@ -19,7 +19,7 @@ Mục tiêu: báo bridge có đang chạy không và extension đã nối vào c
 
 1. Đọc `~/.ccchrome.json` bằng `cat`. Không có file này → báo "chưa cài — chạy `/ccchrome install`"
    rồi dừng lại, không làm các bước dưới.
-2. Lấy `port` từ file đó (mặc định `8787` nếu thiếu trường này). Gọi:
+2. Lấy `port` từ file đó (mặc định `23949` nếu thiếu trường này). Gọi:
    ```
    curl -sS --max-time 5 http://127.0.0.1:<port>/health
    ```
@@ -100,7 +100,7 @@ Mục tiêu: dừng rồi khởi động lại dịch vụ nền, dùng đúng c
    (`Stop-CcTask` cố tình disable nó) → `Start-ScheduledTask`.
 3. Đợi khoảng 1-2 giây rồi gọi `/ccchrome status` để xác nhận bridge sống lại và cổng đúng như cũ.
 4. Không khởi động được (script báo lỗi) → in nguyên lỗi cho người dùng, gợi ý xem log bằng
-   `/ccchrome logs`, và câu lệnh chạy tay (đọc `port` từ `~/.ccchrome.json`, mặc định `8787` nếu file
+   `/ccchrome logs`, và câu lệnh chạy tay (đọc `port` từ `~/.ccchrome.json`, mặc định `23949` nếu file
    không có trường đó — **thiếu `CC_CHROME_TOKENS_FILE` thì lệnh dưới chết ngay với `FATAL: http mode
    requires auth`**, đây không phải lỗi vặt, thiếu nó là lệnh không chạy được gì cả):
    ```bash

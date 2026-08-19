@@ -3,7 +3,10 @@
 // losing it mid-turn would lose the stream. This page lives exactly as long as
 // the panel is open, which is exactly as long as the chat needs.
 
-const DEFAULT_WS_URL = "ws://127.0.0.1:9876";
+// The installer's default, so a panel with nothing stored at least dials the
+// right place. It used to be 9876 — the removed stdio bridge's port, with
+// nothing behind it since before 1.0.0.
+const DEFAULT_WS_URL = "ws://127.0.0.1:23949";
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 
@@ -438,7 +441,7 @@ async function connect() {
     if (!token) {
       setState(
         "disconnected",
-        "Khung chat cần bridge http (có token) chạy trên máy này — mở popup, dán URL dạng ws://127.0.0.1:8787/ws?token=... rồi bấm Lưu & kết nối lại."
+        "Khung chat cần bridge http (có token) chạy trên máy này — mở popup, dán URL dạng ws://127.0.0.1:23949/ws?token=... rồi bấm Lưu & kết nối lại."
       );
       reconnectDelay = RECONNECT_MAX_MS;
       scheduleReconnect();

@@ -205,8 +205,8 @@ check(
 
 const calls = existsSync(claudeLog) ? readFileSync(claudeLog, "utf8") : "";
 check("registers the MCP server with Claude Code", /mcp add .*chrome/.test(calls), calls);
-check("registers it over http on loopback", /127\.0\.0\.1:8787\/mcp/.test(calls), calls);
-check("prints the ws URL for the popup", /ws:\/\/127\.0\.0\.1:8787\/ws\?token=/.test(out), out.slice(-400));
+check("registers it over http on loopback", /127\.0\.0\.1:23949\/mcp/.test(calls), calls);
+check("prints the ws URL for the popup", /ws:\/\/127\.0\.0\.1:23949\/ws\?token=/.test(out), out.slice(-400));
 check("tells the user to Load unpacked", /Load unpacked/i.test(out), out.slice(-400));
 
 // --- rerun is an upgrade, not a second install -----------------------------
@@ -227,6 +227,45 @@ check("a rerun actually replaces the source tree", !existsSync(marker));
 // pass both checks above (marker gone, token unchanged) — this is the one
 // that actually proves the bridge is still installable after the rerun.
 check("a rerun leaves a working server/ in place", existsSync(join(installDir, "server", "index.js")));
+
+// --- an upgrade must not move a working install's port ----------------------
+//
+// The release that changes the default port is the dangerous one. `PORT` is
+// read from `${CC_CHROME_PORT:-<default>}`, so without this the new default
+// silently relocates every existing bridge — and the ws URL saved in the
+// extension popup carries the OLD port, so the extension keeps dialling a dead
+// socket. It fails silently: no error anywhere, the badge just never turns
+// green. Worse for anyone updating from inside the panel, since the panel is
+// itself connected over the old port and cannot report what happened.
+//
+// So an upgrade keeps whatever port the state file already records, and only a
+// first install takes the shipped default. Simulated by writing the old default
+// into the state file the way a machine installed months ago would have it.
+{
+  const statePath = join(fakeHome, ".ccchrome.json");
+  const saved = JSON.parse(readFileSync(statePath, "utf8"));
+  writeFileSync(statePath, JSON.stringify({ ...saved, port: 8787 }, null, 2));
+
+  const out2 = run("install.sh");
+  const state2 = JSON.parse(readFileSync(statePath, "utf8"));
+  check("an upgrade keeps the port already in the state file", state2.port === 8787, String(state2.port));
+  check("and says so, naming the new default and how to move", /8787/.test(out2) && /CC_CHROME_PORT/.test(out2),
+    out2.slice(-500));
+  check("the ws URL it prints carries the kept port",
+    /ws:\/\/127\.0\.0\.1:8787\/ws\?token=/.test(out2), out2.slice(-400));
+  const unit2 = join(fakeHome, "Library", "LaunchAgents", "com.ccchrome.bridge.plist");
+  check("and so does the regenerated service unit",
+    existsSync(unit2) && readFileSync(unit2, "utf8").includes("8787"),
+    existsSync(unit2) ? readFileSync(unit2, "utf8").slice(0, 400) : "(no unit)");
+
+  // The escape hatch has to keep working, or there is no way to move a machine
+  // deliberately — including moving it ONTO the new default.
+  const out3 = run("install.sh", [], { CC_CHROME_PORT: "23949" });
+  const state3 = JSON.parse(readFileSync(statePath, "utf8"));
+  check("an explicit CC_CHROME_PORT still wins over the stored port", state3.port === 23949, String(state3.port));
+  check("and the printed ws URL follows it",
+    /ws:\/\/127\.0\.0\.1:23949\/ws\?token=/.test(out3), out3.slice(-400));
+}
 
 // --- uninstall: argument validation (F1) ------------------------------------
 
@@ -436,7 +475,7 @@ rmSync(fakeHome, { recursive: true, force: true });
         : join(home, ".config", "systemd", "user", "ccchrome-bridge.service"),
     ));
     check(`${label}: writes a token file`, existsSync(join(home, ".ccchrome.json")));
-    check(`${label}: prints the ws URL for the popup`, /ws:\/\/127\.0\.0\.1:8787\/ws\?token=/.test(r.stdout), r.stdout.slice(-400));
+    check(`${label}: prints the ws URL for the popup`, /ws:\/\/127\.0\.0\.1:23949\/ws\?token=/.test(r.stdout), r.stdout.slice(-400));
 
     // The download branch is the one every real user takes, and the source
     // branch's assertions cannot see it — they check a different install dir.

@@ -114,7 +114,7 @@ const state = existsSync(join(fakeHome, ".ccchrome.json"))
   ? JSON.parse(readFileSync(join(fakeHome, ".ccchrome.json"), "utf8"))
   : {};
 check("the token is at least 16 hex chars", /^[0-9a-f]{16,}$/.test(state.token || ""), String(state.token));
-check("the state file records the port", state.port === 8787, String(state.port));
+check("the state file records the port", state.port === 23949, String(state.port));
 
 const tokensPath = join(installDir, "tokens.json");
 // Asserted separately, and before parsing: the ACL the installer applies has
@@ -244,11 +244,11 @@ check(
 check("the MCP server really got registered", existsSync(mcpMarker), mcpMarker);
 check(
   "the registration points at the loopback bridge with the generated token",
-  existsSync(mcpMarker) && readFileSync(mcpMarker, "utf8").includes("http://127.0.0.1:8787/mcp"),
+  existsSync(mcpMarker) && readFileSync(mcpMarker, "utf8").includes("http://127.0.0.1:23949/mcp"),
   existsSync(mcpMarker) ? readFileSync(mcpMarker, "utf8") : "(missing)",
 );
 
-check("prints the ws URL for the popup", /ws:\/\/127\.0\.0\.1:8787\/ws\?token=/.test(out.stdout), out.stdout.slice(-400));
+check("prints the ws URL for the popup", /ws:\/\/127\.0\.0\.1:23949\/ws\?token=/.test(out.stdout), out.stdout.slice(-400));
 check("tells the user to Load unpacked", /Load unpacked/i.test(out.stdout), out.stdout.slice(-400));
 
 // The upgrade path keeps the token, so the user does not have to re-paste the
@@ -278,7 +278,7 @@ const errLog = join(installDir, "logs", "bridge.err.log");
 // dead bridge would make every assertion below pass for the wrong reason.
 const bridgeUp = () => {
   const r = spawnSync("powershell.exe", ["-NoProfile", "-Command",
-    "try { (Invoke-WebRequest -Uri http://127.0.0.1:8787/health -UseBasicParsing -TimeoutSec 2).StatusCode } catch { 0 }"],
+    "try { (Invoke-WebRequest -Uri http://127.0.0.1:23949/health -UseBasicParsing -TimeoutSec 2).StatusCode } catch { 0 }"],
     { encoding: "utf8" });
   return (r.stdout || "").trim() === "200";
 };
@@ -306,6 +306,38 @@ const countBridgeProcs = () => {
   return Number((r.stdout || "").trim());
 };
 check("that bridge is visible as a running node process", countBridgeProcs() > 0, String(countBridgeProcs()));
+
+// --- an upgrade must not move a working install's port ----------------------
+//
+// Same defect and same reasoning as the unix half (see test/install.test.mjs):
+// the ws URL saved in the extension popup carries the port, the extension cannot
+// learn a new one, and a default that relocates an existing bridge breaks it
+// with no error anywhere. Simulated by writing the old default into the state
+// file the way a machine installed months ago would have it.
+{
+  const statePath = join(fakeHome, ".ccchrome.json");
+  const saved = JSON.parse(readFileSync(statePath, "utf8"));
+  writeFileSync(statePath, JSON.stringify({ ...saved, port: 8787 }, null, 2));
+
+  const kept = ps(join(root, "scripts", "install.ps1"));
+  check("an upgrade with a stored port exits 0", kept.status === 0, `${kept.stdout}\n${kept.stderr}`);
+  const keptState = JSON.parse(readFileSync(statePath, "utf8"));
+  check("an upgrade keeps the port already in the state file", keptState.port === 8787, String(keptState.port));
+  check("and says so, naming the new default and how to move",
+    /8787/.test(kept.stdout) && /CC_CHROME_PORT/.test(kept.stdout), kept.stdout.slice(-500));
+  check("the launcher it regenerates carries the kept port",
+    readFileSync(join(installDir, "bridge.cmd"), "utf8").includes("CC_CHROME_PORT=8787"),
+    readFileSync(join(installDir, "bridge.cmd"), "utf8"));
+
+  // The escape hatch, which is also the only way onto the new default.
+  const moved = spawnSync("powershell.exe",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(root, "scripts", "install.ps1")],
+    { env: { ...env, CC_CHROME_PORT: "23949" }, encoding: "utf8" });
+  check("an explicit CC_CHROME_PORT still wins over the stored port",
+    JSON.parse(readFileSync(statePath, "utf8")).port === 23949,
+    String(JSON.parse(readFileSync(statePath, "utf8")).port));
+  check("moving the port exits 0", moved.status === 0, `${moved.stdout}\n${moved.stderr}`);
+}
 
 // Update-handover leftovers: mirrors test/install.test.mjs's fixture for the
 // same four artifacts. Nothing else ever cleaned these, and the defect fixed

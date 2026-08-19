@@ -2,7 +2,7 @@
   "mcpServers": {
     "chrome": {
       "type": "http",
-      "url": "http://127.0.0.1:8787/mcp",
+      "url": "http://127.0.0.1:23949/mcp",
       "headers": {
         "Authorization": "Bearer <token from ~/.ccchrome.json>"
       }

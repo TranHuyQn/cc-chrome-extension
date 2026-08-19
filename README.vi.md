@@ -72,7 +72,7 @@ Claude Code ──(MCP / Streamable HTTP + Bearer token, 127.0.0.1)──► MCP
                                                               chrome.debugger (CDP)
 ```
 
-- **`extension/`** — Chrome extension (Manifest V3). Service worker kết nối tới MCP server qua WebSocket `ws://127.0.0.1:8787/ws`, tự động reconnect, và thực thi các lệnh điều khiển browser.
+- **`extension/`** — Chrome extension (Manifest V3). Service worker kết nối tới MCP server qua WebSocket `ws://127.0.0.1:23949/ws`, tự động reconnect, và thực thi các lệnh điều khiển browser.
 - **`server/`** — MCP server (Node.js ≥ 18), chạy như một **dịch vụ nền** (LaunchAgent trên macOS, `systemd --user` trên Linux) chứ không phải tiến trình con của `claude` — cài bởi `scripts/install.sh`, tự khởi động lại cùng máy. Claude Code nói chuyện với nó qua MCP Streamable HTTP kèm Bearer token, cùng cổng mà extension nối WebSocket vào; mỗi tool call được chuyển tiếp tới extension và trả kết quả về.
 
 Bridge chỉ nghe trên `127.0.0.1` — không có dữ liệu nào gửi ra ngoài, không cần tài khoản Anthropic trong browser, và không có gì để lộ ra mạng. Mỗi người chạy bridge của riêng mình; không có máy chủ trung gian nào cho cả team.
@@ -129,7 +129,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 Script tự làm hết: tải gói phát hành (mã nguồn `server/` + `extension/` kèm sẵn `node_modules`, không
 cần bạn tự `npm install`), sinh token, cài **dịch vụ nền** tự khởi động cùng máy chạy bridge tại
-`http://127.0.0.1:8787`, và đăng ký MCP server `chrome` với Claude Code
+`http://127.0.0.1:23949`, và đăng ký MCP server `chrome` với Claude Code
 (`claude mcp add --scope user --transport http chrome ...`).
 
 Dịch vụ nền đó là **của riêng tài khoản bạn** và lên **khi bạn đăng nhập**, trên cả ba hệ điều hành —
@@ -161,7 +161,7 @@ Không cần quyền root, không đụng gì ngoài thư mục home của bạn
 | Đường dẫn | Nội dung | Quyền |
 |---|---|---|
 | `~/.cc-chrome-bridge/` | `server/` (kèm `node_modules`), `extension/`, `logs/`, `tokens.json`, `uninstall.sh`, `service-unit.sh`, `ccchrome.md`, `update-runner.mjs`, `install.sh`, `install.ps1` | `700` |
-| `~/.ccchrome.json` | `{ "token": "…", "port": 8787 }` | `600` |
+| `~/.ccchrome.json` | `{ "token": "…", "port": 23949 }` | `600` |
 | `~/Library/LaunchAgents/com.ccchrome.bridge.plist` (macOS)<br>`$XDG_CONFIG_HOME/systemd/user/ccchrome-bridge.service` (Linux) | file dịch vụ nền | |
 | `~/.claude/commands/ccchrome.md` | slash command `/ccchrome` | |
 | `~/.claude.json` | thêm MCP server tên `chrome` (qua `claude mcp add`) | |
@@ -171,7 +171,7 @@ Không cần quyền root, không đụng gì ngoài thư mục home của bạn
 | Đường dẫn | Nội dung |
 |---|---|
 | `%USERPROFILE%\.cc-chrome-bridge\` | `server\`, `extension\`, `logs\`, `tokens.json`, `uninstall.ps1`, `service-task.ps1`, `ccchrome.md`, `update-runner.mjs`, `install.sh`, `install.ps1`, cộng `bridge.cmd` và `bridge-launcher.vbs` |
-| `%USERPROFILE%\.ccchrome.json` | `{ "token": "…", "port": 8787 }` |
+| `%USERPROFILE%\.ccchrome.json` | `{ "token": "…", "port": 23949 }` |
 | Scheduled task tên `ccchrome-bridge` | trigger **At log on**, chạy dưới chính tài khoản bạn, `RunLevel Limited` — **không cần quyền admin** |
 | `%USERPROFILE%\.claude\commands\ccchrome.md` | slash command `/ccchrome` |
 | `%USERPROFILE%\.claude.json` | thêm MCP server tên `chrome` |
@@ -219,23 +219,23 @@ curl -fsSL https://github.com/TranHuyQn/cc-chrome-extension/releases/latest/down
 
 # 2. Sinh token và ghi hai file cấu hình
 TOKEN=$(node -e 'process.stdout.write(require("crypto").randomBytes(16).toString("hex"))')
-printf '{"token":"%s","port":8787}\n' "$TOKEN" > ~/.ccchrome.json
+printf '{"token":"%s","port":23949}\n' "$TOKEN" > ~/.ccchrome.json
 printf '{"%s":"local"}\n' "$TOKEN" > ~/.cc-chrome-bridge/tokens.json
 chmod 600 ~/.ccchrome.json ~/.cc-chrome-bridge/tokens.json
 
 # 3. Chạy thử ngay trong terminal — chưa cần dịch vụ nền
-CC_CHROME_HOST=127.0.0.1 CC_CHROME_PORT=8787 \
+CC_CHROME_HOST=127.0.0.1 CC_CHROME_PORT=23949 \
 CC_CHROME_TOKENS_FILE="$HOME/.cc-chrome-bridge/tokens.json" \
 CC_CHROME_CLAUDE_BIN="$(command -v claude)" \
 node ~/.cc-chrome-bridge/server/index.js --http
 
 # 4. Đăng ký với Claude Code (terminal khác)
 claude mcp add --scope user --transport http chrome \
-  http://127.0.0.1:8787/mcp --header "Authorization: Bearer $TOKEN"
+  http://127.0.0.1:23949/mcp --header "Authorization: Bearer $TOKEN"
 
 # 5. Muốn nó tự chạy nền khi đăng nhập thì dùng chính helper trong gói
 bash -c 'source ~/.cc-chrome-bridge/service-unit.sh \
-  && cc_write_unit "$HOME/.cc-chrome-bridge" 8787 && cc_service_start'
+  && cc_write_unit "$HOME/.cc-chrome-bridge" 23949 && cc_service_start'
 
 # 6. Slash command /ccchrome (tuỳ chọn)
 mkdir -p ~/.claude/commands && cp ~/.cc-chrome-bridge/ccchrome.md ~/.claude/commands/
@@ -256,23 +256,23 @@ $bytes = New-Object byte[] 16
 $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
 try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
 $Token = -join ($bytes | ForEach-Object { $_.ToString('x2') })
-"{`"token`":`"$Token`",`"port`":8787}" | Set-Content "$env:USERPROFILE\.ccchrome.json" -Encoding ASCII
+"{`"token`":`"$Token`",`"port`":23949}" | Set-Content "$env:USERPROFILE\.ccchrome.json" -Encoding ASCII
 "{`"$Token`":`"local`"}"              | Set-Content "$Dir\tokens.json" -Encoding ASCII
 icacls "$env:USERPROFILE\.ccchrome.json" /inheritance:r /grant:r "${env:USERNAME}:F" | Out-Null
 icacls "$Dir\tokens.json"              /inheritance:r /grant:r "${env:USERNAME}:F" | Out-Null
 
 # 3. Chạy thử ngay trong cửa sổ này
-$env:CC_CHROME_HOST = "127.0.0.1"; $env:CC_CHROME_PORT = "8787"
+$env:CC_CHROME_HOST = "127.0.0.1"; $env:CC_CHROME_PORT = "23949"
 $env:CC_CHROME_TOKENS_FILE = "$Dir\tokens.json"
 $env:CC_CHROME_CLAUDE_BIN = (Get-Command claude).Source
 node "$Dir\server\index.js" --http
 
 # 4. Đăng ký với Claude Code (cửa sổ khác)
-claude mcp add --scope user --transport http chrome http://127.0.0.1:8787/mcp --header "Authorization: Bearer $Token"
+claude mcp add --scope user --transport http chrome http://127.0.0.1:23949/mcp --header "Authorization: Bearer $Token"
 
 # 5. Muốn tự chạy nền khi đăng nhập
 . "$Dir\service-task.ps1"
-Write-CcLauncher -InstallDir $Dir -Port 8787
+Write-CcLauncher -InstallDir $Dir -Port 23949
 Register-CcTask -InstallDir $Dir
 Start-CcTask
 
@@ -282,7 +282,7 @@ Copy-Item "$Dir\ccchrome.md" "$env:USERPROFILE\.claude\commands\"
 ```
 
 Sau đó vẫn còn hai việc trong Chrome ở mục ngay dưới đây. URL cần dán là
-`ws://127.0.0.1:8787/ws?token=<TOKEN vừa sinh>` — đọc lại bằng
+`ws://127.0.0.1:23949/ws?token=<TOKEN vừa sinh>` — đọc lại bằng
 `cat ~/.ccchrome.json` (macOS/Linux) hoặc
 `Get-Content "$env:USERPROFILE\.ccchrome.json"` (Windows) nếu bạn quên.
 
@@ -293,7 +293,7 @@ Script không tự làm được — Chrome không cho một script cài extensi
 1. Mở `chrome://extensions` → bật **Developer mode** → **Load unpacked** → chọn thư mục
    `~/.cc-chrome-bridge/extension` (script đã in đúng đường dẫn này ở bước trước)
 2. Bấm icon extension "Claude Code Chrome Bridge" → dán URL script đã in (dạng
-   `ws://127.0.0.1:8787/ws?token=...`) vào ô "Địa chỉ MCP server" → **Lưu & kết nối lại**
+   `ws://127.0.0.1:23949/ws?token=...`) vào ô "Địa chỉ MCP server" → **Lưu & kết nối lại**
 
 Badge chuyển `on` màu xanh là xong. Mở khung chat (side panel) bằng nút "Mở khung chat" ngay trong
 popup nếu muốn gõ thẳng không qua terminal — xem [Khung chat](#khung-chat-side-panel).
@@ -610,7 +610,7 @@ chính máy này — Claude (agent) không có cách nào tự kích hoạt vi�
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
-| `CC_CHROME_PORT` | `8787` | Port HTTP server (Streamable HTTP cho Claude Code + WebSocket cho extension đều đi qua cổng này). **Với dịch vụ nền cài bằng `install.sh`, đây KHÔNG phải biến đọc lúc chạy** — `install.sh` đọc `CC_CHROME_PORT` từ shell của bạn một lần, lúc cài, rồi ghi thẳng con số đó (literal, không phải tên biến) vào file dịch vụ (`scripts/service-unit.sh`). `export CC_CHROME_PORT=...` **sau khi** đã cài không đổi được cổng dịch vụ đang chạy — phải `export` giá trị mới rồi chạy lại lệnh cài ở mục [Cài đặt](#cài-đặt) (hoặc tự sửa file dịch vụ) để đổi cổng. |
+| `CC_CHROME_PORT` | `23949` | Port HTTP server (Streamable HTTP cho Claude Code + WebSocket cho extension đều đi qua cổng này). **Với dịch vụ nền cài bằng `install.sh`, đây KHÔNG phải biến đọc lúc chạy** — `install.sh` đọc `CC_CHROME_PORT` từ shell của bạn một lần, lúc cài, rồi ghi thẳng con số đó (literal, không phải tên biến) vào file dịch vụ (`scripts/service-unit.sh`). `export CC_CHROME_PORT=...` **sau khi** đã cài không đổi được cổng dịch vụ đang chạy — phải `export` giá trị mới rồi chạy lại lệnh cài ở mục [Cài đặt](#cài-đặt) (hoặc tự sửa file dịch vụ) để đổi cổng. |
 | `CC_CHROME_HOST` | `127.0.0.1` | Địa chỉ bind. **Với dịch vụ nền cài bằng `install.sh`, biến này không có tác dụng gì cả** — không như `CC_CHROME_PORT`, `install.sh` không đọc `CC_CHROME_HOST` từ môi trường: `scripts/service-unit.sh` ghi cứng `127.0.0.1` vào file dịch vụ, không tham số hoá. Đổi được host chỉ khi chạy `node server/index.js --http` bằng tay hoặc tự sửa file dịch vụ. Quan trọng dù vậy vì `AGENT_ENABLED` (bật khung chat side panel) được tính thẳng từ giá trị host lúc chạy: bind khác `127.0.0.1`/`::1` sẽ **âm thầm tắt khung chat**, không có log cảnh báo riêng nào khác ngoài mục này. |
 | `CC_CHROME_TOKENS` | — | Token tĩnh: `token1=tên1,token2=tên2`. `install.sh` dùng `CC_CHROME_TOKENS_FILE` (dưới đây) thay vì biến này. |
 | `CC_CHROME_TOKENS_FILE` | — | Thay thế: file JSON `{"token": "tên"}`. `install.sh` ghi token do nó sinh vào `~/.cc-chrome-bridge/tokens.json` và trỏ dịch vụ nền vào đó. |
@@ -624,7 +624,7 @@ chính máy này — Claude (agent) không có cách nào tự kích hoạt vi�
 
 ## Lưu ý bảo mật
 
-- **Check origin làm được gì và không làm được gì.** Bridge **bắt buộc** handshake WebSocket phải có header `Origin: chrome-extension://…` (thiếu origin cũng bị từ chối). Việc này chặn được kết nối cross-origin phát sinh từ trong browser — một trang web bất kỳ mở `new WebSocket("ws://127.0.0.1:8787")` sẽ gửi origin `https://…` và bị từ chối — và nâng rào với client local nghiệp dư. Nhưng `Origin` là header do **client tự đặt**, không có gì bảo chứng: một process viết riêng cho việc này (script Node dùng `ws`, hay `curl`) chỉ cần gửi thêm một dòng header là qua được. Test `test/e2e-http.mjs` của chính repo này chứng minh điều đó — nó nối vào server bằng client `ws` thuần Node với origin giả và được chấp nhận như extension thật. **Đừng coi check origin là hàng rào chống được process local có chủ đích.**
+- **Check origin làm được gì và không làm được gì.** Bridge **bắt buộc** handshake WebSocket phải có header `Origin: chrome-extension://…` (thiếu origin cũng bị từ chối). Việc này chặn được kết nối cross-origin phát sinh từ trong browser — một trang web bất kỳ mở `new WebSocket("ws://127.0.0.1:23949")` sẽ gửi origin `https://…` và bị từ chối — và nâng rào với client local nghiệp dư. Nhưng `Origin` là header do **client tự đặt**, không có gì bảo chứng: một process viết riêng cho việc này (script Node dùng `ws`, hay `curl`) chỉ cần gửi thêm một dòng header là qua được. Test `test/e2e-http.mjs` của chính repo này chứng minh điều đó — nó nối vào server bằng client `ws` thuần Node với origin giả và được chấp nhận như extension thật. **Đừng coi check origin là hàng rào chống được process local có chủ đích.**
 - **Bridge cài bằng `install.sh` chỉ nghe trên loopback (`127.0.0.1`) theo mặc định.** Máy khác trong LAN không tới được `/ws`/`/mcp`. Hàng rào thật với ai đang đứng trên chính máy bạn là **token** (`~/.ccchrome.json`), không phải bind address hay check origin ở trên — nói thẳng, mô hình đe dọa thực tế ở mức này là *"phần mềm khác đang chạy sẵn trên máy bạn"*, và biện pháp giảm thiểu thật sự là **dùng một Chrome profile riêng cho automation**, để dù có bị lợi dụng thì cũng không có tab nào đăng nhập tài khoản cá nhân trong đó.
 - **`navigate` và `javascript_eval` (cùng `press_key`, `type_text`, `upload_file`) đều từ chối trang của chính extension.** `navigate` không đưa được tab tới `chrome-extension://<id>/...` (hay `chrome:`, `devtools:`, `edge:`, `about:` khác `about:blank`); bốn tool còn lại từ chối chạy nếu tab lỡ đã nằm trên một trang như vậy. Trong các bản nội bộ trước 1.0.0, hai chốt này không tồn tại — một model có thể `navigate` một tab vào `chrome-extension://<id>/popup.html` rồi `javascript_eval` ngay trên đó, chạy trong realm đặc quyền của extension với `chrome.tabs.*` không giới hạn, phá vỡ hoàn toàn cách ly theo tab group. `take_screenshot` là ngoại lệ **có chủ đích**, không phải sót: chụp ảnh không sửa gì trên trang, còn bốn tool kia đều mutate.
 - `CC_CHROME_EXTENSION_ID=<id>` thu hẹp thêm (chỉ chấp nhận đúng một extension ID) nhưng **không đóng được lỗ trên** — origin vẫn là chuỗi do client tự khai, chỉ là phải đoán đúng thêm một ID. Và pin này **chỉ dùng được khi cả team cài bản `.crx` đã ký** (kéo thả trên Linux, hoặc enterprise policy trên Windows/macOS): cài kiểu **zip + Load unpacked** như hướng dẫn ở trên sinh ID **theo đường dẫn thư mục**, khác nhau trên máy từng người — đặt pin trong trường hợp đó sẽ khoá cả team ra ngoài.
@@ -653,7 +653,7 @@ chưa đóng gói trên macOS ≥ 137.
 
 | Triệu chứng | Cách xử lý |
 |---|---|
-| Tool báo "Chrome extension is not connected" | Mở Chrome, bấm icon extension xem trạng thái; bấm **Lưu & kết nối lại**. Kiểm tra dịch vụ nền còn sống không: `/ccchrome status` hoặc `curl http://127.0.0.1:8787/health`. |
+| Tool báo "Chrome extension is not connected" | Mở Chrome, bấm icon extension xem trạng thái; bấm **Lưu & kết nối lại**. Kiểm tra dịch vụ nền còn sống không: `/ccchrome status` hoặc `curl http://127.0.0.1:23949/health`. |
 | Badge đỏ mãi không xanh | Port lệch nhau — xem popup extension có đúng port dịch vụ nền đang chạy không (`~/.ccchrome.json` → trường `port`; đổi lại bằng cách cài lại với `CC_CHROME_PORT` mới, xem bảng Cấu hình, không phải sửa biến môi trường suông). Hoặc port bị process khác chiếm (server sẽ log `port already in use` vào stderr — xem `/ccchrome logs`). |
 | "Cannot run scripts on chrome://..." | Trang nội bộ của Chrome không cho inject script — chuyển sang tab web thường. |
 | Console/network trả rỗng | Việc thu thập chỉ bắt đầu từ lần gọi tool đầu tiên trên tab đó — reload trang rồi đọc lại. |

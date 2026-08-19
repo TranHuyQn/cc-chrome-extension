@@ -27,7 +27,16 @@ $ErrorActionPreference = 'Stop'
 # Best effort: some hosts have no console attached and this throws.
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
-$Port = if ($env:CC_CHROME_PORT) { [int]$env:CC_CHROME_PORT } else { 8787 }
+# The shipped default is deliberately BELOW 32768. Measured ephemeral ranges:
+# Windows 49152-65535 (netsh int ipv4 show dynamicport tcp, on real hardware),
+# macOS 49152-65535, Linux 32768-60999 — their union is 32768-65535, so any
+# default at or above that can be handed to another process as a source port
+# before the bridge binds it, and the service then loses a race at logon and
+# never comes up. Silently.
+$Port = if ($env:CC_CHROME_PORT) { [int]$env:CC_CHROME_PORT } else { 23949 }
+# Whether the caller NAMED a port. An upgrade keeps the port it finds and only
+# an explicit value overrides that, so the two cases cannot be collapsed.
+$PortExplicit = [bool]$env:CC_CHROME_PORT
 $InstallDir = Join-Path $env:USERPROFILE '.cc-chrome-bridge'
 $StateFile = Join-Path $env:USERPROFILE '.ccchrome.json'
 $CommandDest = Join-Path $env:USERPROFILE '.claude\commands\ccchrome.md'
@@ -95,6 +104,27 @@ if ($nodeMajor -lt 18) { Die "cần Node.js 18 trở lên, máy đang có $nodeV
 $upgrade = Test-Path $StateFile
 Say "Claude Code Chrome Bridge — $(if ($upgrade) { 'nâng cấp' } else { 'cài đặt' })"
 Say ""
+
+# An upgrade keeps the port the machine already uses — the unix installer's
+# comment explains why at length, and it applies identically here: the ws URL in
+# the extension popup carries the port, the extension cannot learn a new one, and
+# the failure is a badge that silently never turns green. A changed default
+# reaches fresh installs only.
+if ($upgrade -and -not $PortExplicit) {
+    $existingPort = 0
+    try {
+        $existingPort = [int](Get-Content $StateFile -Raw | ConvertFrom-Json).port
+    } catch {
+        # Malformed JSON, missing file, missing key — all "no usable port".
+    }
+    if ($existingPort -gt 0 -and $existingPort -lt 65536) {
+        if ($existingPort -ne $Port) {
+            Say "→ Giữ cổng cũ $existingPort (mặc định của bản này là $Port)"
+            Say "  Muốn chuyển: đặt CC_CHROME_PORT=$Port rồi chạy lại, sau đó dán URL mới vào popup extension."
+        }
+        $Port = $existingPort
+    }
+}
 
 # 1. Chuẩn bị mã nguồn mới trong .new và kiểm tra ĐẦY ĐỦ trước khi đụng bản cũ.
 #    Staging nằm TRONG $InstallDir để bước hoán đổi ở mục 3 luôn là Move-Item

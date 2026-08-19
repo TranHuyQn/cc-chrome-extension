@@ -31,7 +31,11 @@ import { AgentSession, claudeBinFromEnv } from "./agent.js";
 import { isLoopbackHost, isLoopbackAddress, forwardedHeadersIn } from "./loopback.js";
 import { compareVersions, isValidTag, releaseUrls, parseChecksumFile, sha256File, reshapeToCheckout, isCacheFresh, buildRunnerSpawn, updateTaskName, LATEST_RELEASE_API } from "./updater.js";
 
-const PORT = Number(process.env.CC_CHROME_PORT || 8787);
+// Below 32768 on purpose. Measured ephemeral ranges: macOS 49152-65535,
+// Windows 49152-65535, Linux 32768-60999 — union 32768-65535. A default inside
+// that can be taken as some other process's source port before the bridge binds
+// it, which loses the race at logon and fails silently.
+const PORT = Number(process.env.CC_CHROME_PORT || 23949);
 // Loopback by default: the mode this replaced (stdio) bound 127.0.0.1
 // unconditionally, and this release's premise is that most installs are a
 // single person running the bridge on their own machine, where 0.0.0.0 would

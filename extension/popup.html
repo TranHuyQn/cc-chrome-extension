@@ -41,12 +41,17 @@
   </div>
   <div id="error"></div>
   <label for="wsUrl">Địa chỉ MCP server (WebSocket)</label>
-  <input id="wsUrl" placeholder="ws://127.0.0.1:9876" />
+  <input id="wsUrl" placeholder="ws://127.0.0.1:23949" />
   <button id="save">Lưu &amp; kết nối lại</button>
   <button id="openPanel">Mở khung chat</button>
+  <div class="hint" id="portHint" hidden>
+    Bridge không trả lời ở cổng trong URL trên. Cổng đang dùng nằm trong
+    <code>~/.ccchrome.json</code> (Windows: <code>%USERPROFILE%\.ccchrome.json</code>),
+    hoặc chạy <code>/ccchrome status</code> trong Claude Code.
+  </div>
   <div class="hint">
-    Chạy MCP server trên máy: <code>npx .</code> trong thư mục <code>server/</code>,
-    hoặc thêm vào Claude Code bằng <code>claude mcp add</code> (xem README).
+    Chưa cài bridge? Xem README — <code>install.sh</code> dựng dịch vụ nền và in
+    sẵn URL để dán vào ô trên.
   </div>
   <script src="popup.js"></script>
 </body>

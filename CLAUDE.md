@@ -9,7 +9,7 @@ without any claude.ai login. Every MCP tool call is forwarded over WebSocket to 
 executes it with `chrome.tabs` / `chrome.scripting` / `chrome.debugger` and returns JSON.
 
 One runtime mode: `mainHttp()` in `server/index.js` runs an HTTP + WebSocket server, bound to
-`127.0.0.1` by default (port `8787`), that every Claude Code session and the extension both talk to.
+`127.0.0.1` by default (port `23949`), that every Claude Code session and the extension both talk to.
 There is no `mainStdio()` — stdio mode (single process on stdout, no auth) was removed before 1.0.0. The
 distribution model changed with it: `scripts/install.sh` installs a per-user background service (see
 "Setup and commands" below) instead of everyone pointing at one shared server. The shared-server shape
@@ -581,6 +581,30 @@ attached them.
   `test/install-windows.test.mjs`'s "the scheduled task exists after a real
   install" — an interactive install on a domain-joined or normally-named machine
   never reproduces it, which is why it survived every earlier run.
+- **The default port is 23949, and being below 32768 is the whole point.**
+  Measured ephemeral ranges: macOS `49152-65535` (`sysctl net.inet.ip.portrange`),
+  Windows `49152-65535` (`netsh int ipv4 show dynamicport tcp`, on real
+  hardware), Linux `32768-60999` (`/proc/sys/net/ipv4/ip_local_port_range`,
+  Debian 12). Their union is `32768-65535`, so **any** default at or above 32768
+  can be handed to some other process as a source port before the bridge binds
+  it. The resulting failure is the worst kind: intermittent, and silent — the
+  service loses a race at logon and simply never comes up. A number that looks
+  free today is not the test; being outside every platform's ephemeral range is.
+- **An upgrade keeps the port it finds; only a fresh install takes the shipped
+  default.** `install.sh` and `install.ps1` read `port` back out of
+  `~/.ccchrome.json` the same way they already read `token`, and only an explicit
+  `CC_CHROME_PORT` overrides it. Without that, changing the default relocates
+  every existing bridge — and the ws URL the user pasted into the extension popup
+  carries the old port, which the extension has no way to update. It would go on
+  dialling a dead socket with nothing in the UI to explain the badge that never
+  turns green, and anyone updating from **inside the panel** would not even see
+  an installer message, because the panel is connected over that same old port.
+  `test/install.test.mjs` and `test/install-windows.test.mjs` both cover it by
+  writing the old default into the state file and asserting the upgrade keeps it,
+  plus that `CC_CHROME_PORT` still wins. Note those assertions were **vacuous
+  until the default actually changed** — "keeps 8787" and "falls back to 8787"
+  are the same observation while 8787 is the default, which is why the default
+  had to move first to get a real red.
 - The release tarball must carry `update-runner.mjs`, `install.sh` and
   `install.ps1` inside it, **and** both installers must copy them into
   `$INSTALL_DIR`, because that is where `spawnUpdateRunner` reads them from —

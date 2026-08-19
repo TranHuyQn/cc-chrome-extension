@@ -69,7 +69,7 @@ Claude Code ──(MCP / Streamable HTTP + Bearer token, 127.0.0.1)──► MCP
 ```
 
 - **`extension/`** — the Chrome extension (Manifest V3). Its service worker connects to the MCP
-  server over WebSocket at `ws://127.0.0.1:8787/ws`, reconnects on its own, and executes the browser
+  server over WebSocket at `ws://127.0.0.1:23949/ws`, reconnects on its own, and executes the browser
   commands.
 - **`server/`** — the MCP server (Node.js ≥ 18). It runs as a **background service** (LaunchAgent on
   macOS, `systemd --user` on Linux, a scheduled task on Windows) rather than as a child process of
@@ -133,7 +133,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 The script does the rest: downloads the release payload (`server/` + `extension/` source with
 `node_modules` already bundled, so you never run `npm install` yourself), generates a token, installs
 a **background service** that starts with your machine and runs the bridge at
-`http://127.0.0.1:8787`, and registers the MCP server named `chrome` with Claude Code
+`http://127.0.0.1:23949`, and registers the MCP server named `chrome` with Claude Code
 (`claude mcp add --scope user --transport http chrome ...`).
 
 That background service belongs to **your account** and starts **when you log in**, on all three
@@ -168,7 +168,7 @@ No root, nothing outside your home directory. The complete list:
 | Path | Contents | Mode |
 |---|---|---|
 | `~/.cc-chrome-bridge/` | `server/` (with `node_modules`), `extension/`, `logs/`, `tokens.json`, `uninstall.sh`, `service-unit.sh`, `ccchrome.md`, `update-runner.mjs`, `install.sh`, `install.ps1` | `700` |
-| `~/.ccchrome.json` | `{ "token": "…", "port": 8787 }` | `600` |
+| `~/.ccchrome.json` | `{ "token": "…", "port": 23949 }` | `600` |
 | `~/Library/LaunchAgents/com.ccchrome.bridge.plist` (macOS)<br>`$XDG_CONFIG_HOME/systemd/user/ccchrome-bridge.service` (Linux) | the background service file | |
 | `~/.claude/commands/ccchrome.md` | the `/ccchrome` slash command | |
 | `~/.claude.json` | adds an MCP server named `chrome` (via `claude mcp add`) | |
@@ -179,7 +179,7 @@ setting permissions:
 | Path | Contents |
 |---|---|
 | `%USERPROFILE%\.cc-chrome-bridge\` | `server\`, `extension\`, `logs\`, `tokens.json`, `uninstall.ps1`, `service-task.ps1`, `ccchrome.md`, `update-runner.mjs`, `install.sh`, `install.ps1`, plus `bridge.cmd` and `bridge-launcher.vbs` |
-| `%USERPROFILE%\.ccchrome.json` | `{ "token": "…", "port": 8787 }` |
+| `%USERPROFILE%\.ccchrome.json` | `{ "token": "…", "port": 23949 }` |
 | A scheduled task named `ccchrome-bridge` | trigger **At log on**, runs as your own account, `RunLevel Limited` — **no admin rights required** |
 | `%USERPROFILE%\.claude\commands\ccchrome.md` | the `/ccchrome` slash command |
 | `%USERPROFILE%\.claude.json` | adds an MCP server named `chrome` |
@@ -235,23 +235,23 @@ curl -fsSL https://github.com/TranHuyQn/cc-chrome-extension/releases/latest/down
 
 # 2. Generate a token and write the two config files
 TOKEN=$(node -e 'process.stdout.write(require("crypto").randomBytes(16).toString("hex"))')
-printf '{"token":"%s","port":8787}\n' "$TOKEN" > ~/.ccchrome.json
+printf '{"token":"%s","port":23949}\n' "$TOKEN" > ~/.ccchrome.json
 printf '{"%s":"local"}\n' "$TOKEN" > ~/.cc-chrome-bridge/tokens.json
 chmod 600 ~/.ccchrome.json ~/.cc-chrome-bridge/tokens.json
 
 # 3. Try it right here in the terminal — no service needed yet
-CC_CHROME_HOST=127.0.0.1 CC_CHROME_PORT=8787 \
+CC_CHROME_HOST=127.0.0.1 CC_CHROME_PORT=23949 \
 CC_CHROME_TOKENS_FILE="$HOME/.cc-chrome-bridge/tokens.json" \
 CC_CHROME_CLAUDE_BIN="$(command -v claude)" \
 node ~/.cc-chrome-bridge/server/index.js --http
 
 # 4. Register with Claude Code (another terminal)
 claude mcp add --scope user --transport http chrome \
-  http://127.0.0.1:8787/mcp --header "Authorization: Bearer $TOKEN"
+  http://127.0.0.1:23949/mcp --header "Authorization: Bearer $TOKEN"
 
 # 5. To have it start in the background at login, use the helper shipped in the payload
 bash -c 'source ~/.cc-chrome-bridge/service-unit.sh \
-  && cc_write_unit "$HOME/.cc-chrome-bridge" 8787 && cc_service_start'
+  && cc_write_unit "$HOME/.cc-chrome-bridge" 23949 && cc_service_start'
 
 # 6. The /ccchrome slash command (optional)
 mkdir -p ~/.claude/commands && cp ~/.cc-chrome-bridge/ccchrome.md ~/.claude/commands/
@@ -272,23 +272,23 @@ $bytes = New-Object byte[] 16
 $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
 try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
 $Token = -join ($bytes | ForEach-Object { $_.ToString('x2') })
-"{`"token`":`"$Token`",`"port`":8787}" | Set-Content "$env:USERPROFILE\.ccchrome.json" -Encoding ASCII
+"{`"token`":`"$Token`",`"port`":23949}" | Set-Content "$env:USERPROFILE\.ccchrome.json" -Encoding ASCII
 "{`"$Token`":`"local`"}"              | Set-Content "$Dir\tokens.json" -Encoding ASCII
 icacls "$env:USERPROFILE\.ccchrome.json" /inheritance:r /grant:r "${env:USERNAME}:F" | Out-Null
 icacls "$Dir\tokens.json"              /inheritance:r /grant:r "${env:USERNAME}:F" | Out-Null
 
 # 3. Try it right here in this window
-$env:CC_CHROME_HOST = "127.0.0.1"; $env:CC_CHROME_PORT = "8787"
+$env:CC_CHROME_HOST = "127.0.0.1"; $env:CC_CHROME_PORT = "23949"
 $env:CC_CHROME_TOKENS_FILE = "$Dir\tokens.json"
 $env:CC_CHROME_CLAUDE_BIN = (Get-Command claude).Source
 node "$Dir\server\index.js" --http
 
 # 4. Register with Claude Code (another window)
-claude mcp add --scope user --transport http chrome http://127.0.0.1:8787/mcp --header "Authorization: Bearer $Token"
+claude mcp add --scope user --transport http chrome http://127.0.0.1:23949/mcp --header "Authorization: Bearer $Token"
 
 # 5. To have it start in the background at login
 . "$Dir\service-task.ps1"
-Write-CcLauncher -InstallDir $Dir -Port 8787
+Write-CcLauncher -InstallDir $Dir -Port 23949
 Register-CcTask -InstallDir $Dir
 Start-CcTask
 
@@ -298,7 +298,7 @@ Copy-Item "$Dir\ccchrome.md" "$env:USERPROFILE\.claude\commands\"
 ```
 
 After that there are still two things to do inside Chrome, in the section right below. The URL you
-need to paste is `ws://127.0.0.1:8787/ws?token=<the token you just generated>` — read it back with
+need to paste is `ws://127.0.0.1:23949/ws?token=<the token you just generated>` — read it back with
 `cat ~/.ccchrome.json` (macOS/Linux) or `Get-Content "$env:USERPROFILE\.ccchrome.json"` (Windows) if
 you forget it.
 
@@ -310,7 +310,7 @@ The script cannot do these — Chrome does not let a script install an extension
    `~/.cc-chrome-bridge/extension` directory (the script printed the exact path in the previous
    step).
 2. Click the "Claude Code Chrome Bridge" extension icon → paste the URL the script printed (of the
-   form `ws://127.0.0.1:8787/ws?token=...`) into the "Địa chỉ MCP server" (MCP server address) field →
+   form `ws://127.0.0.1:23949/ws?token=...`) into the "Địa chỉ MCP server" (MCP server address) field →
    **Lưu & kết nối lại** (Save & reconnect).
 
 The badge turning green with `on` means you are done. Open the side panel with the "Mở khung chat"
@@ -620,7 +620,7 @@ agent) has no way to trigger an update itself.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CC_CHROME_PORT` | `8787` | HTTP server port (both Streamable HTTP for Claude Code and the extension's WebSocket go through it). **For a background service installed by `install.sh` this is NOT read at runtime** — `install.sh` reads `CC_CHROME_PORT` from your shell once, at install time, and writes that number (as a literal, not a variable name) into the service file (`scripts/service-unit.sh`). `export CC_CHROME_PORT=...` **after** installing does not change the port of the running service — you must `export` the new value and re-run the install command in [Installation](#installation) (or edit the service file yourself) to change the port. |
+| `CC_CHROME_PORT` | `23949` | HTTP server port (both Streamable HTTP for Claude Code and the extension's WebSocket go through it). **For a background service installed by `install.sh` this is NOT read at runtime** — `install.sh` reads `CC_CHROME_PORT` from your shell once, at install time, and writes that number (as a literal, not a variable name) into the service file (`scripts/service-unit.sh`). `export CC_CHROME_PORT=...` **after** installing does not change the port of the running service — you must `export` the new value and re-run the install command in [Installation](#installation) (or edit the service file yourself) to change the port. |
 | `CC_CHROME_HOST` | `127.0.0.1` | Bind address. **For a background service installed by `install.sh` this variable does nothing at all** — unlike `CC_CHROME_PORT`, `install.sh` does not read `CC_CHROME_HOST` from the environment: `scripts/service-unit.sh` hard-codes `127.0.0.1` into the service file and does not parameterise it. You can only change the host by running `node server/index.js --http` by hand or by editing the service file yourself. It still matters, because `AGENT_ENABLED` (which turns the side panel chat on) is computed directly from the host value at runtime: binding to something other than `127.0.0.1`/`::1` **silently turns the panel off**, with no warning log other than this table entry. |
 | `CC_CHROME_TOKENS` | — | Static tokens: `token1=name1,token2=name2`. `install.sh` uses `CC_CHROME_TOKENS_FILE` (below) instead of this. |
 | `CC_CHROME_TOKENS_FILE` | — | Alternative: a JSON file `{"token": "name"}`. `install.sh` writes the token it generates to `~/.cc-chrome-bridge/tokens.json` and points the background service at it. |
@@ -638,7 +638,7 @@ server address) → **Lưu & kết nối lại** (Save & reconnect).
 - **What the origin check does and does not do.** The bridge **requires** the WebSocket handshake to
   carry an `Origin: chrome-extension://…` header (a missing origin is refused too). That blocks
   cross-origin connections originating inside the browser — an arbitrary web page opening
-  `new WebSocket("ws://127.0.0.1:8787")` sends an `https://…` origin and is refused — and it raises
+  `new WebSocket("ws://127.0.0.1:23949")` sends an `https://…` origin and is refused — and it raises
   the bar against casual local clients. But `Origin` is a header the **client sets itself**, with
   nothing vouching for it: a process purpose-built for this (a Node script using `ws`, or `curl`)
   gets through by sending one extra header line. This repo's own `test/e2e-http.mjs` demonstrates
@@ -721,7 +721,7 @@ unpacked extension.
 
 | Symptom | What to do |
 |---|---|
-| A tool reports "Chrome extension is not connected" | Open Chrome, click the extension icon and check the status; click **Lưu & kết nối lại** (Save & reconnect). Check the background service is alive: `/ccchrome status` or `curl http://127.0.0.1:8787/health`. |
+| A tool reports "Chrome extension is not connected" | Open Chrome, click the extension icon and check the status; click **Lưu & kết nối lại** (Save & reconnect). Check the background service is alive: `/ccchrome status` or `curl http://127.0.0.1:23949/health`. |
 | The badge stays red and never turns green | Mismatched ports — check that the extension popup has the port the background service is actually running on (`~/.ccchrome.json` → `port` field; change it by reinstalling with a new `CC_CHROME_PORT`, see the Configuration table, not by exporting the variable alone). Or the port is taken by another process (the server logs `port already in use` to stderr — see `/ccchrome logs`). |
 | "Cannot run scripts on chrome://..." | Chrome's internal pages do not allow script injection — switch to a normal web tab. |
 | Console/network come back empty | Collection only starts from the first tool call on that tab — reload the page and read again. |

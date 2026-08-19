@@ -6,7 +6,7 @@
 
 // The bridge has one mode now: http bound to loopback, installed as a per-user
 // service. 9876 was the stdio bridge, which no longer exists.
-const DEFAULT_WS_URL = "ws://127.0.0.1:8787/ws";
+const DEFAULT_WS_URL = "ws://127.0.0.1:23949/ws";
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 const KEEPALIVE_MS = 20000;
