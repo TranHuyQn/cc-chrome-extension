@@ -217,6 +217,9 @@ export class AgentSession {
     // the two exit paths for a turn emits its turn_end, so callers never see
     // two end-of-turn events for one send().
     this.finished = false;
+    // Set by send() for the duration of one turn. buildArgs() is called from
+    // send() after this is assigned, so it never has to be passed around.
+    this.turnImages = [];
     // SIGKILL is asynchronous and the stdout listener stays attached, so a
     // killed child's already-buffered lines still arrive and still translate.
     // On the start-while-busy path the panel socket is very much open — it just
@@ -276,7 +279,19 @@ export class AgentSession {
   // arrives — stop button, crashed child, killed process — still closes, so the
   // panel never spins a row forever. That symptom is the whole reason this
   // feature exists; leaving one behind here would recreate it.
+  // Idempotent and never throws: a turn can end through `result`, through
+  // stop(), through a spawn failure, or through the child dying on its own, and
+  // an already-ended or already-destroyed pipe must not turn any of those into
+  // an exception. Leaving it open on the image path is what wedges a child
+  // forever, so every one of those paths calls this.
+  endStdin() {
+    try {
+      if (this.child && this.child.stdin && !this.child.stdin.destroyed) this.child.stdin.end();
+    } catch { /* the pipe is already gone, which is the state we wanted */ }
+  }
+
   endTurn(payload) {
+    this.endStdin();
     for (const [id, step] of this.steps) {
       this.emit({
         type: "step_end",
@@ -374,6 +389,12 @@ export class AgentSession {
       "--tools", "",
       "--allowedTools", this.allowedTools,
     ];
+    // Only for a turn that actually carries an image. The text path writes the
+    // prompt and closes stdin; stream-json inverts that (measured -- see the
+    // comment in send()), and confining the new lifecycle to the turns that
+    // need it keeps every text turn on the code that has been running
+    // unchanged for months.
+    if (this.turnImages.length) args.push("--input-format", "stream-json");
     const panelSettings = this.panelSettingsPath();
     if (panelSettings) args.push("--settings", panelSettings);
     if (this.model) args.push("--model", this.model);
@@ -383,10 +404,11 @@ export class AgentSession {
     return args;
   }
 
-  send(text) {
+  send(text, images = []) {
     if (this.child) throw new Error("A turn is already running; stop it first.");
     this.stopping = false;
     this.finished = false;
+    this.turnImages = Array.isArray(images) ? images : [];
     this.buffer = "";
     this.steps.clear();
     this.phase = null;
@@ -488,8 +510,26 @@ export class AgentSession {
     child.stdin.on("error", (err) => {
       this.log("[claude stdin]", err.message);
     });
-    child.stdin.write(text);
-    child.stdin.end();
+    if (this.turnImages.length) {
+      // One NDJSON line, and stdin deliberately left OPEN. Measured on CLI
+      // 2.1.197: write-then-end (what the branch below does) makes the CLI exit
+      // 0 having run no turn at all -- no system/init, no assistant, no result,
+      // nothing on stderr. It is closed when the `result` line arrives, in
+      // translate(); never closing it leaves the child alive indefinitely
+      // (measured: still running 45s after the result, killed by SIGTERM).
+      const content = [];
+      if (text) content.push({ type: "text", text });
+      for (const image of this.turnImages) {
+        content.push({
+          type: "image",
+          source: { type: "base64", media_type: image.mediaType, data: image.data },
+        });
+      }
+      child.stdin.write(JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n");
+    } else {
+      child.stdin.write(text);
+      child.stdin.end();
+    }
   }
 
   onStdout(chunk) {
@@ -568,6 +608,10 @@ export class AgentSession {
       return;
     }
     if (event.type === "result") {
+      // The stream-json input path leaves stdin open (see send()), and the CLI
+      // waits on it rather than exiting. This line is what ends the turn's
+      // process. Harmless on the text path, where stdin is already ended.
+      this.endStdin();
       this.emit({
         type: "turn_stats",
         ms: event.duration_ms ?? null,
@@ -623,6 +667,10 @@ export class AgentSession {
   stop() {
     if (!this.child) return false;
     this.stopping = true;
+    // Closed before the signal, not instead of it. On the image path the child
+    // is blocked reading stdin, and a CLI that handles SIGTERM by draining
+    // would sit there; closing the pipe is what lets it wind down either way.
+    this.endStdin();
     this.killChild("SIGTERM");
     return true;
   }
