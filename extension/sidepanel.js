@@ -31,6 +31,7 @@ const statusTimeEl = document.getElementById("statusTime");
 const updateEl = document.getElementById("update");
 const updateTextEl = document.getElementById("updateText");
 const updateActionEl = document.getElementById("updateAction");
+const jumpEl = document.getElementById("jumpToBottom");
 
 let ws = null;
 let reconnectDelay = RECONNECT_MIN_MS;
@@ -91,6 +92,46 @@ let locale = "vi";
 // the next `ready`.
 let localeInitialized = false;
 
+// Whether the log should follow new content. The user scrolling up turns this
+// off, and it stays off until they come back to the bottom or press the button:
+// yanking someone away from the message they are reading is the defect this
+// exists to remove.
+//
+// 24px of slack, not 0: a scrolling box does not always land on an exact
+// integer (fractional device pixels, a mid-flight smooth scroll), and demanding
+// equality would drop out of follow mode at the bottom of the log.
+let stick = true;
+const STICK_SLACK_PX = 24;
+
+function atBottom() {
+  return logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight <= STICK_SLACK_PX;
+}
+
+function updateJumpButton() {
+  jumpEl.hidden = stick;
+}
+
+// Unconditional. Used where the user's own action means they want the live end:
+// sending a message, and the one-off scroll after a journal replay.
+function scrollToBottom() {
+  logEl.scrollTop = logEl.scrollHeight;
+  stick = true;
+  updateJumpButton();
+}
+
+// Everything the SERVER causes goes through here instead.
+function scrollIfSticking() {
+  if (!stick) return;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+logEl.addEventListener("scroll", () => {
+  stick = atBottom();
+  updateJumpButton();
+});
+
+jumpEl.addEventListener("click", scrollToBottom);
+
 // null = chưa hỏi, "available" = có bản mới, "running" = đang cài,
 // "reload" = cài xong chờ nạp lại, "failed" = hỏng.
 let updateState = null;
@@ -113,7 +154,7 @@ function addMessage(kind, text) {
   if (kind === "assistant") setMarkdown(el, text);
   else el.textContent = text;
   logEl.appendChild(el);
-  logEl.scrollTop = logEl.scrollHeight;
+  scrollIfSticking();
   return el;
 }
 
@@ -145,7 +186,7 @@ function scheduleStreamRender() {
     streamFrame = 0;
     if (!streaming) return;
     setMarkdown(streaming, streamingText);
-    logEl.scrollTop = logEl.scrollHeight;
+    scrollIfSticking();
   });
 }
 
@@ -181,7 +222,7 @@ function addStep(id, name) {
 
   el.append(head, detail);
   logEl.appendChild(el);
-  logEl.scrollTop = logEl.scrollHeight;
+  scrollIfSticking();
   steps.set(id, { el, icon, label, sub, time, detail, name });
   return el;
 }
@@ -373,6 +414,9 @@ async function restore() {
   sweepOpenSteps();
   resetStream();
   streamingEntry = null;
+  // A reopened panel starts at the live end, whatever the user's scroll
+  // position was when they closed it.
+  scrollToBottom();
 }
 
 async function loadState() {
@@ -760,6 +804,7 @@ inputEl.addEventListener("keydown", (event) => {
   record({ type: "user", text });
   inputEl.value = "";
   send({ type: "prompt", text });
+  scrollToBottom();
 });
 
 stopBtn.addEventListener("click", () => send({ type: "stop" }));

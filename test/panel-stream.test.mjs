@@ -51,6 +51,7 @@ function makeElement(tagName) {
     title: "",
     scrollTop: 0,
     scrollHeight: 0,
+    clientHeight: 0,
     listeners: {},
     classList: {
       add() {},
@@ -73,6 +74,11 @@ function makeElement(tagName) {
     removeChild(child) {
       this.childNodes = this.childNodes.filter((c) => c !== child);
       return child;
+    },
+    // The panel builds its step rows with append(a, b, c). Same semantics as
+    // appendChild in a loop, which is what the real one does for elements.
+    append(...kids) {
+      for (const kid of kids) this.appendChild(kid);
     },
     remove() {},
     select() {},
@@ -259,6 +265,46 @@ check("replaying that entry reproduces the same rendered bubble",
 logEl.childNodes = [];
 sandbox.render({ type: "user", text: "sửa **giúp** ## này" });
 eq("a user message stays literal", plainText(logEl.childNodes[0]), "sửa **giúp** ## này");
+
+// --- the log must not scroll itself while the user is reading back ---------
+
+const jumpEl = byId.get("jumpToBottom");
+
+// Simulate a tall log the user has scrolled up in. The panel decides by
+// geometry, so the geometry is what the fake has to carry.
+logEl.childNodes = [];
+logEl.scrollHeight = 2000;
+logEl.clientHeight = 400;
+logEl.scrollTop = 2000 - 400; // pinned at the bottom
+for (const fn of logEl.listeners.scroll || []) fn();
+
+sandbox.render({ type: "delta", text: "một" });
+flushFrames();
+check("while pinned at the bottom, new content still scrolls into view",
+  logEl.scrollTop === logEl.scrollHeight, `scrollTop=${logEl.scrollTop} scrollHeight=${logEl.scrollHeight}`);
+
+// Now the user scrolls up to read something.
+sandbox.resetStream();
+logEl.scrollTop = 100;
+for (const fn of logEl.listeners.scroll || []) fn();
+const before = logEl.scrollTop;
+
+sandbox.render({ type: "delta", text: "hai" });
+flushFrames();
+sandbox.render({ type: "step_start", id: "s1", name: "mcp__chrome__read_page" });
+sandbox.render({ type: "error-line", text: "một dòng nữa" });
+
+eq("a streaming delta does not yank the log back to the bottom", logEl.scrollTop, before);
+check("neither does a new step row or a new message", logEl.scrollTop === before,
+  `scrollTop=${logEl.scrollTop}, expected ${before}`);
+check("the jump-to-bottom button is showing", jumpEl.hidden === false, `hidden=${jumpEl.hidden}`);
+
+// Clicking it returns the user to the live end and re-arms following.
+for (const fn of jumpEl.listeners.click || []) fn();
+check("clicking the button scrolls to the bottom", logEl.scrollTop === logEl.scrollHeight,
+  `scrollTop=${logEl.scrollTop} scrollHeight=${logEl.scrollHeight}`);
+for (const fn of logEl.listeners.scroll || []) fn();
+check("and hides itself again", jumpEl.hidden === true, `hidden=${jumpEl.hidden}`);
 
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);
