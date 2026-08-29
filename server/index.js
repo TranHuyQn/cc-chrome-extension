@@ -673,6 +673,46 @@ async function mainHttp() {
   const SESSION_TTL_MS = Number.isFinite(ttlFromEnv) && ttlFromEnv > 0 ? ttlFromEnv : 8 * 60 * 60 * 1000;
   const sessions = new Map(); // mcp-session-id -> { transport, token, lastSeen }
 
+  // The ONE place a session leaves the map. Hooking the deletion rather than
+  // each of its callers is what keeps a call site added later from silently
+  // skipping the tab-group teardown -- there are three today and there is no
+  // reason to think that is the final number.
+  //
+  // Best effort in every direction: the extension may be disconnected, the
+  // group may already be gone, the call may time out. None of that may break
+  // the caller, which in the reaper's case is a loop over the OTHER sessions.
+  const dropSession = (id) => {
+    const session = sessions.get(id);
+    if (!session) return;
+    sessions.delete(id);
+    // A session leaving the map is not the same as the session being over, and
+    // the panel is where the two come apart: it spawns one `claude` per TURN,
+    // so its MCP transport closes after every single message the user sends.
+    // Tearing the group down there would unstick every tab the user had
+    // attached, once per message -- which is the exact failure the stable
+    // mcpSessionId exists to prevent. The panel's own close handler deletes
+    // itself from `panels` BEFORE calling this, so a genuinely closed panel
+    // still gets its group dissolved.
+    //
+    // Caught by test/panel-protocol.test.mjs, which saw release_session_group
+    // land between two turns of one conversation.
+    if ([...panels.values()].some((p) => p.mcpSessionId === id)) {
+      log(`Session ${id} closed but its panel is still open — keeping its tab group`);
+      return;
+    }
+    try {
+      // requireNow, not require: require() waits for an extension that may
+      // never come back, and a teardown is not worth holding a promise open
+      // across a laptop lid being shut.
+      const conn = registry.requireNow(session.token);
+      Promise.resolve(conn.call("release_session_group", {}, 5000, id))
+        .then((r) => log(`Released tab group for session ${id} (${r?.ungrouped ?? 0} tab(s) ungrouped)`))
+        .catch((err) => log(`Could not release tab group for session ${id}: ${err.message}`));
+    } catch (err) {
+      log(`No extension connected to release tab group for session ${id}: ${err.message}`);
+    }
+  };
+
   // A client that disappears without closing (laptop shut, session killed) used
   // to leave its transport here forever.
   setInterval(() => {
@@ -680,7 +720,7 @@ async function mainHttp() {
     for (const [id, session] of sessions) {
       if (now - session.lastSeen <= SESSION_TTL_MS) continue;
       log(`Closing MCP session ${id}: idle for more than ${SESSION_TTL_MS}ms`);
-      sessions.delete(id);
+      dropSession(id);
       try { session.transport.close(); } catch {}
     }
   }, Math.min(5 * 60 * 1000, SESSION_TTL_MS)).unref();
@@ -832,7 +872,7 @@ async function mainHttp() {
         },
       });
       transport.onclose = () => {
-        if (transport.sessionId) sessions.delete(transport.sessionId);
+        if (transport.sessionId) dropSession(transport.sessionId);
       };
       const name = tokens.get(token);
       const server = buildMcpServer(
@@ -912,7 +952,7 @@ async function mainHttp() {
       // that is dozens of them.
       const session = sessions.get(panel.mcpSessionId);
       if (session) {
-        sessions.delete(panel.mcpSessionId);
+        dropSession(panel.mcpSessionId);
         Promise.resolve(session.transport.close()).catch(() => { /* already gone */ });
       }
       log(`[panel ${panelId.slice(0, 8)}] disconnected`);
