@@ -427,8 +427,14 @@ While Claude is working, the edge of that tab's viewport glows a soft orange —
 fading inwards, with no hard border. It disappears roughly 30 seconds after Claude stops touching the
 tab, so no glow means nothing is running on that tab. The glow is drawn by the extension on top of
 the page; it is not a rendering bug of the website, it does not take mouse input, and it does not
-appear in `take_screenshot` images. A few pages the extension cannot inject into (`chrome://`, the
-PDF viewer, a blank `about:blank` tab) will not show it.
+appear in `take_screenshot` images — not even when another tool call is running against the same tab
+at that moment. A few pages the extension cannot inject into (`chrome://`, the PDF viewer, a blank
+`about:blank` tab) will not show it.
+
+**You can switch the glow off** from the extension popup — "Hiện viền cam khi Claude dùng tab". It is
+on by default. The switch is there for screenshots *you* take of your own screen; it is not needed
+for Claude's own `take_screenshot`, which removes the glow before capturing either way. Turning it
+off clears the glow from every tab immediately rather than leaving it to time out.
 
 - A tab opened by `navigate` (without a `tabId`) or by `new_tab` **automatically joins that session's
   group** — it no longer commandeers the tab in front of you the way it used to.
@@ -455,11 +461,22 @@ PDF viewer, a blank `about:blank` tab) will not show it.
 
 ### Two things to know before you use it
 
-**Old groups are not cleaned up.** The session id changes every time you run `claude` again, and in
-`--http` mode it also changes after an MCP session idles out. The old session's group stays in Chrome
-but is now **orphaned**: no live session owns it, so Claude cannot act on the tabs inside it (they
-are refused like any out-of-group tab) and `list_tabs` does not see them. The extension does not close
-them — close them by hand when the orange groups pile up. This is by design, not a bug.
+**Old groups clean themselves up, and the tabs in them survive.** When a session ends — the client
+disconnects, or it idles past `CC_CHROME_SESSION_TTL_MS` — the bridge tells the extension to dissolve
+that session's group. The tabs are **ungrouped, never closed**: Chrome only deletes a group when its
+last tab closes, so anything still on the tab strip holds real pages, and throwing them away is not
+the extension's call to make. What disappears is the orange group container; the pages stay open,
+loose in the tab strip.
+
+One signal cannot cover every ending — a session that dies while the extension is disconnected, or a
+Chrome that is killed outright, never delivers it. So every leftover `Claude · xxxx` group is also
+swept when Chrome starts. The trade-off is worth stating: restarting Chrome while a Claude Code
+session is still running dissolves that live session's group too. The tabs survive, but the session
+loses track of which ones were attached and will open a fresh tab on its next tool call.
+
+Note the side panel is unaffected by the per-turn churn: it spawns one `claude` per message, so its
+MCP session closes after every turn, and the bridge deliberately keeps its group until the panel
+itself is closed.
 
 **`resize_window` affects the whole window, not just the tabs in the group.** It finds a tab in the
 session's group and resizes **the window containing that tab** — and that window may also contain your
@@ -494,8 +511,21 @@ whatever a website put on screen and the panel is a privileged extension page.
 Syntax highlighting covers `markup, css, javascript, typescript, json, bash, python, yaml, diff, sql`.
 A fence in any other language still renders as a code block, just without colour.
 
+**You can send images.** Attach up to 5 per message with the 📎 button, by pasting from the clipboard
+(⌘V / Ctrl+V), or by dropping image files onto the composer. Each one is downscaled to a 1568px long
+edge before it is sent — the largest edge the model actually reads, so anything bigger costs tokens
+without adding detail — and re-encoded following its source: a JPEG stays a JPEG, everything else
+becomes a PNG. A message with images and no text at all is fine. The 📎 button is hidden if your
+bridge is older than your extension and cannot accept images; update the bridge from the panel.
+
+**The log does not scroll itself while you are reading back.** Scroll up to re-read an earlier answer
+and it stays where you put it, even while a reply is streaming in. A "↓ Tin mới" button appears to
+take you back to the live end. Sending a message always scrolls down.
+
 Close the panel and reopen it and everything you exchanged is still there. Only "Phiên mới" (New
-session) clears it.
+session) clears it. One exception worth knowing: a reopened panel shows **how many** images a message
+carried ("🖼 2 ảnh"), not the images themselves — the panel's replay journal is capped at 512KB and a
+single screenshot would fill it, evicting the whole conversation behind it.
 
 ### Turning the panel on
 

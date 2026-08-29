@@ -107,8 +107,33 @@ enforced — skipping it silently reopens a hole `close_tab` and `switch_tab` on
 uses it gets the indicator for free and must not paint one itself. The frame removes itself
 ~30s later from a timer held in the page — never move that timer into the service worker,
 Chrome terminates the worker mid-sequence and a ghost frame would survive on the user's page.
-A handler that captures pixels must call `await clearBorder(tab.id)` before the capture and
-`paintBorder(tab.id)` in a `finally`, the way `take_screenshot` does.
+A handler that captures pixels must call `beginCapture(tab.id)`, then `await clearBorder(tab.id)`,
+and in its `finally` call `endCapture(tab.id)` **before** `paintBorder(tab.id)` — the way
+`take_screenshot` does. `clearBorder` alone is not enough and shipped as not enough for two
+releases:
+
+- `paintBorder` is fire-and-forget, so a paint issued microseconds earlier could complete
+  *after* an awaited `clearBorder` and put the frame back before the capture. Both now go
+  through `withBorderLock(tabId, fn)`, a per-tab promise chain (same shape as `groupLocks`),
+  which is what makes `await clearBorder(id)` mean "every paint asked for before this has
+  landed and been undone".
+- Claude Code issues tool calls **in parallel** over http, so a `read_page` on the same tab
+  repaints the frame mid-capture — legitimately *after* the clear, which serialising cannot
+  fix. `captureDepth` (a per-tab counter, not a boolean: overlapping captures) makes
+  `paintBorder` a no-op for the duration.
+
+There is also a user switch: `chrome.storage.local.showBorder`, cached in `borderEnabledCache`
+and refreshed from `chrome.storage.onChanged`. It never affects `take_screenshot`, which
+removes the frame either way.
+
+`test/border.test.mjs` holds all of this, and **how it is instrumented is the point**: the two
+races need OPPOSITE slowdowns inside the service worker. Case (i) slows the injected paint;
+case (ii) slows `Page.captureScreenshot` and leaves the paint fast. Measured — one shared
+300ms paint delay made case (i) red and case (ii) **green** against code that had neither fix,
+because the repaint simply arrived after the picture was taken. The assertion is also bounded
+at both ends (clear → capture), since the repaint in `take_screenshot`'s own `finally` is
+required, not a defect. Verified red against the pre-fix file: edge pixels came back
+`[243,180,124]` instead of white.
 
 **No handler may take focus.** A handler must never pass `active: true` to `chrome.tabs.update`
 or `focused: true` to `chrome.windows.update`, and must never send `state: "normal"` to a window
@@ -245,6 +270,20 @@ attached them.
   carry `9876` in a stale UI fallback default; that is a dead value with
   nothing behind it unless a caller manually points the extension at some
   other, unrelated process on that port.
+- `release_session_group` in `extension/background.js` is the second non-MCP
+  handler, and follows `attach_tab`'s shape exactly: no MCP tool is registered
+  for it in `server/index.js`, so Claude cannot call it, and it takes **no
+  caller parameters at all** — only the `__session` that `handleRequest`
+  injects, so a caller can dissolve only the group of the session it is already
+  acting as. It **ungroups, never removes**: Chrome deletes a group of its own
+  accord when the last tab closes, so every group still visible holds real
+  pages. The bridge calls it from `dropSession()` in `server/index.js`, which is
+  the single point a session leaves the `sessions` map — hook the deletion, not
+  its callers, or a call site added later silently skips the teardown.
+  `dropSession` skips the teardown while a live panel still owns the id: the
+  panel spawns one `claude` per TURN, so its MCP transport closes after every
+  message, and without that guard the group was dissolved once per message and
+  every attached tab fell out of it. `test/panel-protocol.test.mjs` caught that.
 - `attach_tab` in `extension/background.js` is the one sanctioned way a tab
   outside the session group gets in. It is not an MCP tool, so **Claude** cannot
   call it — but that is the only boundary that claim covers: `handleRequest`
@@ -368,6 +407,44 @@ attached them.
   bar. `test/verify-sidepanel.mjs`'s T6 covers the model-change window on
   purpose without an intervening `turn_start` — `turn_start` sweeps too and
   would mask the very gap the test exists to catch.
+- **`--input-format stream-json` inverts the stdin lifecycle, and getting it
+  wrong is silent.** Measured on CLI 2.1.197, three runs with the same input:
+  write-then-`end()` — exactly what the text path in `AgentSession.send()` does
+  — makes the CLI **exit 0 having run no turn at all**: stdout carries only
+  `system/hook_*`, no `system/init`, no `assistant`, no `result`, and stderr is
+  empty. Leaving stdin open instead gets a `result` at 6.1s and then a child
+  **still alive at 45s** (killed by SIGTERM, exit 143). Closing stdin on the
+  `result` line gets `result` at 7.3s and a clean exit 0 at 7.9s. So the image
+  path writes one NDJSON line, keeps stdin open, and calls `endStdin()` from
+  `translate()`'s `result` branch; `endTurn()` and `stop()` call it too, so a
+  turn that dies before emitting `result` cannot leave a child holding the pipe.
+  The flag is pushed by `buildArgs()` **only** when `this.turnImages` is
+  non-empty — a text-only turn stays byte for byte on the path every existing
+  turn has used, which is the whole reason the image work is confined this way.
+  Verified end to end through `AgentSession` against the real CLI: image read,
+  `turn_end ok` at 8.9s, child gone.
+- The panel journals **`imageCount` only**, never the image data.
+  `panel-journal.js` caps at 400 entries and 512KB total, and one screenshot's
+  base64 exceeds that by itself — it would evict the entire conversation behind
+  it. A replay renders "🖼 2 ảnh". The encoder (`encodeImage` in
+  `extension/sidepanel.js`) downscales to a 1568px long edge and re-encodes
+  following the SOURCE: JPEG stays JPEG, everything else becomes PNG. It is
+  covered by `test/panel-image-encode.test.mjs`, which runs in a **real**
+  Chrome — `test/panel-stream.test.mjs`'s fake browser has no
+  `createImageBitmap`/`OffscreenCanvas`, and stubbing them there would assert
+  that the stub works, nothing more.
+- The bridge advertises `features: ["images"]` on `ready`, and the panel hides
+  its attach button (and ignores paste/drop) when it is absent. `protocol` was
+  deliberately NOT bumped for this: it means "which server→panel event shapes
+  this panel understands", images change none of them, and its only reader is
+  `this.protocol < 2` in `server/agent.js`. A version number nothing reads is
+  worse than no version number.
+- The chat log follows new content **only while the user is already at the
+  bottom** (`stick`, maintained by a `scroll` listener with 24px of slack). All
+  three former `logEl.scrollTop = logEl.scrollHeight` sites go through
+  `scrollIfSticking()`; `scrollToBottom()` is the unconditional one and has
+  exactly two callers, both of them the user asking for the live end — pressing
+  Enter, and the one-off scroll after a journal replay.
 - `thinking` blocks from `claude -p --output-format stream-json` **always carry
   an empty string** — measured twice on CLI 2.1.197, including under
   `ultrathink`, where the model plainly did think (a 2462-character answer
