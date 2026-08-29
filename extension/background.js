@@ -74,6 +74,46 @@ const BORDER_LOOK = {
   ],
 };
 
+// The user's switch for the driving-tab frame. Cached rather than read per
+// paint, and the cache is a module variable initialised lazily: MV3 restarts
+// this worker at will, so a value captured at install time would be wrong for
+// the rest of the browser session. `null` means "not read yet", which is
+// distinct from `false`.
+const BORDER_PREF_KEY = "showBorder";
+let borderEnabledCache = null;
+
+async function borderEnabled() {
+  if (borderEnabledCache === null) {
+    try {
+      const stored = await chrome.storage.local.get({ [BORDER_PREF_KEY]: true });
+      borderEnabledCache = stored[BORDER_PREF_KEY] !== false;
+    } catch {
+      // Storage can reject on an invalidated context. Defaulting to ON is the
+      // safe direction: the frame's whole purpose is telling the user their tab
+      // is being driven, so a failure must not silently hide it.
+      borderEnabledCache = true;
+    }
+  }
+  return borderEnabledCache;
+}
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local" || !changes[BORDER_PREF_KEY]) return;
+  borderEnabledCache = changes[BORDER_PREF_KEY].newValue !== false;
+  // Turning it off has to take frames off the screen NOW. Without this sweep
+  // the frame stays up until its own 30s idle timer fires, which reads as the
+  // switch not working.
+  if (!borderEnabledCache) sweepBordersOffEveryTab();
+});
+
+// Best effort by construction: most tabs have no frame, and chrome:// tabs,
+// the PDF viewer and discarded tabs cannot be injected into at all. Every one
+// of those is an expected no-op, not an error worth surfacing.
+async function sweepBordersOffEveryTab() {
+  const tabs = await chrome.tabs.query({}).catch(() => []);
+  await Promise.all(tabs.map((tab) => clearBorder(tab.id).catch(() => {})));
+}
+
 // The group title is the source of truth, not an in-memory map: MV3 kills the
 // service worker at will, and re-deriving the group by querying its title
 // costs one call and cannot go stale.
@@ -459,9 +499,15 @@ async function resolveTabInGroup(params) {
 // chrome:// pages, the PDF viewer and about:blank cannot be injected into, and
 // an indicator failure must never become a tool error.
 function paintBorder(tabId) {
-  chrome.scripting
-    .executeScript({ target: { tabId }, func: pageShowBorder, args: [BORDER_ID, BORDER_IDLE_MS, BORDER_LOOK] })
-    .catch(() => {});
+  // Async inside a sync signature on purpose: every caller treats this as
+  // fire-and-forget, and making it awaitable would invite a caller to block a
+  // tool call on an indicator.
+  (async () => {
+    if (!(await borderEnabled())) return;
+    await chrome.scripting
+      .executeScript({ target: { tabId }, func: pageShowBorder, args: [BORDER_ID, BORDER_IDLE_MS, BORDER_LOOK] })
+      .catch(() => {});
+  })();
 }
 
 // Awaited by take_screenshot, which must not capture the frame.

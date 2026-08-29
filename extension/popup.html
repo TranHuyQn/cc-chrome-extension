@@ -30,6 +30,8 @@
     }
     button:hover { background: #c05f3f; }
     .hint { font-size: 10px; color: #888; margin-top: 10px; line-height: 1.5; }
+    .pref { display: flex; align-items: center; gap: 6px; margin-top: 12px; font-size: 12px; color: #ccc; }
+    .pref input { width: auto; margin: 0; }
     code { background: #2a2a2a; padding: 1px 4px; border-radius: 3px; }
   </style>
 </head>
@@ -44,6 +46,10 @@
   <input id="wsUrl" placeholder="ws://127.0.0.1:23949" />
   <button id="save">Lưu &amp; kết nối lại</button>
   <button id="openPanel">Mở khung chat</button>
+  <label class="pref">
+    <input type="checkbox" id="showBorder" />
+    Hiện viền cam khi Claude dùng tab
+  </label>
   <div class="hint" id="portHint" hidden>
     Bridge không trả lời ở cổng trong URL trên. Cổng đang dùng nằm trong
     <code>~/.ccchrome.json</code> (Windows: <code>%USERPROFILE%\.ccchrome.json</code>),

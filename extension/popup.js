@@ -48,3 +48,16 @@ document.getElementById("openPanel").addEventListener("click", async () => {
   await chrome.sidePanel.open({ windowId: id });
   window.close();
 });
+
+// Read and written straight to storage rather than through the service worker:
+// background.js listens on chrome.storage.onChanged, so a message round trip
+// would add a second path to the same state for no gain.
+const showBorderInput = document.getElementById("showBorder");
+
+chrome.storage.local.get({ showBorder: true }, ({ showBorder }) => {
+  showBorderInput.checked = showBorder !== false;
+});
+
+showBorderInput.addEventListener("change", () => {
+  chrome.storage.local.set({ showBorder: showBorderInput.checked });
+});
