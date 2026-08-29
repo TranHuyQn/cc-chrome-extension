@@ -134,6 +134,18 @@
     #status.on { display: flex; }
     #statusTime { margin-left: auto; color: #777; }
     footer { border-top: 1px solid #333; padding: 8px; }
+    .img-badge { font-size: 11px; color: #aaa; margin-top: 4px; }
+    #tray { display: none; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; align-items: center; }
+    #tray.on { display: flex; }
+    .thumb { position: relative; width: 46px; height: 46px; border-radius: 6px; overflow: hidden; border: 1px solid #444; }
+    .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .thumb button {
+      position: absolute; top: 0; right: 0; padding: 0; width: 16px; height: 16px;
+      line-height: 14px; font-size: 11px; border: 0; border-radius: 0 0 0 6px;
+      background: rgba(0,0,0,.65); color: #fff;
+    }
+    #trayCount { font-size: 11px; color: #888; }
+    footer.dragging { outline: 2px dashed #d97757; outline-offset: -4px; }
     .toolbar { display: flex; gap: 6px; margin-bottom: 6px; }
     textarea {
       width: 100%; box-sizing: border-box; resize: none; min-height: 56px;
@@ -176,9 +188,12 @@
     <div id="status"><span id="statusText"></span><span id="statusTime"></span></div>
     <div class="toolbar">
       <button id="attach">Đưa tab này vào phiên</button>
+      <button id="pickImage" title="Đính ảnh" hidden>📎</button>
       <button id="newSession">Phiên mới</button>
       <button id="stop" disabled>Dừng</button>
     </div>
+    <div id="tray"><span id="trayCount"></span></div>
+    <input type="file" id="imageInput" accept="image/*" multiple hidden />
     <textarea id="input" placeholder="Nhắn cho Claude… (Enter để gửi)"></textarea>
   </footer>
 

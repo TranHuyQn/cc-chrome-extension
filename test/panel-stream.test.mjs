@@ -163,6 +163,13 @@ const sandbox = {
     currentScript: null,
     getElementsByTagName: () => [],
     querySelectorAll: () => [],
+    // The panel resolves its composer with querySelector("footer") to hang the
+    // drag-and-drop listeners on it. Backed by the same byId map so a test can
+    // reach the element and fire those listeners.
+    querySelector: (sel) => {
+      if (!byId.has(sel)) byId.set(sel, makeElement(sel.replace(/[^a-z]/gi, "") || "div"));
+      return byId.get(sel);
+    },
   },
   chrome: {
     storage: {
@@ -305,6 +312,43 @@ check("clicking the button scrolls to the bottom", logEl.scrollTop === logEl.scr
   `scrollTop=${logEl.scrollTop} scrollHeight=${logEl.scrollHeight}`);
 for (const fn of logEl.listeners.scroll || []) fn();
 check("and hides itself again", jumpEl.hidden === true, `hidden=${jumpEl.hidden}`);
+
+// --- images: what the journal keeps, and what a replay draws ---------------
+//
+// Only the journal/render half is exercised here. Encoding runs on
+// createImageBitmap + OffscreenCanvas, which this fake browser does not have
+// and should not grow a stub for: a stub would only assert that our stub works.
+// The encoder is proven by hand against a real Chrome.
+
+logEl.childNodes = [];
+sandbox.record({ type: "user", text: "cái này là gì?", imageCount: 2 });
+
+const userEntry = sandbox.ccJournal.entries().filter((e) => e.type === "user").at(-1);
+eq("the journal records how many images were sent", userEntry?.imageCount, 2);
+check("and never the image data itself",
+  !JSON.stringify(userEntry).includes("base64") && !("images" in userEntry),
+  JSON.stringify(userEntry));
+
+logEl.childNodes = [];
+sandbox.render(userEntry);
+check("a replay draws the count beside the message",
+  plainText(logEl.childNodes[0]).includes("2 ảnh"),
+  JSON.stringify(plainText(logEl.childNodes[0])));
+
+// An image sent with no text at all still has to leave a visible bubble.
+logEl.childNodes = [];
+sandbox.render({ type: "user", text: "", imageCount: 1 });
+check("an image-only message is not an empty bubble",
+  plainText(logEl.childNodes[0]).includes("1 ảnh"),
+  JSON.stringify(plainText(logEl.childNodes[0])));
+
+// The attach button is hidden until a bridge says it can take images: an older
+// bridge accepts the frame and drops them without a word.
+const pickEl = byId.get("pickImage");
+sandbox.handle({ type: "ready", sessionId: "s", mcpSessionId: "m", groupTitle: "Claude · abcd" });
+check("no features on ready -> the attach button stays hidden", pickEl.hidden === true, `hidden=${pickEl.hidden}`);
+sandbox.handle({ type: "ready", sessionId: "s", mcpSessionId: "m", groupTitle: "Claude · abcd", features: ["images"] });
+check("features:['images'] -> the attach button appears", pickEl.hidden === false, `hidden=${pickEl.hidden}`);
 
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

@@ -32,6 +32,11 @@ const updateEl = document.getElementById("update");
 const updateTextEl = document.getElementById("updateText");
 const updateActionEl = document.getElementById("updateAction");
 const jumpEl = document.getElementById("jumpToBottom");
+const pickImageEl = document.getElementById("pickImage");
+const imageInputEl = document.getElementById("imageInput");
+const trayEl = document.getElementById("tray");
+const trayCountEl = document.getElementById("trayCount");
+const footerEl = document.querySelector("footer");
 
 let ws = null;
 let reconnectDelay = RECONNECT_MIN_MS;
@@ -102,6 +107,22 @@ let localeInitialized = false;
 // equality would drop out of follow mode at the bottom of the log.
 let stick = true;
 const STICK_SLACK_PX = 24;
+
+// Staged for the next message. Already downscaled and base64-encoded, because
+// the encode is async and doing it at Enter time would put a visible pause
+// between the keypress and the message appearing.
+let attachments = [];
+// What the bridge said it can accept, from `ready`. A bridge is upgraded by the
+// installer while the extension only changes when the user reloads it in
+// chrome://extensions, so a panel newer than its bridge is the normal state --
+// and a bridge that does not know about `images` drops them in silence, which
+// is the one outcome the user could not diagnose.
+let serverFeatures = [];
+
+const MAX_IMAGES = 5;
+// The longest edge the model actually uses. Sending more costs tokens without
+// adding any detail it can read.
+const MAX_IMAGE_EDGE = 1568;
 
 function atBottom() {
   return logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight <= STICK_SLACK_PX;
@@ -557,9 +578,17 @@ async function connect() {
 // `start`, reset busy, or reschedule anything.
 function render(msg) {
   switch (msg.type) {
-    case "user":
-      addMessage("user", msg.text);
+    case "user": {
+      const el = addMessage("user", msg.text || "");
+      if (typeof msg.imageCount === "number" && msg.imageCount > 0) {
+        const badge = document.createElement("div");
+        badge.className = "img-badge";
+        badge.textContent = `🖼 ${msg.imageCount} ảnh`;
+        el.appendChild(badge);
+        scrollIfSticking();
+      }
       break;
+    }
     case "delta":
       if (!streaming) {
         streaming = addMessage("assistant", "");
@@ -623,6 +652,12 @@ function handle(msg) {
       mcpSessionId = msg.mcpSessionId || mcpSessionId;
       saveState();
       groupEl.textContent = msg.groupTitle || "";
+      // An older bridge sends no `features` at all. Hiding the button (and the
+      // paste/drop paths, which check the same list) is the honest response:
+      // that bridge would accept the frame and drop the images without a word.
+      serverFeatures = Array.isArray(msg.features) ? msg.features : [];
+      pickImageEl.hidden = !serverFeatures.includes("images");
+      if (!serverFeatures.includes("images") && attachments.length) clearAttachments();
       // "Phiên mới" and a model change both send `start` even while a turn is
       // running; the server disposes that AgentSession, and a disposed session
       // never emits its own turn_end (see AgentSession.emit's `disposed` guard
@@ -794,16 +829,137 @@ function handle(msg) {
   }
 }
 
+// Re-encoding follows the SOURCE, not a single house format. A pasted
+// screenshot is the common case here and is full of text, which JPEG ringing
+// smears; a phone photo re-encoded as PNG inflates several times over. Anything
+// that is neither (WebP, GIF) lands on PNG -- a GIF loses its animation, which
+// is the intended degradation: the model reads one frame regardless.
+async function encodeImage(file) {
+  const bitmap = await createImageBitmap(file);
+  const longest = Math.max(bitmap.width, bitmap.height);
+  const scale = longest > MAX_IMAGE_EDGE ? MAX_IMAGE_EDGE / longest : 1;
+  const width = Math.max(1, Math.round(bitmap.width * scale));
+  const height = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = new OffscreenCanvas(width, height);
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, width, height);
+  bitmap.close();
+  const blob = file.type === "image/jpeg"
+    ? await canvas.convertToBlob({ type: "image/jpeg", quality: 0.85 })
+    : await canvas.convertToBlob({ type: "image/png" });
+  return { mediaType: blob.type, data: await blobToBase64(blob) };
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error("không đọc được ảnh"));
+    reader.onload = () => {
+      const url = String(reader.result);
+      // readAsDataURL gives "data:<type>;base64,<payload>" -- the server wants
+      // the payload alone, and so does the CLI's image block.
+      resolve(url.slice(url.indexOf(",") + 1));
+    };
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function addFiles(files) {
+  for (const file of files) {
+    if (!file || !file.type || !file.type.startsWith("image/")) continue;
+    if (attachments.length >= MAX_IMAGES) {
+      addMessage("error", `Tối đa ${MAX_IMAGES} ảnh mỗi tin nhắn.`);
+      break;
+    }
+    try {
+      attachments.push(await encodeImage(file));
+    } catch (err) {
+      addMessage("error", `Không xử lý được ảnh: ${err.message}`);
+    }
+  }
+  paintTray();
+}
+
+// Rebuilt whole rather than patched: five thumbnails is nothing to redraw, and
+// an index-based patch is how a removal ends up deleting the wrong one.
+function paintTray() {
+  trayEl.classList.toggle("on", attachments.length > 0);
+  trayEl.textContent = "";
+  attachments.forEach((image, index) => {
+    const box = document.createElement("div");
+    box.className = "thumb";
+    const img = document.createElement("img");
+    // A data: URL, not URL.createObjectURL: the base64 is already in hand, and
+    // an object URL would have to be revoked on every path that clears the tray.
+    img.src = `data:${image.mediaType};base64,${image.data}`;
+    img.alt = "";
+    const remove = document.createElement("button");
+    remove.textContent = "×";
+    remove.title = "Bỏ ảnh này";
+    remove.addEventListener("click", () => {
+      attachments.splice(index, 1);
+      paintTray();
+    });
+    box.append(img, remove);
+    trayEl.appendChild(box);
+  });
+  trayCountEl.textContent = attachments.length ? `${attachments.length}/${MAX_IMAGES}` : "";
+  trayEl.appendChild(trayCountEl);
+}
+
+function clearAttachments() {
+  attachments = [];
+  paintTray();
+}
+
+pickImageEl.addEventListener("click", () => imageInputEl.click());
+
+imageInputEl.addEventListener("change", async () => {
+  await addFiles([...imageInputEl.files]);
+  // Cleared so picking the same file twice in a row still fires `change`.
+  imageInputEl.value = "";
+});
+
+inputEl.addEventListener("paste", (event) => {
+  if (!serverFeatures.includes("images")) return;
+  const files = [...(event.clipboardData?.items || [])]
+    .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+    .map((item) => item.getAsFile())
+    .filter(Boolean);
+  if (!files.length) return;
+  // Only when an image is actually present: a normal text paste must stay a
+  // normal text paste.
+  event.preventDefault();
+  addFiles(files);
+});
+
+footerEl.addEventListener("dragover", (event) => {
+  if (!serverFeatures.includes("images")) return;
+  event.preventDefault();
+  footerEl.classList.add("dragging");
+});
+footerEl.addEventListener("dragleave", () => footerEl.classList.remove("dragging"));
+footerEl.addEventListener("drop", (event) => {
+  if (!serverFeatures.includes("images")) return;
+  event.preventDefault();
+  footerEl.classList.remove("dragging");
+  addFiles([...(event.dataTransfer?.files || [])]);
+});
+
 inputEl.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" || event.shiftKey) return;
   event.preventDefault();
   const text = inputEl.value.trim();
-  if (!text || busy) return;
+  // An image with no words is a complete message -- "what is this?" is implied.
+  if ((!text && !attachments.length) || busy) return;
   locale = ccLabels.detectLocale(text, locale);
   saveState();
-  record({ type: "user", text });
+  // Only the COUNT is journalled. panel-journal.js caps at 400 entries and
+  // 512KB total; one screenshot's base64 exceeds that cap by itself and would
+  // evict the entire conversation behind it.
+  record({ type: "user", text, imageCount: attachments.length });
   inputEl.value = "";
-  send({ type: "prompt", text });
+  send({ type: "prompt", text, images: attachments });
+  clearAttachments();
   scrollToBottom();
 });
 
