@@ -495,26 +495,69 @@ async function resolveTabInGroup(params) {
   return await chrome.tabs.get(created.id);
 }
 
-// Painting is deliberately not awaited and its rejection is swallowed:
-// chrome:// pages, the PDF viewer and about:blank cannot be injected into, and
-// an indicator failure must never become a tool error.
+// paintBorder is fire-and-forget by design, which means a paint and a clear
+// issued microseconds apart can complete out of order -- and if the clear wins
+// the race, the frame goes back up in time to be captured. Chaining every
+// border operation for one tab through a single promise makes `await
+// clearBorder(id)` mean what it reads like: every paint asked for before it has
+// landed and been undone.
+//
+// Keyed by tab id and pruned on resolve so a long browser session does not
+// accumulate one entry per tab ever touched. Same shape as groupLocks above,
+// and for the same class of reason.
+const borderQueue = new Map();
+
+function withBorderLock(tabId, fn) {
+  const previous = borderQueue.get(tabId) || Promise.resolve();
+  // .then(fn, fn) so one rejected operation does not wedge the chain for the
+  // rest of this tab's lifetime.
+  const next = previous.then(fn, fn);
+  borderQueue.set(tabId, next);
+  next.finally(() => {
+    if (borderQueue.get(tabId) === next) borderQueue.delete(tabId);
+  });
+  return next;
+}
+
+// A tab being captured right now. take_screenshot raises this before it clears
+// the frame and lowers it after the capture, and paintBorder refuses while it
+// is up -- which is the only thing that stops a CONCURRENT tool call (Claude
+// Code issues them in parallel over http) from repainting mid-capture. A
+// counter, not a boolean: two overlapping captures of the same tab would
+// otherwise have the first one to finish re-enable painting for the second.
+const captureDepth = new Map();
+
+function beginCapture(tabId) {
+  captureDepth.set(tabId, (captureDepth.get(tabId) || 0) + 1);
+}
+
+function endCapture(tabId) {
+  const left = (captureDepth.get(tabId) || 1) - 1;
+  if (left > 0) captureDepth.set(tabId, left);
+  else captureDepth.delete(tabId);
+}
+
+// Painting is deliberately not awaited by its callers and its rejection is
+// swallowed: chrome:// pages, the PDF viewer and about:blank cannot be injected
+// into, and an indicator failure must never become a tool error.
 function paintBorder(tabId) {
-  // Async inside a sync signature on purpose: every caller treats this as
-  // fire-and-forget, and making it awaitable would invite a caller to block a
-  // tool call on an indicator.
-  (async () => {
+  withBorderLock(tabId, async () => {
+    if (captureDepth.has(tabId)) return;
     if (!(await borderEnabled())) return;
     await chrome.scripting
       .executeScript({ target: { tabId }, func: pageShowBorder, args: [BORDER_ID, BORDER_IDLE_MS, BORDER_LOOK] })
       .catch(() => {});
-  })();
+  });
 }
 
-// Awaited by take_screenshot, which must not capture the frame.
+// Awaited by take_screenshot, which must not capture the frame. Going through
+// the same lock is what makes that await meaningful.
 async function clearBorder(tabId) {
-  await chrome.scripting
-    .executeScript({ target: { tabId }, func: pageHideBorder, args: [BORDER_ID] })
-    .catch(() => {});
+  await withBorderLock(tabId, async () => {
+    await chrome.scripting
+      .executeScript({ target: { tabId }, func: pageHideBorder, args: [BORDER_ID] })
+      .catch(() => {});
+  });
 }
 
 // Every tool reaches its tab through here, so this wrapper is the only place
@@ -1308,6 +1351,11 @@ const handlers = {
         { cause: err }
       );
     }
+    // Raised BEFORE the clear, lowered after the capture: between those two
+    // points a parallel tool call's resolveTab() must not be able to put the
+    // frame back. Serialising alone does not cover this -- that repaint is
+    // legitimately after the clear, not racing it.
+    beginCapture(tab.id);
     await clearBorder(tab.id);
     try {
       const shot = await cdp(tab.id, "Page.captureScreenshot", {
@@ -1316,6 +1364,9 @@ const handlers = {
       });
       return { mimeType: "image/png", base64: shot.data, fullPage: !!params.fullPage };
     } finally {
+      // Order matters: lower the gate first, or the repaint below is the very
+      // call it refuses.
+      endCapture(tab.id);
       paintBorder(tab.id);
     }
   },
