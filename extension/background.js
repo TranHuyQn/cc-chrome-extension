@@ -1532,6 +1532,38 @@ const handlers = {
     return { ok: true, tabId: tab.id, groupId, title: tab.title, url: tab.url };
   },
 
+  // Dissolves the calling session's tab group. Deliberately NOT registered as
+  // an MCP tool in server/index.js: like attach_tab, it exists for the bridge
+  // to call, and Claude has no tool with which to reach it.
+  //
+  // It takes no caller parameters at all -- only the __session that
+  // handleRequest injects -- so nobody can name a group to dissolve. A caller
+  // can only dissolve the group belonging to the session it is already acting
+  // as, which is the same shape attach_tab settled on after an earlier revision
+  // let the panel name a windowId and turned out to be enumerable.
+  //
+  // Ungroup, never remove. Chrome deletes a group of its own accord when the
+  // last tab in it closes, so every group still visible has real tabs in it and
+  // closing them would throw away pages the user may still need.
+  release_session_group: async (params) => {
+    const session = params.__session;
+    if (!session) throw new Error("release_session_group needs a session id");
+    let ungrouped = 0;
+    // Per window, because a session's group can exist once in each window --
+    // sessionGroupId is window-scoped for the same reason (chrome.tabs.group
+    // moves a tab into the group's window, so a browser-wide lookup would drag
+    // tabs across windows).
+    for (const win of await chrome.windows.getAll({ windowTypes: ["normal"] })) {
+      const groupId = await sessionGroupId(session, win.id);
+      if (groupId === null) continue;
+      const tabs = await chrome.tabs.query({ groupId });
+      if (!tabs.length) continue;
+      await chrome.tabs.ungroup(tabs.map((t) => t.id));
+      ungrouped += tabs.length;
+    }
+    return { ok: true, ungrouped };
+  },
+
   async scroll(params) {
     const tab = await resolveTab(params);
     return await execInTab(tab, pageScroll, [

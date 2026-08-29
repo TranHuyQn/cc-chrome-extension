@@ -673,6 +673,9 @@ async function run() {
     ["new_tab", { url: TEST_URL }],
     ["switch_tab", { tabId: t }],
     ["close_tab", { tabId: doomedTab.result.tabId }],
+    // Last on purpose: it dissolves SESSION_SWEEP's own group, so anything
+    // above it that expects that group to exist must already have run.
+    ["release_session_group", {}],
   ];
 
   // Coverage, read off the live handlers object rather than a list kept by
