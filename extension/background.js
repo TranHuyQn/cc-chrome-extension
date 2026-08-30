@@ -134,34 +134,6 @@ function sessionGroupTitle(session) {
   return `Claude · ${String(session).replace(/-/g, "").slice(0, 4)}`;
 }
 
-// Must stay in step with sessionGroupTitle() directly above: it is the same
-// name, read instead of written. Anchored on both ends so a group the user
-// named "Claude · notes" by hand is not swept.
-const GROUP_TITLE_RE = /^Claude · [0-9a-f]{4}$/;
-
-// After a browser restart there is no live MCP session anywhere: every socket
-// this extension had is gone, and so is every `claude` that held one. So any
-// "Claude · xxxx" group restored with the window is, by construction, a
-// leftover, and it is the only class of leftover the per-session teardown
-// cannot reach -- a session that dies while the extension is disconnected, or
-// a Chrome that is killed outright, never delivers that signal at all.
-//
-// Accepted trade-off, stated because it is a real behaviour change: restarting
-// Chrome while a Claude Code session is still running also dissolves that live
-// session's group. The tabs survive -- this only ever ungroups -- but the
-// session loses track of which tabs were attached and opens a fresh one on its
-// next tool call. That is judged better than groups nothing can ever clear.
-chrome.runtime.onStartup.addListener(async () => {
-  try {
-    for (const group of await chrome.tabGroups.query({})) {
-      if (!GROUP_TITLE_RE.test(group.title || "")) continue;
-      const tabs = await chrome.tabs.query({ groupId: group.id });
-      if (tabs.length) await chrome.tabs.ungroup(tabs.map((t) => t.id));
-    }
-  } catch (err) {
-    console.warn("[cc-chrome] could not sweep stale session groups:", err);
-  }
-});
 
 // Scoped per window on purpose. chrome.tabs.group moves a tab into the group's
 // window, so a window-wide lookup would yank tabs across windows.

@@ -284,6 +284,42 @@ attached them.
   panel spawns one `claude` per TURN, so its MCP transport closes after every
   message, and without that guard the group was dissolved once per message and
   every attached tab fell out of it. `test/panel-protocol.test.mjs` caught that.
+
+  **Measured limit — do not document this feature as more than it is.**
+  A Streamable-HTTP MCP session leaves the map only on an explicit `DELETE /mcp`
+  or after the 8-hour idle reaper, and **Claude Code sends no DELETE when it
+  exits**: measured on 1.2.0, `claude -p` ran and exited 0 while the bridge's
+  session count went 8 → 9 and stayed there, with no teardown line. A terminal
+  session's group therefore survives until the reaper. The panel path works
+  because a panel really does disconnect. Verified working end to end by
+  creating a group, sending `DELETE /mcp`, and seeing
+  `Released tab group … (1 tab(s) ungrouped)` plus the group's chip disappearing
+  from the bookmarks bar.
+
+  **A startup sweep was tried and removed, not forgotten.** 1.2.0 briefly
+  carried a `chrome.runtime.onStartup` listener that ungrouped every leftover
+  `Claude · xxxx` group. It never worked once: `chrome.tabGroups.query({})`
+  throws **`No current window`** when called from `onStartup`, because no
+  browser window exists yet, and that is the sweep's first statement — the
+  `try/catch` swallowed it into a `console.warn` nobody reads. Instrumented on
+  real hardware, the record read `sweepError: "No current window"` for the
+  sweep and for observations at t+0 and t+1s; by t+3s and t+8s the API worked
+  but reported no groups, and the service worker was terminated before the
+  t+20s pass ran — so a `setTimeout`-based retry is not dependable either. Any
+  future attempt must trigger somewhere a window already exists, and must be
+  verified against a real Chrome restart: Playwright's persistent context does
+  **not** restore the previous session (it reopens on `about:blank`), so no
+  suite in this repo can reproduce the scenario.
+
+  **Chrome saves tab groups, and a saved group outlives the live one.** The
+  chips the user sees on the bookmarks bar are Chrome's saved tab groups.
+  `chrome.tabs.ungroup()` on a LIVE group removes its chip — measured, by
+  creating a group and releasing it while watching the bar. But a group that is
+  saved and closed is invisible to `chrome.tabGroups.query({})` (measured:
+  query returned `[]` while the chip was plainly on the bar), and MV3 exposes
+  no API for saved groups, so the extension cannot delete those. The only
+  workable rule is to ungroup while the group is still live; a chip that got
+  saved has to be removed by hand.
 - `attach_tab` in `extension/background.js` is the one sanctioned way a tab
   outside the session group gets in. It is not an MCP tool, so **Claude** cannot
   call it — but that is the only boundary that claim covers: `handleRequest`

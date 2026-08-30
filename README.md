@@ -468,11 +468,17 @@ last tab closes, so anything still on the tab strip holds real pages, and throwi
 the extension's call to make. What disappears is the orange group container; the pages stay open,
 loose in the tab strip.
 
-One signal cannot cover every ending — a session that dies while the extension is disconnected, or a
-Chrome that is killed outright, never delivers it. So every leftover `Claude · xxxx` group is also
-swept when Chrome starts. The trade-off is worth stating: restarting Chrome while a Claude Code
-session is still running dissolves that live session's group too. The tabs survive, but the session
-loses track of which ones were attached and will open a fresh tab on its next tool call.
+**Know the limit, because it is the common case.** A Streamable-HTTP MCP session ends only on an
+explicit `DELETE /mcp` or after `CC_CHROME_SESSION_TTL_MS` (8 hours) of inactivity — and **Claude Code
+does not send that DELETE when it exits** (measured: `claude -p` ran and exited 0, the bridge's session
+count went up and stayed up, with no teardown). So a terminal `claude` session's group is **not**
+dissolved when you quit it. It waits out the 8-hour idle timer, counted from the last MCP request, and
+even then only if Chrome is running and the extension is connected at that moment.
+
+In practice that means: the side panel cleans up after itself, a terminal session does not. Clear a
+leftover group by right-clicking it and choosing Delete group. Shortening
+`CC_CHROME_SESSION_TTL_MS` makes the automatic path fire sooner, at the cost of closing idle sessions
+outright rather than just releasing their groups.
 
 Note the side panel is unaffected by the per-turn churn: it spawns one `claude` per message, so its
 MCP session closes after every turn, and the bridge deliberately keeps its group until the panel

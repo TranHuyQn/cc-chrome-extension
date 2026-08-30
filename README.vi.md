@@ -445,12 +445,19 @@ nào còn nằm trên thanh tab nghĩa là bên trong vẫn còn trang thật, v
 không phải là quyết định của extension. Thứ biến mất là cái khung nhóm màu cam;
 các trang vẫn mở, chỉ là nằm rời trên thanh tab.
 
-Một tín hiệu không phủ được mọi kiểu kết thúc — phiên chết trong lúc extension
-đang mất kết nối, hay Chrome bị tắt thẳng, đều không kịp gửi gì. Nên mọi nhóm
-`Claude · xxxx` còn sót cũng bị quét khi Chrome khởi động. Đánh đổi cần nói rõ:
-khởi động lại Chrome trong khi một phiên Claude Code vẫn đang chạy thì nhóm của
-phiên đang sống đó cũng bị gỡ. Tab vẫn còn, nhưng phiên mất dấu những tab đã gắn
-và sẽ mở tab mới ở lần gọi tool kế tiếp.
+**Phải biết giới hạn, vì đây mới là trường hợp thường gặp.** Phiên MCP qua HTTP chỉ
+kết thúc khi có `DELETE /mcp` tường minh, hoặc sau `CC_CHROME_SESSION_TTL_MS`
+(8 tiếng) không hoạt động — và **Claude Code không gửi `DELETE` đó khi thoát**
+(đã đo: `claude -p` chạy rồi thoát mã 0, số phiên của bridge tăng lên và nằm
+nguyên đó, không có dòng teardown nào). Nên nhóm của một phiên `claude` chạy ở
+terminal **không** được gỡ lúc bạn thoát nó. Nó phải chờ hết 8 tiếng nhàn rỗi,
+tính từ request MCP cuối cùng, và cũng chỉ gỡ được nếu đúng lúc đó Chrome đang
+chạy và extension đang kết nối.
+
+Nói gọn: khung chat tự dọn sau khi dùng, phiên terminal thì không. Nhóm còn sót
+thì chuột phải vào nó rồi chọn Delete group. Giảm `CC_CHROME_SESSION_TTL_MS` sẽ
+làm đường tự động chạy sớm hơn, đổi lại là đóng hẳn phiên nhàn rỗi chứ không chỉ
+gỡ nhóm của nó.
 
 Khung chat không bị ảnh hưởng bởi nhịp spawn từng lượt: nó chạy một `claude` cho
 mỗi tin nhắn nên phiên MCP đóng sau mỗi lượt, và bridge cố ý giữ nhóm của nó lại
