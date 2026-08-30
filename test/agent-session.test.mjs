@@ -750,6 +750,80 @@ function makeSession(extra = {}) {
   modern.dispose();
 }
 
+// --- images go in as one stream-json line, and stdin stays open -------------
+//
+// Measured on CLI 2.1.197 (see the spec's M2): with --input-format stream-json,
+// writing the message and closing stdin the way the text path does makes the
+// CLI exit 0 having run NO turn at all -- no system/init, no assistant, no
+// result, and nothing on stderr. Never closing it instead leaves the child
+// alive indefinitely after the result. The only correct shape is: write, keep
+// open, close when `result` arrives.
+
+{
+  const argvFile = join(workdir, "argv-images.json");
+  const stdinFile = join(workdir, "stdin-images.txt");
+  const { session, events } = makeSession({
+    env: { CC_FAKE_ARGV: argvFile, CC_FAKE_STDIN: stdinFile },
+  });
+
+  const PNG_B64 = "iVBORw0KGgoAAAANSUhEUg==";
+  session.send("cái này là gì?", [{ mediaType: "image/png", data: PNG_B64 }]);
+  for (let i = 0; i < 200 && !events.some((e) => e.type === "turn_end"); i++) await sleep(50);
+
+  const argv = JSON.parse(readFileSync(argvFile, "utf8"));
+  const at = argv.indexOf("--input-format");
+  check("a turn with images passes --input-format stream-json",
+    at !== -1 && argv[at + 1] === "stream-json", JSON.stringify(argv));
+
+  const written = existsSync(stdinFile) ? readFileSync(stdinFile, "utf8").trim() : "";
+  let parsed = null;
+  try { parsed = JSON.parse(written); } catch { /* asserted below */ }
+  check("exactly one NDJSON line reaches stdin", written.split("\n").length === 1 && !!parsed,
+    JSON.stringify(written).slice(0, 200));
+  check("it is a user message", parsed?.type === "user" && parsed?.message?.role === "user",
+    JSON.stringify(parsed).slice(0, 200));
+
+  const content = parsed?.message?.content || [];
+  check("carrying the text block first", content[0]?.type === "text" && content[0]?.text === "cái này là gì?",
+    JSON.stringify(content).slice(0, 300));
+  check("then the image as base64 with its media type",
+    content[1]?.type === "image" &&
+    content[1]?.source?.type === "base64" &&
+    content[1]?.source?.media_type === "image/png" &&
+    content[1]?.source?.data === PNG_B64,
+    JSON.stringify(content).slice(0, 300));
+
+  check("the turn still ends", events.at(-1)?.type === "turn_end", JSON.stringify(events.at(-1)));
+  session.dispose();
+}
+
+// An image with no text at all is legal -- the panel allows sending one bare.
+{
+  const stdinFile = join(workdir, "stdin-image-only.txt");
+  const { session, events } = makeSession({ env: { CC_FAKE_STDIN: stdinFile } });
+  session.send("", [{ mediaType: "image/jpeg", data: "/9j/4AAQSkZJRg==" }]);
+  for (let i = 0; i < 200 && !events.some((e) => e.type === "turn_end"); i++) await sleep(50);
+  const raw = existsSync(stdinFile) ? readFileSync(stdinFile, "utf8").trim() : "";
+  let content = null;
+  try { content = JSON.parse(raw).message.content; } catch { /* asserted below */ }
+  check("an image-only turn omits the empty text block entirely",
+    Array.isArray(content) && content.length === 1 && content[0].type === "image",
+    JSON.stringify(content).slice(0, 200));
+  session.dispose();
+}
+
+// The text path must be untouched: it is what every existing turn uses.
+{
+  const argvFile = join(workdir, "argv-textonly.json");
+  const { session, events } = makeSession({ env: { CC_FAKE_ARGV: argvFile } });
+  session.send("chỉ có chữ");
+  for (let i = 0; i < 200 && !events.some((e) => e.type === "turn_end"); i++) await sleep(50);
+  const argv = JSON.parse(readFileSync(argvFile, "utf8"));
+  check("a text-only turn does NOT pass --input-format",
+    !argv.includes("--input-format"), JSON.stringify(argv));
+  session.dispose();
+}
+
 rmSync(workdir, { recursive: true, force: true });
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

@@ -58,7 +58,7 @@ const REQUEST_TIMEOUT_MS = Number(process.env.CC_CHROME_TIMEOUT_MS || 45000);
 // CC_CHROME_SESSION_TTL_MS.
 const graceFromEnv = Number(process.env.CC_CHROME_RECONNECT_GRACE_MS);
 const RECONNECT_GRACE_MS = Number.isFinite(graceFromEnv) && graceFromEnv >= 0 ? graceFromEnv : 25000;
-const VERSION = "1.1.1";
+const VERSION = "1.2.0";
 
 // The panel spawns `claude` on this host with the team's logged-in account, so
 // it exists only on a bridge nobody else can reach. A public deployment keeps
@@ -656,6 +656,51 @@ function buildMcpServer(getBridge, getBridgeNow, statusExtra = {}, sessionRef = 
 // http mode
 // ---------------------------------------------------------------------------
 
+// The panel is the only caller, but "the only caller is ours" has never been a
+// reason to skip validation: these bytes are about to be spent as model input
+// and written to a child process's stdin.
+const IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const MAX_IMAGES_PER_TURN = 5;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_IMAGES_TOTAL_BYTES = 20 * 1024 * 1024;
+// Standard base64 only: the panel produces it with canvas.convertToBlob, so
+// there is no reason to accept the URL-safe alphabet and every reason not to
+// widen what reaches JSON.stringify and a child's stdin.
+const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+
+function validateImages(raw) {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw new Error("Trường 'images' phải là một mảng.");
+  if (raw.length > MAX_IMAGES_PER_TURN) {
+    throw new Error(`Tối đa ${MAX_IMAGES_PER_TURN} ảnh mỗi tin nhắn (nhận được ${raw.length}).`);
+  }
+  let total = 0;
+  const out = [];
+  for (const [index, image] of raw.entries()) {
+    const at = `Ảnh thứ ${index + 1}`;
+    if (!image || typeof image !== "object") throw new Error(`${at} không hợp lệ.`);
+    const mediaType = String(image.mediaType || "");
+    if (!IMAGE_MEDIA_TYPES.has(mediaType)) {
+      throw new Error(`${at} có định dạng không hỗ trợ (${mediaType || "không rõ"}). Chỉ nhận PNG, JPEG, WebP, GIF.`);
+    }
+    const data = String(image.data || "");
+    if (!data || !BASE64_RE.test(data)) throw new Error(`${at} không phải dữ liệu base64 hợp lệ.`);
+    // Exact, from the encoding itself: 4 base64 characters carry 3 bytes, minus
+    // one per '=' of padding. Cheaper and more honest than decoding a 5MB
+    // buffer just to measure it.
+    const bytes = Math.floor((data.length * 3) / 4) - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0);
+    if (bytes > MAX_IMAGE_BYTES) {
+      throw new Error(`${at} nặng ${(bytes / 1048576).toFixed(1)}MB, vượt giới hạn ${MAX_IMAGE_BYTES / 1048576}MB.`);
+    }
+    total += bytes;
+    if (total > MAX_IMAGES_TOTAL_BYTES) {
+      throw new Error(`Tổng dung lượng ảnh vượt ${MAX_IMAGES_TOTAL_BYTES / 1048576}MB.`);
+    }
+    out.push({ mediaType, data });
+  }
+  return out;
+}
+
 async function mainHttp() {
   const tokens = new TokenStore(log);
   if (tokens.size === 0) {
@@ -673,6 +718,46 @@ async function mainHttp() {
   const SESSION_TTL_MS = Number.isFinite(ttlFromEnv) && ttlFromEnv > 0 ? ttlFromEnv : 8 * 60 * 60 * 1000;
   const sessions = new Map(); // mcp-session-id -> { transport, token, lastSeen }
 
+  // The ONE place a session leaves the map. Hooking the deletion rather than
+  // each of its callers is what keeps a call site added later from silently
+  // skipping the tab-group teardown -- there are three today and there is no
+  // reason to think that is the final number.
+  //
+  // Best effort in every direction: the extension may be disconnected, the
+  // group may already be gone, the call may time out. None of that may break
+  // the caller, which in the reaper's case is a loop over the OTHER sessions.
+  const dropSession = (id) => {
+    const session = sessions.get(id);
+    if (!session) return;
+    sessions.delete(id);
+    // A session leaving the map is not the same as the session being over, and
+    // the panel is where the two come apart: it spawns one `claude` per TURN,
+    // so its MCP transport closes after every single message the user sends.
+    // Tearing the group down there would unstick every tab the user had
+    // attached, once per message -- which is the exact failure the stable
+    // mcpSessionId exists to prevent. The panel's own close handler deletes
+    // itself from `panels` BEFORE calling this, so a genuinely closed panel
+    // still gets its group dissolved.
+    //
+    // Caught by test/panel-protocol.test.mjs, which saw release_session_group
+    // land between two turns of one conversation.
+    if ([...panels.values()].some((p) => p.mcpSessionId === id)) {
+      log(`Session ${id} closed but its panel is still open — keeping its tab group`);
+      return;
+    }
+    try {
+      // requireNow, not require: require() waits for an extension that may
+      // never come back, and a teardown is not worth holding a promise open
+      // across a laptop lid being shut.
+      const conn = registry.requireNow(session.token);
+      Promise.resolve(conn.call("release_session_group", {}, 5000, id))
+        .then((r) => log(`Released tab group for session ${id} (${r?.ungrouped ?? 0} tab(s) ungrouped)`))
+        .catch((err) => log(`Could not release tab group for session ${id}: ${err.message}`));
+    } catch (err) {
+      log(`No extension connected to release tab group for session ${id}: ${err.message}`);
+    }
+  };
+
   // A client that disappears without closing (laptop shut, session killed) used
   // to leave its transport here forever.
   setInterval(() => {
@@ -680,7 +765,7 @@ async function mainHttp() {
     for (const [id, session] of sessions) {
       if (now - session.lastSeen <= SESSION_TTL_MS) continue;
       log(`Closing MCP session ${id}: idle for more than ${SESSION_TTL_MS}ms`);
-      sessions.delete(id);
+      dropSession(id);
       try { session.transport.close(); } catch {}
     }
   }, Math.min(5 * 60 * 1000, SESSION_TTL_MS)).unref();
@@ -832,7 +917,7 @@ async function mainHttp() {
         },
       });
       transport.onclose = () => {
-        if (transport.sessionId) sessions.delete(transport.sessionId);
+        if (transport.sessionId) dropSession(transport.sessionId);
       };
       const name = tokens.get(token);
       const server = buildMcpServer(
@@ -912,7 +997,7 @@ async function mainHttp() {
       // that is dozens of them.
       const session = sessions.get(panel.mcpSessionId);
       if (session) {
-        sessions.delete(panel.mcpSessionId);
+        dropSession(panel.mcpSessionId);
         Promise.resolve(session.transport.close()).catch(() => { /* already gone */ });
       }
       log(`[panel ${panelId.slice(0, 8)}] disconnected`);
@@ -1034,6 +1119,11 @@ async function mainHttp() {
         // Must match sessionGroupTitle() in extension/background.js character
         // for character — the panel shows the user which tab group is theirs.
         groupTitle: `Claude · ${panel.mcpSessionId.replace(/-/g, "").slice(0, 4)}`,
+        // What this bridge can accept, so a panel newer than the bridge can
+        // hide UI the bridge would silently drop. A bridge is upgraded by the
+        // installer while the extension only changes when the user reloads it
+        // in chrome://extensions, so the two versions routinely disagree.
+        features: ["images"],
       });
       if (takenOver) {
         send({
@@ -1092,9 +1182,13 @@ async function mainHttp() {
 
     if (msg.type === "prompt") {
       const text = String(msg.text || "").trim();
-      if (!text) return;
+      const images = validateImages(msg.images);
+      // An image with no words is a complete message -- "what is this?" is
+      // implied -- so emptiness is only a reason to ignore the frame when
+      // there is nothing at all in it.
+      if (!text && !images.length) return;
       if (panel.agent.busy) throw new Error("Claude đang chạy — bấm dừng trước đã.");
-      panel.agent.send(text);
+      panel.agent.send(text, images);
       return;
     }
 

@@ -16,6 +16,8 @@
     "test:tabgroups": "node test/tabgroups.test.mjs",
     "test:attachtab": "node test/attach-tab.test.mjs",
     "test:focus": "node test/focus.test.mjs",
+    "test:border": "node test/border.test.mjs",
+    "test:imgencode": "node test/panel-image-encode.test.mjs",
     "test:seceval": "node test/security-eval.test.mjs",
     "test:e2e": "node test/e2e.mjs",
     "test:http": "node test/e2e-http.mjs",
@@ -28,7 +30,7 @@
     "test:installwin": "node test/install-windows.test.mjs",
     "test:updater": "node test/updater.test.mjs",
     "test:runner": "node test/update-runner.test.mjs",
-    "test": "node test/updater.test.mjs && node test/update-runner.test.mjs && node test/panel-journal.test.mjs && node test/panel-labels.test.mjs && node test/panel-markdown.test.mjs && node test/panel-stream.test.mjs && node test/agent-session.test.mjs && node test/build.test.mjs && node test/origin.test.mjs && node test/tabgroups.test.mjs && node test/attach-tab.test.mjs && node test/focus.test.mjs && node test/security-eval.test.mjs && node test/reconnect-grace.test.mjs && node test/panel-auth.test.mjs && node test/panel-protocol.test.mjs && node test/install.test.mjs && node test/install-windows.test.mjs && node test/e2e.mjs && node test/e2e-http.mjs && node test/session-ttl.test.mjs",
+    "test": "node test/updater.test.mjs && node test/update-runner.test.mjs && node test/panel-journal.test.mjs && node test/panel-labels.test.mjs && node test/panel-markdown.test.mjs && node test/panel-stream.test.mjs && node test/agent-session.test.mjs && node test/build.test.mjs && node test/origin.test.mjs && node test/tabgroups.test.mjs && node test/attach-tab.test.mjs && node test/focus.test.mjs && node test/border.test.mjs && node test/panel-image-encode.test.mjs && node test/security-eval.test.mjs && node test/reconnect-grace.test.mjs && node test/panel-auth.test.mjs && node test/panel-protocol.test.mjs && node test/install.test.mjs && node test/install-windows.test.mjs && node test/e2e.mjs && node test/e2e-http.mjs && node test/session-ttl.test.mjs",
     "verify:sidepanel": "HEADED=1 node test/verify-sidepanel.mjs"
   },
   "devDependencies": {

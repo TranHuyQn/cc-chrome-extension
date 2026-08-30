@@ -74,6 +74,46 @@ const BORDER_LOOK = {
   ],
 };
 
+// The user's switch for the driving-tab frame. Cached rather than read per
+// paint, and the cache is a module variable initialised lazily: MV3 restarts
+// this worker at will, so a value captured at install time would be wrong for
+// the rest of the browser session. `null` means "not read yet", which is
+// distinct from `false`.
+const BORDER_PREF_KEY = "showBorder";
+let borderEnabledCache = null;
+
+async function borderEnabled() {
+  if (borderEnabledCache === null) {
+    try {
+      const stored = await chrome.storage.local.get({ [BORDER_PREF_KEY]: true });
+      borderEnabledCache = stored[BORDER_PREF_KEY] !== false;
+    } catch {
+      // Storage can reject on an invalidated context. Defaulting to ON is the
+      // safe direction: the frame's whole purpose is telling the user their tab
+      // is being driven, so a failure must not silently hide it.
+      borderEnabledCache = true;
+    }
+  }
+  return borderEnabledCache;
+}
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local" || !changes[BORDER_PREF_KEY]) return;
+  borderEnabledCache = changes[BORDER_PREF_KEY].newValue !== false;
+  // Turning it off has to take frames off the screen NOW. Without this sweep
+  // the frame stays up until its own 30s idle timer fires, which reads as the
+  // switch not working.
+  if (!borderEnabledCache) sweepBordersOffEveryTab();
+});
+
+// Best effort by construction: most tabs have no frame, and chrome:// tabs,
+// the PDF viewer and discarded tabs cannot be injected into at all. Every one
+// of those is an expected no-op, not an error worth surfacing.
+async function sweepBordersOffEveryTab() {
+  const tabs = await chrome.tabs.query({}).catch(() => []);
+  await Promise.all(tabs.map((tab) => clearBorder(tab.id).catch(() => {})));
+}
+
 // The group title is the source of truth, not an in-memory map: MV3 kills the
 // service worker at will, and re-deriving the group by querying its title
 // costs one call and cannot go stale.
@@ -93,6 +133,7 @@ function sessionGroupTitle(session) {
   }
   return `Claude · ${String(session).replace(/-/g, "").slice(0, 4)}`;
 }
+
 
 // Scoped per window on purpose. chrome.tabs.group moves a tab into the group's
 // window, so a window-wide lookup would yank tabs across windows.
@@ -455,20 +496,69 @@ async function resolveTabInGroup(params) {
   return await chrome.tabs.get(created.id);
 }
 
-// Painting is deliberately not awaited and its rejection is swallowed:
-// chrome:// pages, the PDF viewer and about:blank cannot be injected into, and
-// an indicator failure must never become a tool error.
-function paintBorder(tabId) {
-  chrome.scripting
-    .executeScript({ target: { tabId }, func: pageShowBorder, args: [BORDER_ID, BORDER_IDLE_MS, BORDER_LOOK] })
-    .catch(() => {});
+// paintBorder is fire-and-forget by design, which means a paint and a clear
+// issued microseconds apart can complete out of order -- and if the clear wins
+// the race, the frame goes back up in time to be captured. Chaining every
+// border operation for one tab through a single promise makes `await
+// clearBorder(id)` mean what it reads like: every paint asked for before it has
+// landed and been undone.
+//
+// Keyed by tab id and pruned on resolve so a long browser session does not
+// accumulate one entry per tab ever touched. Same shape as groupLocks above,
+// and for the same class of reason.
+const borderQueue = new Map();
+
+function withBorderLock(tabId, fn) {
+  const previous = borderQueue.get(tabId) || Promise.resolve();
+  // .then(fn, fn) so one rejected operation does not wedge the chain for the
+  // rest of this tab's lifetime.
+  const next = previous.then(fn, fn);
+  borderQueue.set(tabId, next);
+  next.finally(() => {
+    if (borderQueue.get(tabId) === next) borderQueue.delete(tabId);
+  });
+  return next;
 }
 
-// Awaited by take_screenshot, which must not capture the frame.
+// A tab being captured right now. take_screenshot raises this before it clears
+// the frame and lowers it after the capture, and paintBorder refuses while it
+// is up -- which is the only thing that stops a CONCURRENT tool call (Claude
+// Code issues them in parallel over http) from repainting mid-capture. A
+// counter, not a boolean: two overlapping captures of the same tab would
+// otherwise have the first one to finish re-enable painting for the second.
+const captureDepth = new Map();
+
+function beginCapture(tabId) {
+  captureDepth.set(tabId, (captureDepth.get(tabId) || 0) + 1);
+}
+
+function endCapture(tabId) {
+  const left = (captureDepth.get(tabId) || 1) - 1;
+  if (left > 0) captureDepth.set(tabId, left);
+  else captureDepth.delete(tabId);
+}
+
+// Painting is deliberately not awaited by its callers and its rejection is
+// swallowed: chrome:// pages, the PDF viewer and about:blank cannot be injected
+// into, and an indicator failure must never become a tool error.
+function paintBorder(tabId) {
+  withBorderLock(tabId, async () => {
+    if (captureDepth.has(tabId)) return;
+    if (!(await borderEnabled())) return;
+    await chrome.scripting
+      .executeScript({ target: { tabId }, func: pageShowBorder, args: [BORDER_ID, BORDER_IDLE_MS, BORDER_LOOK] })
+      .catch(() => {});
+  });
+}
+
+// Awaited by take_screenshot, which must not capture the frame. Going through
+// the same lock is what makes that await meaningful.
 async function clearBorder(tabId) {
-  await chrome.scripting
-    .executeScript({ target: { tabId }, func: pageHideBorder, args: [BORDER_ID] })
-    .catch(() => {});
+  await withBorderLock(tabId, async () => {
+    await chrome.scripting
+      .executeScript({ target: { tabId }, func: pageHideBorder, args: [BORDER_ID] })
+      .catch(() => {});
+  });
 }
 
 // Every tool reaches its tab through here, so this wrapper is the only place
@@ -1262,6 +1352,11 @@ const handlers = {
         { cause: err }
       );
     }
+    // Raised BEFORE the clear, lowered after the capture: between those two
+    // points a parallel tool call's resolveTab() must not be able to put the
+    // frame back. Serialising alone does not cover this -- that repaint is
+    // legitimately after the clear, not racing it.
+    beginCapture(tab.id);
     await clearBorder(tab.id);
     try {
       const shot = await cdp(tab.id, "Page.captureScreenshot", {
@@ -1270,6 +1365,9 @@ const handlers = {
       });
       return { mimeType: "image/png", base64: shot.data, fullPage: !!params.fullPage };
     } finally {
+      // Order matters: lower the gate first, or the repaint below is the very
+      // call it refuses.
+      endCapture(tab.id);
       paintBorder(tab.id);
     }
   },
@@ -1433,6 +1531,38 @@ const handlers = {
     assertScriptableUrl(tab);
     const groupId = await addTabToSessionGroup(tab, params.__session);
     return { ok: true, tabId: tab.id, groupId, title: tab.title, url: tab.url };
+  },
+
+  // Dissolves the calling session's tab group. Deliberately NOT registered as
+  // an MCP tool in server/index.js: like attach_tab, it exists for the bridge
+  // to call, and Claude has no tool with which to reach it.
+  //
+  // It takes no caller parameters at all -- only the __session that
+  // handleRequest injects -- so nobody can name a group to dissolve. A caller
+  // can only dissolve the group belonging to the session it is already acting
+  // as, which is the same shape attach_tab settled on after an earlier revision
+  // let the panel name a windowId and turned out to be enumerable.
+  //
+  // Ungroup, never remove. Chrome deletes a group of its own accord when the
+  // last tab in it closes, so every group still visible has real tabs in it and
+  // closing them would throw away pages the user may still need.
+  release_session_group: async (params) => {
+    const session = params.__session;
+    if (!session) throw new Error("release_session_group needs a session id");
+    let ungrouped = 0;
+    // Per window, because a session's group can exist once in each window --
+    // sessionGroupId is window-scoped for the same reason (chrome.tabs.group
+    // moves a tab into the group's window, so a browser-wide lookup would drag
+    // tabs across windows).
+    for (const win of await chrome.windows.getAll({ windowTypes: ["normal"] })) {
+      const groupId = await sessionGroupId(session, win.id);
+      if (groupId === null) continue;
+      const tabs = await chrome.tabs.query({ groupId });
+      if (!tabs.length) continue;
+      await chrome.tabs.ungroup(tabs.map((t) => t.id));
+      ungrouped += tabs.length;
+    }
+    return { ok: true, ungrouped };
   },
 
   async scroll(params) {

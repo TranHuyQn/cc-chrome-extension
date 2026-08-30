@@ -400,8 +400,14 @@ Trong lúc Claude thao tác, mép khung nhìn của tab đó ửng lên một v�
 Vệt này tự biến mất khoảng 30 giây sau khi Claude ngừng đụng vào tab, nên khi
 không thấy khung nghĩa là không có lệnh nào đang chạy trên tab đó. Khung do
 extension vẽ đè lên trang, không phải lỗi hiển thị của website, không nhận chuột
-và không lọt vào ảnh `take_screenshot`. Một số trang extension không chèn được
-(`chrome://`, trình xem PDF, tab trắng `about:blank`) sẽ không có khung.
+và không lọt vào ảnh `take_screenshot` — kể cả khi có một tool khác đang chạy
+trên đúng tab đó cùng lúc. Một số trang extension không chèn được (`chrome://`,
+trình xem PDF, tab trắng `about:blank`) sẽ không có khung.
+
+**Tắt được vệt cam** trong popup của extension — "Hiện viền cam khi Claude dùng
+tab", mặc định bật. Công tắc này dành cho lúc **bạn** tự chụp màn hình máy mình;
+`take_screenshot` của Claude không cần nó, vì lệnh đó luôn gỡ vệt cam trước khi
+chụp. Tắt xong, vệt cam biến khỏi mọi tab ngay lập tức chứ không chờ hết 30 giây.
 
 - Tab do `navigate` (không kèm `tabId`) hoặc `new_tab` mở ra sẽ **tự động vào
   nhóm của phiên đó** — không còn chiếm tab đang mở trước mặt bạn như trước
@@ -431,13 +437,31 @@ và không lọt vào ảnh `take_screenshot`. Một số trang extension không
 
 ### Hai điều cần biết trước khi dùng
 
-**Nhóm cũ không tự dọn.** Session id đổi mỗi lần bạn chạy lại `claude`, và ở
-chế độ `--http` cũng đổi sau khi phiên MCP hết hạn nhàn rỗi. Nhóm của phiên cũ
-vẫn nằm nguyên trong Chrome nhưng đã **mồ côi**: không phiên nào đang sống sở
-hữu nó nữa, nên Claude không thao tác được lên tab trong đó (bị từ chối như mọi
-tab ngoài nhóm) và `list_tabs` cũng không thấy. Extension không tự đóng chúng —
-bạn tự đóng bằng tay khi thấy nhiều nhóm cam xếp đống. Đây là hành vi đúng như
-thiết kế, không phải lỗi.
+**Nhóm cũ tự dọn, và tab bên trong vẫn còn nguyên.** Khi một phiên kết thúc —
+client ngắt kết nối, hoặc phiên nhàn rỗi quá `CC_CHROME_SESSION_TTL_MS` — bridge
+báo cho extension gỡ nhóm của phiên đó. Tab được **gỡ khỏi nhóm, không bao giờ bị
+đóng**: Chrome chỉ tự xoá một nhóm khi tab cuối cùng trong đó đóng lại, nên nhóm
+nào còn nằm trên thanh tab nghĩa là bên trong vẫn còn trang thật, và vứt chúng đi
+không phải là quyết định của extension. Thứ biến mất là cái khung nhóm màu cam;
+các trang vẫn mở, chỉ là nằm rời trên thanh tab.
+
+**Phải biết giới hạn, vì đây mới là trường hợp thường gặp.** Phiên MCP qua HTTP chỉ
+kết thúc khi có `DELETE /mcp` tường minh, hoặc sau `CC_CHROME_SESSION_TTL_MS`
+(8 tiếng) không hoạt động — và **Claude Code không gửi `DELETE` đó khi thoát**
+(đã đo: `claude -p` chạy rồi thoát mã 0, số phiên của bridge tăng lên và nằm
+nguyên đó, không có dòng teardown nào). Nên nhóm của một phiên `claude` chạy ở
+terminal **không** được gỡ lúc bạn thoát nó. Nó phải chờ hết 8 tiếng nhàn rỗi,
+tính từ request MCP cuối cùng, và cũng chỉ gỡ được nếu đúng lúc đó Chrome đang
+chạy và extension đang kết nối.
+
+Nói gọn: khung chat tự dọn sau khi dùng, phiên terminal thì không. Nhóm còn sót
+thì chuột phải vào nó rồi chọn Delete group. Giảm `CC_CHROME_SESSION_TTL_MS` sẽ
+làm đường tự động chạy sớm hơn, đổi lại là đóng hẳn phiên nhàn rỗi chứ không chỉ
+gỡ nhóm của nó.
+
+Khung chat không bị ảnh hưởng bởi nhịp spawn từng lượt: nó chạy một `claude` cho
+mỗi tin nhắn nên phiên MCP đóng sau mỗi lượt, và bridge cố ý giữ nhóm của nó lại
+cho tới khi chính khung chat được đóng.
 
 **`resize_window` tác động lên cả cửa sổ, không chỉ tab trong nhóm.** Nó tìm
 tab trong nhóm của phiên rồi đổi kích thước **cửa sổ chứa tab đó** — mà cửa sổ
@@ -473,7 +497,21 @@ lại đúng thứ một trang web hiển thị, mà panel lại là trang exten
 Tô màu cú pháp có sẵn cho `markup, css, javascript, typescript, json, bash, python, yaml,
 diff, sql`. Ngôn ngữ khác vẫn hiện thành khối code bình thường, chỉ là không có màu.
 
+**Gửi được ảnh.** Tối đa 5 ảnh mỗi tin nhắn: bấm nút 📎, dán từ clipboard (⌘V /
+Ctrl+V), hoặc kéo thả file ảnh vào khung soạn. Mỗi ảnh được thu về cạnh dài 1568px
+trước khi gửi — đó là cạnh dài nhất model thực sự đọc, gửi to hơn chỉ tốn token chứ
+không rõ thêm — và mã hoá lại theo đúng nguồn: JPEG giữ JPEG, còn lại thành PNG.
+Gửi ảnh không kèm chữ cũng hợp lệ. Nút 📎 sẽ ẩn nếu bridge của bạn cũ hơn extension
+và chưa nhận được ảnh; cập nhật bridge ngay trong panel.
+
+**Khung chat không tự cuộn xuống khi bạn đang đọc lại.** Cuộn lên xem câu trả lời
+cũ thì nó nằm yên ở đó, kể cả khi Claude đang trả lời dở. Một nút "↓ Tin mới" hiện
+ra để đưa bạn về cuối. Gửi tin nhắn thì luôn cuộn xuống.
+
 Đóng panel rồi mở lại sẽ thấy lại toàn bộ nội dung đã trao đổi. Bấm "Phiên mới" mới xoá.
+Có một ngoại lệ nên biết: panel mở lại chỉ hiện **số lượng** ảnh của tin nhắn đó
+("🖼 2 ảnh") chứ không hiện lại ảnh — nhật ký replay của panel giới hạn 512KB, một
+tấm ảnh chụp màn hình là đủ lấp đầy và đẩy văng cả hội thoại phía sau.
 
 ### Bật khung chat
 

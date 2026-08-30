@@ -9,6 +9,13 @@
 //   CC_FAKE_ARGV     path to write the received argv to, for flag assertions
 //   CC_FAKE_STDERR   text to write to stderr before exiting (\n for many lines)
 //   CC_FAKE_EXIT     exit code, for failure paths
+//   CC_FAKE_STDIN    path to write everything received on stdin to. Setting it
+//                    also makes this process WAIT for the first chunk before
+//                    replaying: the fixture is replayed synchronously and the
+//                    process exits, so without the wait the parent's write can
+//                    lose the race and the file is never written. The image
+//                    path never closes stdin (that is the point of it), so
+//                    waiting for 'end' would hang instead.
 
 import { readFileSync, writeFileSync, writeSync } from "node:fs";
 
@@ -17,8 +24,21 @@ if (process.env.CC_FAKE_ARGV) {
 }
 
 // Drain stdin so a parent that writes the prompt there never blocks on a full pipe.
+let received = "";
+let sawStdin = null;
+const firstChunk = new Promise((resolve) => { sawStdin = resolve; });
 process.stdin.resume();
-process.stdin.on("data", () => {});
+process.stdin.on("data", (chunk) => {
+  received += chunk;
+  if (process.env.CC_FAKE_STDIN) writeFileSync(process.env.CC_FAKE_STDIN, received);
+  sawStdin();
+});
+
+if (process.env.CC_FAKE_STDIN) {
+  // Bounded, so a test that never writes anything fails on its assertion
+  // rather than hanging the whole suite.
+  await Promise.race([firstChunk, new Promise((r) => setTimeout(r, 3000))]);
+}
 
 const lines = readFileSync(process.env.CC_FAKE_FIXTURE, "utf8")
   .split("\n")

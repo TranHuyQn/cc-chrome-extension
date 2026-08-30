@@ -422,6 +422,65 @@ await sleep(300);
   await sleep(200);
 }
 
+// --- images: the server advertises the capability and polices the payload ----
+//
+// These bytes are about to be spent as model input and written to a child
+// process's stdin, so "the only caller is our own panel" is not a reason to
+// skip any of it.
+{
+  // A 1x1 transparent PNG -- small enough to keep a failure message readable,
+  // real enough to be valid base64.
+  const TINY_PNG =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+  const p = openPanel();
+  await p.waitFor((f) => f.type === "hello");
+  p.send({ type: "start", sessionId: null, model: "sonnet" });
+  const readyImg = await p.waitFor((f) => f.type === "ready");
+  check("ready advertises the image capability",
+    Array.isArray(readyImg?.features) && readyImg.features.includes("images"),
+    JSON.stringify(readyImg?.features));
+
+  // waitFor finds the FIRST matching frame in this panel's whole history, so a
+  // bare "did an error arrive" would be satisfied for every case below by the
+  // first refusal. Count new frames instead.
+  const errorsSoFar = () => p.frames.filter((f) => f.type === "error").length;
+  const turnsSoFar = () => p.frames.filter((f) => f.type === "turn_start").length;
+
+  const refuses = async (name, images, expect) => {
+    const before = errorsSoFar();
+    p.send({ type: "prompt", text: "x", images });
+    const got = await p.waitFor((f) => f.type === "error" && expect.test(f.message || ""), 3000);
+    check(name, errorsSoFar() > before && !!got,
+      JSON.stringify(p.frames.filter((f) => f.type === "error").at(-1)));
+  };
+
+  await refuses("six images are refused",
+    Array.from({ length: 6 }, () => ({ mediaType: "image/png", data: TINY_PNG })), /5/);
+  await refuses("a non-image media type is refused",
+    [{ mediaType: "application/pdf", data: TINY_PNG }], /định dạng/);
+  await refuses("a payload that is not base64 is refused",
+    [{ mediaType: "image/png", data: "not base64!!" }], /base64/);
+
+  // Empty text and no images is ignored outright -- no turn, and no error
+  // either. Asserted by waiting out a window rather than by a missing frame.
+  const turnsBefore = turnsSoFar();
+  p.send({ type: "prompt", text: "   " });
+  await sleep(800);
+  check("an empty prompt with no images starts no turn",
+    turnsSoFar() === turnsBefore, `${turnsSoFar()} vs ${turnsBefore}`);
+
+  // An image with no text is a complete message -- "what is this?" is implied.
+  p.send({ type: "prompt", text: "", images: [{ mediaType: "image/png", data: TINY_PNG }] });
+  const started = await p.waitFor((f) => f.type === "turn_start", 10000);
+  check("an image with no text does start a turn",
+    !!started && turnsSoFar() > turnsBefore, JSON.stringify(started));
+  await p.waitFor((f) => f.type === "turn_end", 15000);
+
+  try { p.socket.close(); } catch { /* already closing */ }
+  await sleep(200);
+}
+
 // --- the update frames -------------------------------------------------------
 //
 // The panel is the ONLY surface that can trigger an update, and /panel is the

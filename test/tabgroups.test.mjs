@@ -50,6 +50,60 @@ check("tạo được group và gán tab vào", result.groupId >= 0 && result.ta
 check("query theo title tìm lại được group", result.foundId === result.groupId, JSON.stringify(result));
 check("title đặt được", result.foundTitle === "Claude · test", String(result.foundTitle));
 
+// A session's group must be dissolvable when the session dies -- and dissolving
+// it must not touch the tabs. Chrome deletes a group when its last tab closes,
+// so every group still on the tab strip has tabs in it; ungrouping is the only
+// non-destructive way to clear one.
+//
+// chrome.tabGroups.TAB_GROUP_ID_NONE is -1 and is not reachable from this Node
+// process, only from the service worker.
+const TAB_GROUP_ID_NONE = -1;
+const SESSION = "cccc-release-session";
+
+/* eslint-disable no-undef -- service-worker globals, evaluated there by Playwright */
+const callHandler = async (name, params) =>
+  await sw.evaluate(async ([n, p]) => {
+    try {
+      return { __ok: true, result: await handlers[n](p) };
+    } catch (e) {
+      return { __ok: false, error: e.message };
+    }
+  }, [name, params]);
+/* eslint-enable no-undef */
+
+const a = await callHandler("new_tab", { url: "about:blank", __session: SESSION });
+const b = await callHandler("new_tab", { url: "about:blank", __session: SESSION });
+check("two tabs opened in the session group", a.__ok && b.__ok, JSON.stringify([a, b]));
+
+const grouped = await sw.evaluate(async (ids) => {
+  const tabs = await Promise.all(ids.map((id) => chrome.tabs.get(id)));
+  return tabs.map((t) => t.groupId);
+}, [a.result.tabId, b.result.tabId]);
+check("both tabs really are in one group", grouped[0] > 0 && grouped[0] === grouped[1], JSON.stringify(grouped));
+
+const released = await callHandler("release_session_group", { __session: SESSION });
+check("release_session_group succeeded", released.__ok === true, JSON.stringify(released));
+check("it reports how many tabs it freed", released.result?.ungrouped === 2, JSON.stringify(released.result));
+
+const after = await sw.evaluate(async ([ids, title]) => {
+  const out = [];
+  for (const id of ids) {
+    try {
+      const t = await chrome.tabs.get(id);
+      out.push({ id, groupId: t.groupId });
+    } catch (e) {
+      out.push({ id, gone: e.message });
+    }
+  }
+  return { tabs: out, groups: (await chrome.tabGroups.query({ title })).length };
+}, [[a.result.tabId, b.result.tabId], `Claude · ${SESSION.replace(/-/g, "").slice(0, 4)}`]);
+
+check("the tabs are still open -- ungroup, never close",
+  after.tabs.every((t) => !t.gone), JSON.stringify(after.tabs));
+check("and no longer belong to any group",
+  after.tabs.every((t) => t.groupId === TAB_GROUP_ID_NONE), JSON.stringify(after.tabs));
+check("the group itself is gone from the tab strip", after.groups === 0, JSON.stringify(after));
+
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
 await context.close();
 rmSync(userDataDir, { recursive: true, force: true });
